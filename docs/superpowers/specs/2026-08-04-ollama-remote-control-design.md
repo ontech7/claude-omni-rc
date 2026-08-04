@@ -32,7 +32,7 @@ Il remote control nativo è **architetturalmente incompatibile** con questa conf
 ollama-rc/
 ├── src/
 │   ├── daemon.ts            entry: avvio, config, shutdown, ripartenza
-│   ├── config.ts            .env: token bot, allowlist, porta, cap, modello, workdirs
+│   ├── config.ts            .env: token bot, allowlist, cap, modello, workdirs (porta API locale riservata alla Fase 2)
 │   ├── sessions/
 │   │   ├── manager.ts       registry unico: headless + terminali, stato, resume
 │   │   ├── sdk-driver.ts    sessioni headless (query+resume, eventi SDK)
