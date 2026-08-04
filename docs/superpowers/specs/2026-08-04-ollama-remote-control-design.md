@@ -16,7 +16,7 @@ Il remote control nativo è **architetturalmente incompatibile** con questa conf
 
 1. **Niente infrastruttura Anthropic**: solo harness locale + Ollama.
 2. **Niente plugin Channels ufficiale**: richiede auth Anthropic, è un bridge single-session senza lista sessioni (verificato su doc ufficiali).
-3. **Driver: Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`) — **validato da spike** sul Mac dell'utente: funziona con `ANTHROPIC_BASE_URL` → Ollama per chat e tool call (Bash), con `deepseek-v4-flash:0731-cloud`, senza identità Anthropic reale. Versione testata: **0.3.221** (da congelare).
+3. **Driver: Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`) — **validato da spike** sul Mac dell'utente (04/08/2026): funziona con `ANTHROPIC_BASE_URL` → Ollama per chat, tool call (Bash) **e flusso permessi** (`canUseTool`, percorsi allow e deny), con `deepseek-v4-flash:0731-cloud`, senza identità Anthropic reale. Versione testata: **0.3.221** (da congelare).
 4. **Due classi di sessione**:
    - **headless**: possedute dal daemon, controllabili al 100% (chat, media, permessi), via SDK con `resume` per `session_id`.
    - **terminale**: sessioni interattive dell'utente lanciate in tmux; **mirror** in lettura (tail dei JSONL) + **iniezione testo** via tmux.
@@ -101,6 +101,7 @@ interface Session {
 
 - Il SDK (headless) chiede un permesso → il daemon intercetta (`canUseTool`) e inoltra al bot: messaggio con bottoni `[✓ Approva] [✗ Rifiuta]` + nome tool + input riassunto.
 - La risposta dell'utente risolve la richiesta di permesso.
+- **Validato da spike**: `{ behavior: 'allow' }` esegue la tool; `{ behavior: 'deny', message }` la blocca (`tool_result` con `is_error=true`) e il modello viene informato. Il callback scatta solo sulle decisioni "ask": le tool coperte da regole di allowlist (es. la tua `~/.claude/settings.json`) non generano notifiche. `opts` espone `displayName` (es. "Bash") ma non sempre `title` → l'UI Telegram renderizza da nome tool + input.
 - **Timeout di sicurezza** (`PERMISSION_TIMEOUT_SECONDS`, default 120) → deny.
 - Le sessioni terminale non hanno un flusso permessi separato: ereditano i permessi della propria sessione interattiva (già gestiti dal TUI locale).
 
@@ -147,7 +148,7 @@ interface Session {
 
 ## 16. Rischi aperti
 
-- **Flusso permessi via SDK (`canUseTool`) con Ollama**: non coperto dallo spike — da verificare in implementazione; eventuale ripiego su `permissionMode` più permissiva con notifica.
+- ~~Flusso permessi via SDK (`canUseTool`) con Ollama~~ — **RISOLTO**: validato da spike (04/08/2026), percorsi allow e deny con `deepseek-v4-flash:0731-cloud`. Nota operativa: con `permissionMode: 'default'` il callback copre le decisioni "ask"; per hard-deny headless esiste `dontAsk` (non usato, il design vuole l'approvazione remota).
 - **Affidabilità iniezione tmux**: l'euristica "idle" va tarata in E2E.
 - **Modello whisper da scaricare** su Ollama locale (la dimensione dipende dalla variante: large ~1.5GB+, small ~50MB).
 - **Churn API SDK** (feature in preview): congelare la versione 0.3.221 validata dallo spike.
