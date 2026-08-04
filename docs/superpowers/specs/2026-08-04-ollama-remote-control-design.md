@@ -25,6 +25,7 @@ Il remote control nativo è **architetturalmente incompatibile** con questa conf
 7. **Verifica capabilities vision** del modello via `/api/show`: mai inoltrare blocchi immagine a modelli text-only.
 8. **Concorrenza limitata** (default 2 sessioni headless attive): la quota cloud Ollama (finestra 5h + allowance settimanale) è una risorsa finita.
 9. **Runtime**: Node 22, TypeScript, eseguito con `tsx`.
+10. **Attivazione esplicita (interruttore globale)**: il remote control parte **disarmato**. L'utente lo attiva con `/rc on` dal bot Telegram o `ollama-rc on` da terminale; lo disattiva con `/rc off`. Da disattivo: nessun mirroring, nessuna iniezione, nessun relay — il bot risponde solo ai comandi di controllo (`/rc`, `/help`). Lo stato `armed` è persistito nel registry. Il daemon gira sempre (launchd), ma inerte finché non armato.
 
 ## 3. Architettura
 
@@ -49,7 +50,7 @@ Flusso dati: `Telegram ↔ bot ↔ bus ↔ sessioni (SDK / tmux) ↔ Ollama`.
 
 ## 4. Modello dati
 
-**Registry sessione** (persistito in `~/.ollama-rc/state.json`):
+**Registry sessione** (persistito in `~/.ollama-rc/state.json`, insieme allo stato `armed` dell'interruttore globale):
 
 ```ts
 type SessionKind = 'headless' | 'terminal';
@@ -83,6 +84,7 @@ interface Session {
 
 - Tail dei file `~/.claude/projects/*/*.jsonl`, parse delle righe (messaggi, tool call, risultati) → eventi `session.text` / `session.tool` per le sessioni terminale (e come fonte storica per tutte).
 - Read-only: mai scrivere nei JSONL.
+- **Gate di attivazione**: il mirroring è attivo solo quando l'interruttore globale è `armed`. Da disattivo non si leggono né espongono sessioni.
 - Ripartenza: riattacco del tail dall'ultimo offset noto (offset persistito per file).
 
 ## 7. Iniezione tmux
@@ -107,15 +109,15 @@ interface Session {
 
 ## 10. Bot Telegram
 
-- **Comandi**: `/start` (intro + pairing) · `/sessions` (lista + switcher) · `/new <testo>` (crea headless e inietta) · `/stop` · `/status` · `/attach <progetto>` · `/help`.
-- **Routing**: i messaggi testuali vanno alla sessione attiva della chat (default: ultima creata).
+- **Comandi**: `/start` (intro + pairing) · `/rc on` / `/rc off` / `/rc status` (interruttore globale) · `/sessions` (lista + switcher) · `/new <testo>` (crea headless e inietta) · `/stop` · `/status` · `/attach <progetto>` · `/help`.
+- **Routing**: i messaggi testuali vanno alla sessione attiva della chat (default: ultima creata) **solo quando l'interruttore è attivo**; da disattivo, il bot risponde esclusivamente ai comandi di controllo (`/rc`, `/help`).
 - **Pairing / security**: allowlist a un solo utente via codice di pairing; default-deny.
 - **Progresso**: milestone con `edit_message` throttlato (~1/s); parse_mode **HTML** (più tollerante di MarkdownV2 per i blocchi di codice).
 - **Client**: grammy (TypeScript-first) — scelta da confermare in implementazione.
 
 ## 11. Configurazione
 
-`.env` (o variabili ambiente): `TELEGRAM_BOT_TOKEN` · `ALLOWED_USER_IDS` · `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`) · `DEFAULT_MODEL` (default `deepseek-v4-flash:0731-cloud`) · `WHISPER_MODEL` · `MAX_HEADLESS_SESSIONS` (2) · `PERMISSION_TIMEOUT_SECONDS` (120) · `WORKSPACE_DIRS` · `STATE_DIR` (`~/.ollama-rc`).
+`.env` (o variabili ambiente): `TELEGRAM_BOT_TOKEN` · `ALLOWED_USER_IDS` · `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`) · `DEFAULT_MODEL` (default `deepseek-v4-flash:0731-cloud`) · `WHISPER_MODEL` · `MAX_HEADLESS_SESSIONS` (2) · `PERMISSION_TIMEOUT_SECONDS` (120) · `WORKSPACE_DIRS` · `STATE_DIR` (`~/.ollama-rc`) · `ARMED_ON_START` (default `false`).
 
 ## 12. Errori e casi limite
 
@@ -127,6 +129,7 @@ interface Session {
 | Rate-limit Telegram | backoff + retry |
 | Permesso senza risposta | timeout → deny |
 | Iniezione tmux non sicura (sessione occupata) | coda/avviso, mai iniezione alla cieca |
+| Remote control disattivato (`armed: false`) | nessun mirror/iniezione/relay; il bot risponde solo a `/rc` e `/help` |
 
 ## 13. Testing
 
