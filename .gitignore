@@ -1,0 +1,10 @@
+# Dependencies
+node_modules/
+
+# Secrets & local state
+.env
+.ollama-rc/
+
+# Logs
+logs/
+*.log
