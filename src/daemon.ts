@@ -7,7 +7,7 @@ import { SessionManager } from './sessions/manager.js';
 import { PermissionFlow } from './permissions.js';
 import { OllamaClient } from './ollama.js';
 import { SdkDriver } from './sessions/sdk-driver.js';
-import { JsonlMirror } from './sessions/mirror.js';
+import { TmuxWatcher } from './sessions/tmux-watcher.js';
 import { TmuxClient } from './sessions/tmux-inject.js';
 import { Inbox } from './input.js';
 import { startApi } from './api.js';
@@ -26,11 +26,11 @@ export function createDaemon(
     bus, config,
     setStatus: (id, s) => manager.setStatus(id, s),
   });
-  const ollama = new OllamaClient({ baseUrl: config.ollamaBaseUrl, transcribeModel: config.transcribeModel });
+  const ollama = new OllamaClient({ baseUrl: config.ollamaBaseUrl });
   const sdk = new SdkDriver({ bus, manager, config, permissionFlow });
   const tmux = new TmuxClient();
-  const mirror = new JsonlMirror({ bus, manager, config, tmux });
-  const inbox = new Inbox({ dir: config.inboxDir, ollama });
+  const watcher = new TmuxWatcher({ config, manager, tmux });
+  const inbox = new Inbox({ dir: config.inboxDir });
   const bot = overrides.bot ?? new TelegramBot({ config, bus, manager, permissionFlow, sdk, tmux, inbox, ollama });
 
   const reaper = setInterval(() => manager.reapIdle(), 1000);
@@ -39,12 +39,12 @@ export function createDaemon(
 
   return {
     async start() {
-      mirror.start(); // interno: gate su armed (constraint 8)
+      watcher.start(); // gated su armed
       await bot.start();
     },
     async stop() {
       clearInterval(reaper);
-      mirror.stop();
+      watcher.stop();
       await api.close();
       await bot.stop();
       manager.persist();

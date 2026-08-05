@@ -7,7 +7,6 @@ export interface Config {
   pairingCode?: string;
   ollamaBaseUrl: string;
   defaultModel: string;
-  transcribeModel: string;
   maxHeadlessSessions: number;
   permissionTimeoutSeconds: number;
   workspaceDirs: string[];
@@ -15,6 +14,7 @@ export interface Config {
   inboxDir: string;
   projectsDir: string;
   apiPort: number;
+  paneRefreshMs: number;
   armedOnStart: boolean;
   idleGraceMs: number;
   pollIntervalMs: number;
@@ -42,7 +42,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     pairingCode: env.PAIRING_CODE || undefined,
     ollamaBaseUrl: env.OLLAMA_BASE_URL ?? 'http://127.0.0.1:11434',
     defaultModel: env.DEFAULT_MODEL ?? 'deepseek-v4-flash:0731-cloud',
-    transcribeModel: env.TRANSCRIBE_MODEL ?? 'gemma4:cloud',
     maxHeadlessSessions: parseNum(env, 'MAX_HEADLESS_SESSIONS', 2),
     permissionTimeoutSeconds: parseNum(env, 'PERMISSION_TIMEOUT_SECONDS', 120),
     workspaceDirs: (env.WORKSPACE_DIRS ?? '').split(':').map(s => expandHome(s.trim())).filter(Boolean),
@@ -50,6 +49,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     inboxDir: env.INBOX_DIR ?? join(stateDir, 'inbox'),
     projectsDir: expandHome(env.PROJECTS_DIR ?? '~/.claude/projects'),
     apiPort: parseNum(env, 'API_PORT', 4123),
+    paneRefreshMs: parseNum(env, 'PANE_REFRESH_MS', 2000),
     armedOnStart: env.ARMED_ON_START === 'true',
     idleGraceMs: parseNum(env, 'IDLE_GRACE_MS', 3000),
     pollIntervalMs: parseNum(env, 'POLL_INTERVAL_MS', 500),

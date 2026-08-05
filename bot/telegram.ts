@@ -59,6 +59,37 @@ export function htmlEscape(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// Rimuove le sequenze ANSI (colori, movimento cursore) dal contenuto del pane.
+export function stripAnsi(s: string): string {
+  return s
+    .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+    .replace(/\r/g, '');
+}
+
+// Righe di `cur` dopo il prefisso comune con `prev` (diff per linee, spazi finali
+// ignorati perché il terminale riempie le righe a larghezza fissa).
+export function diffTail(prev: string, cur: string): string {
+  const a = prev.split('\n').map(l => l.replace(/\s+$/, ''));
+  const b = cur.split('\n').map(l => l.replace(/\s+$/, ''));
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  return b.slice(i).join('\n').replace(/\n+$/, '');
+}
+
+// Render minimale markdown → HTML per il testo delle sessioni headless.
+export function mdToHtml(text: string): string {
+  let out = htmlEscape(text);
+  out = out.replace(/```([\s\S]*?)```/g, (_m, c: string) => `<pre>${c}</pre>`);
+  out = out.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  out = out.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+  out = out.replace(/\*([^*]+)\*/g, '<i>$1</i>');
+  out = out.replace(/^#{1,6}\s+(.+)$/gm, '<b>$1</b>');
+  out = out.replace(/^[-*]\s+(.+)$/gm, '• $1');
+  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>');
+  return out;
+}
+
 export function permissionMessage(req: PermissionRequest): string {
   const input = htmlEscape(JSON.stringify(req.input, null, 2).slice(0, 1000));
   return `🔧 Permission requested — session <b>${htmlEscape(req.sessionId.slice(0, 8))}</b>\nTool: <code>${htmlEscape(req.toolName)}</code>\n<pre>${input}</pre>`;
@@ -116,6 +147,8 @@ export class TelegramBot {
   private chatId?: number;
   private activeSessionId?: string;
   private lastMsg = new Map<string, { messageId: number; text: string; at: number }>();
+  private paneTimer?: NodeJS.Timeout;
+  private lastPane = new Map<string, string>();
 
   constructor(private deps: BotDeps) {
     this.bot = new Bot(deps.config.telegramBotToken);
@@ -125,10 +158,10 @@ export class TelegramBot {
 
   async start(): Promise<void> {
     if (!this.deps.config.telegramBotToken) throw new Error('TELEGRAM_BOT_TOKEN missing');
-    // menu dei comandi che Telegram mostra quando l'utente digita "/"
     await this.bot.api.setMyCommands([
       { command: 'rc', description: 'Arm / disarm remote control' },
       { command: 'sessions', description: 'List and switch sessions' },
+      { command: 'view', description: 'Show the active session screen' },
       { command: 'new', description: 'Start a headless session' },
       { command: 'stop', description: 'Stop the active session' },
       { command: 'status', description: 'Active session status' },
@@ -136,8 +169,13 @@ export class TelegramBot {
       { command: 'help', description: 'Show all commands' },
     ]).catch(() => {});
     await this.bot.start({ drop_pending_updates: true });
+    this.paneTimer = setInterval(() => void this.streamActivePane(), this.deps.config.paneRefreshMs);
+    this.paneTimer.unref();
   }
-  async stop(): Promise<void> { await this.bot.stop(); }
+  async stop(): Promise<void> {
+    if (this.paneTimer) clearInterval(this.paneTimer);
+    await this.bot.stop();
+  }
 
   private send(ctx: Context, text: string): Promise<unknown> {
     return ctx.reply(text, { parse_mode: 'HTML' });
@@ -152,10 +190,10 @@ export class TelegramBot {
     const now = Date.now();
     if (last && now - last.at < 10_000) {
       const ok = await this.throttler.throttled(() =>
-        this.bot.api.editMessageText(chatId, last.messageId, last.text + '\n' + text).then(() => true).catch(() => false));
+        this.bot.api.editMessageText(chatId, last.messageId, last.text + '\n' + text, { parse_mode: 'HTML' }).then(() => true).catch(() => false));
       if (ok) { last.text += '\n' + text; last.at = now; return; }
     }
-    const msg = await this.bot.api.sendMessage(chatId, text).catch(() => undefined);
+    const msg = await this.bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' }).catch(() => undefined);
     if (msg) this.lastMsg.set(sessionId, { messageId: msg.message_id, text, at: now });
   }
 
@@ -173,9 +211,10 @@ export class TelegramBot {
   private register(): void {
     const bot = this.bot;
     bot.command('start', ctx => this.onStart(ctx));
-    bot.command('help', ctx => { if (this.authorize(ctx)) this.send(ctx, 'Commands: /rc on|off|status · /sessions · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /help'); });
+    bot.command('help', ctx => { if (this.authorize(ctx)) this.send(ctx, 'Commands: /rc on|off|status · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /help'); });
     bot.command('rc', ctx => this.onRc(ctx));
     bot.command('sessions', ctx => this.onSessions(ctx));
+    bot.command('view', ctx => this.onView(ctx));
     bot.command('new', ctx => this.onNew(ctx));
     bot.command('stop', ctx => this.onStop(ctx));
     bot.command('status', ctx => this.onStatus(ctx));
@@ -183,7 +222,6 @@ export class TelegramBot {
     bot.on('callback_query:data', ctx => this.onCallback(ctx));
     bot.on('message:text', ctx => this.onMessage(ctx));
     bot.on('message:photo', ctx => this.onPhoto(ctx));
-    bot.on('message:voice', ctx => this.onVoice(ctx));
     bot.on('message:document', ctx => this.onDocument(ctx));
   }
 
@@ -339,11 +377,7 @@ export class TelegramBot {
       void this.deps.sdk.runTurn(session.id, text); // non bloccante (vedi onNew)
     } else {
       if (!session.tmuxTarget) {
-        await this.send(ctx, 'This session is not running in tmux, so text can’t be injected into it. Restart it in tmux to continue from here:\n<code>tmux new -s claude:&lt;project&gt;</code>');
-        return;
-      }
-      if (!this.deps.manager.isIdle(session.id)) {
-        await this.send(ctx, '⏳ Session busy: wait for it to go idle before injecting.');
+        await this.send(ctx, 'This session is not running in tmux, so text can’t be injected. Start it with:\n<code>tmux new -s claude:&lt;project&gt;</code>');
         return;
       }
       await this.deps.tmux.injectText(session.tmuxTarget, text);
@@ -385,29 +419,37 @@ export class TelegramBot {
     await this.routeMessageToSession(ctx, `[Image attached: ${path}]`);
   }
 
-  private async onVoice(ctx: Context): Promise<void> {
+  private async onView(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
-    if (!ctx.message?.voice) return;
-    // pre-check: il modello di trascrizione deve dichiarare la capability audio
-    const model = this.deps.config.transcribeModel;
-    let hasAudio = false;
-    try { hasAudio = await this.deps.ollama.hasAudio(model); } catch { /* assume no audio */ }
-    if (!hasAudio) {
-      await this.send(ctx, `Voice transcription is not available: <code>${htmlEscape(model)}</code> has no audio support (whisper was removed from Ollama). Set <code>TRANSCRIBE_MODEL</code> to a local audio model such as <code>gemma4:e2b</code>.`);
+    const s = this.activeSessionId ? this.deps.manager.get(this.activeSessionId) : undefined;
+    if (!s || s.kind !== 'terminal' || !s.tmuxTarget) {
+      await this.send(ctx, 'No tmux session selected. Pick one with /sessions, or /attach &lt;project&gt;.');
       return;
     }
-    const file = await ctx.getFile();
-    if (!file.file_path) { await this.send(ctx, 'File not downloadable.'); return; }
-    const buf = await this.downloadTelegramFile(file.file_path);
-    const path = await this.deps.inbox.saveAttachment(buf, `voice-${Date.now()}.ogg`);
-    await this.send(ctx, '🎙️ Transcribing…');
     try {
-      const text = await this.deps.inbox.voiceToText(path);
-      if (!text.trim()) { await this.send(ctx, 'Empty transcription.'); return; }
-      await this.routeMessageToSession(ctx, text);
+      const pane = stripAnsi(await this.deps.tmux.capturePane(s.tmuxTarget)).trimEnd();
+      this.lastPane.set(s.tmuxTarget, pane);
+      await this.send(ctx, `<pre>${htmlEscape(pane)}</pre>`);
     } catch (e) {
-      await this.send(ctx, `❌ Transcription failed: ${htmlEscape(e instanceof Error ? e.message : String(e))}`);
+      await this.send(ctx, `❌ ${htmlEscape(e instanceof Error ? e.message : String(e))}`);
     }
+  }
+
+  // Streaming del pane tmux della sessione ATTIVA: mostra lo schermo reale
+  // (markdown reso dal terminale, UI interattiva inclusa) e inoltra solo le righe
+  // nuove rispetto all'ultima cattura. La prima cattura è la baseline (niente flood).
+  private async streamActivePane(): Promise<void> {
+    if (!this.deps.manager.isArmed()) return;
+    const s = this.activeSessionId ? this.deps.manager.get(this.activeSessionId) : undefined;
+    if (!s || s.kind !== 'terminal' || !s.tmuxTarget) return;
+    let cur: string;
+    try { cur = stripAnsi(await this.deps.tmux.capturePane(s.tmuxTarget)); } catch { return; }
+    const prev = this.lastPane.get(s.tmuxTarget);
+    this.lastPane.set(s.tmuxTarget, cur);
+    if (prev === undefined) return;
+    const lines = diffTail(prev, cur);
+    if (!lines) return;
+    await this.forwardText(s.id, lines.slice(-3500)); // sotto il limite dei 4096 di Telegram
   }
 
   private async onDocument(ctx: Context): Promise<void> {
@@ -427,7 +469,11 @@ export class TelegramBot {
     // constraint 8: da disattivo nessun relay — ogni handler del bus è gated su armed.
     bus.on('session.text', e => {
       if (!this.deps.manager.isArmed()) return;
-      if (e.role === 'assistant') void this.forwardText(e.sessionId, e.text);
+      if (e.role !== 'assistant') return;
+      if (e.sessionId !== this.activeSessionId) return; // solo la sessione selezionata
+      const s = this.deps.manager.get(e.sessionId);
+      const text = s?.kind === 'headless' ? mdToHtml(e.text) : htmlEscape(e.text);
+      void this.forwardText(e.sessionId, text);
     });
     bus.on('session.tool', e => {
       if (!this.deps.manager.isArmed()) return;

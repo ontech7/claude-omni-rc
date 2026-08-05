@@ -22,7 +22,6 @@ ENV_EXAMPLE="$REPO_DIR/.env.example"
 STATE_DIR="${STATE_DIR:-$HOME/.ollama-rc}"
 DEFAULT_OLLAMA_URL="http://127.0.0.1:11434"
 DEFAULT_MODEL_FALLBACK="deepseek-v4-flash:0731-cloud"
-TRANSCRIBE_MODEL_FALLBACK="gemma4:cloud"
 
 if [ -t 1 ]; then
   c_reset='\033[0m'; c_bold='\033[1m'; c_green='\033[32m'
@@ -101,19 +100,11 @@ check_node() {
 }
 
 check_optional_tools() {
-  # tmux is only needed for terminal-session mirroring/injection;
-  # ffmpeg only for voice-note transcription. Missing → warn, keep going.
   if ! have tmux; then
     warn "tmux is not installed. Terminal sessions (mirror + /attach) will be unavailable."
     echo "  Install it with:  brew install tmux   (or:  apt install tmux)"
   else
     ok "tmux found."
-  fi
-  if ! have ffmpeg; then
-    warn "ffmpeg is not installed. Voice-note transcription will be unavailable."
-    echo "  Install it with:  brew install ffmpeg   (or:  apt install ffmpeg)"
-  else
-    ok "ffmpeg found."
   fi
 }
 
@@ -139,25 +130,6 @@ install_deps() {
 
 prepare_env() {
   [ -f "$ENV_FILE" ] || { cp "$ENV_EXAMPLE" "$ENV_FILE" && ok "Created .env from .env.example."; }
-
-  # Migrazione: whisper è stato rimosso dal registry di Ollama (2026). Un .env
-  # esistente può ancora avere WHISPER_MODEL (es. l'invalido "whisper-large-v3") →
-  # lo converte in TRANSCRIBE_MODEL e rimuove la chiave vecchia.
-  local old_wm cur_wm
-  old_wm="$(get_env WHISPER_MODEL)"
-  if [ -n "$old_wm" ]; then
-    cur_wm="$(get_env TRANSCRIBE_MODEL)"
-    if [ -z "$cur_wm" ]; then
-      if [ "$old_wm" = "whisper-large-v3" ] || [ "$old_wm" = "whisper:large-v3" ]; then
-        set_env TRANSCRIBE_MODEL "$TRANSCRIBE_MODEL_FALLBACK"
-        warn "Migrated WHISPER_MODEL ($old_wm, removed from Ollama) → TRANSCRIBE_MODEL=$TRANSCRIBE_MODEL_FALLBACK"
-      else
-        set_env TRANSCRIBE_MODEL "$old_wm"
-        ok "Migrated WHISPER_MODEL → TRANSCRIBE_MODEL=$old_wm"
-      fi
-    fi
-    sed -i.bak -E '/^WHISPER_MODEL=/d' "$ENV_FILE" && rm -f "$ENV_FILE.bak"
-  fi
 
   local token ids pair
   token="$(get_env TELEGRAM_BOT_TOKEN)"
@@ -307,15 +279,9 @@ main() {
   check_ollama
   install_deps
   prepare_env
-  local default_model transcribe_model
+  local default_model
   default_model="$(get_env DEFAULT_MODEL)"; [ -n "$default_model" ] || default_model="$DEFAULT_MODEL_FALLBACK"
-  transcribe_model="$(get_env TRANSCRIBE_MODEL)"; [ -n "$transcribe_model" ] || transcribe_model="$TRANSCRIBE_MODEL_FALLBACK"
   ensure_model "$default_model" "used for headless sessions"
-  if [ "$transcribe_model" != "gemma4:cloud" ]; then
-    ensure_model "$transcribe_model" "used to transcribe voice notes (audio-capable)"
-  else
-    info "TRANSCRIBE_MODEL=$transcribe_model (cloud). Note: gemma4:cloud has no audio — voice notes need a local audio model (gemma4:e2b)."
-  fi
   install_service
   install_hook
   print_summary

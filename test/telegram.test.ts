@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan } from '../bot/telegram.js';
+import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, diffTail, mdToHtml } from '../bot/telegram.js';
 
 describe('parseCommand', () => {
   it('classifies control commands', () => {
@@ -49,6 +49,20 @@ describe('attachmentPlan', () => {
     expect(attachmentPlan(true, 'image')).toEqual({});
     expect(attachmentPlan(false, 'image').warning).toBeTruthy();
     expect(attachmentPlan(true, 'document')).toEqual({});
+  });
+});
+
+describe('pane/format helpers', () => {
+  it('strips ANSI escapes and carriage returns', () => {
+    expect(stripAnsi('\x1b[32mgreen\x1b[0m\r\nnext')).toBe('green\nnext');
+  });
+  it('diffs trailing lines after the common prefix', () => {
+    expect(diffTail('a\nb\nc', 'a\nb\nc\nd\ne')).toBe('d\ne');
+    expect(diffTail('a\nb', 'a\nb')).toBe('');
+  });
+  it('renders markdown to HTML', () => {
+    expect(mdToHtml('**bold** and `code`')).toBe('<b>bold</b> and <code>code</code>');
+    expect(mdToHtml('*italic*')).toBe('<i>italic</i>');
   });
 });
 

@@ -76,15 +76,11 @@ Prefer to see what's happening? [Manual install](#manual-install) below.
 |------|-----|----------|
 | **Node.js 22+** | runtime | yes |
 | **Ollama** (running) | serves the models | yes |
-| **tmux** | mirror + inject text into terminal sessions | for `/attach` only |
-| **ffmpeg** | voice-note → wav conversion for transcription | for voice only |
+| **tmux** | mirror the session screen and inject input 1:1 | for terminal sessions |
 
-Models (pulled by the installer, or `ollama pull <name>` yourself):
+Model pulled by the installer (or `ollama pull` yourself):
 
 - `deepseek-v4-flash:0731-cloud` — the default model for headless sessions
-- `gemma4:cloud` — `TRANSCRIBE_MODEL` default. **It has no audio capability**:
-  for voice notes set `TRANSCRIBE_MODEL` to a local audio model such as
-  `gemma4:e2b` (`ollama pull gemma4:e2b`). Whisper was removed from Ollama.
 
 ## Manual install
 
@@ -136,23 +132,30 @@ Run your interactive Claude Code sessions the usual way, inside tmux:
 tmux new -s claude:my-project    # then run `claude` inside
 ```
 
-The daemon discovers `claude:*` tmux sessions and mirrors them (read-only);
-with `/attach` you can also attach one explicitly.
+The daemon tracks `claude:*` tmux sessions (and any session attached via the
+`SessionStart` hook or `/attach`); with `/attach` you can also add one
+explicitly.
 
 ### How sessions get attached
 
-- **Inside tmux (fully controllable)** — start Claude Code in a tmux session
-  named `claude:<project>`: the daemon mirrors it (read-only tail of its
-  JSONL) *and* can inject your messages as text via tmux, so you can continue
-  it from Telegram exactly as if you were at the keyboard.
-- **Any active session (read-only)** — the daemon also surfaces every session
-  with recent activity in `~/.claude/projects`, even one that isn't in tmux,
-  so `/sessions` always reflects what's running. Text can't be injected into
-  a session that isn't in tmux: restart it inside `tmux new -s claude:<project>`
-  to continue it from the bot.
+Only **your tmux sessions** are tracked — nothing scans `~/.claude/projects`,
+so sessions running outside of ollama-rc (e.g. plain Claude Code) never show up.
 
-History is never replayed: when a session attaches, Telegram only sees
-activity from that point on — no flood of the past transcript.
+- **In tmux (the main case)** — start Claude Code in `tmux new -s claude:<project>`,
+  or just let the `SessionStart` hook attach the session you're in. The
+  **active** session's *screen* is mirrored to Telegram: the bot streams the
+  tmux pane, so you see the real rendered output — markdown rendered, and
+  interactive UI like multiple-choice prompts included.
+- **Interact 1:1** — a message you send is pasted into the pane and submitted
+  (Enter), so you can answer a menu by typing its option, exactly like at the
+  keyboard.
+- **Headless sessions** (`/new`) stream their assistant text directly (markdown
+  rendered to HTML) and use the remote-permission buttons.
+
+The stream follows the session you select with `/sessions` — only that one is
+shown, no mixing. Use `/view` to grab the full current screen of the active
+session. The pane starts streaming from the moment you select the session:
+history is never replayed, no flood.
 
 ### Auto-attach with a SessionStart hook
 
@@ -191,6 +194,7 @@ running, so it never blocks Claude Code from starting.
 | `/start <code>` | pair this Telegram account (first time) |
 | `/rc on` / `/rc off` / `/rc status` | global armed switch |
 | `/sessions` | list sessions, switch the active one |
+| `/view` | show the active session's current screen |
 | `/new <text>` | create a headless session and send it your prompt |
 | `/attach <project>` | attach a `claude:<project>` tmux session |
 | `/stop` | stop the active session (aborts the running turn) |
@@ -199,9 +203,8 @@ running, so it never blocks Claude Code from starting.
 
 Plain text messages go to the active session (default: the most recent one):
 headless sessions receive them as a new turn, terminal sessions receive them
-as injected text (only while idle, and only when running in tmux). Up to
-`MAX_HEADLESS_SESSIONS` headless sessions run concurrently — the Ollama Cloud
-quota is finite.
+as typed input (pasted into the pane + Enter). Up to `MAX_HEADLESS_SESSIONS`
+headless sessions run concurrently — the Ollama Cloud quota is finite.
 
 ## Remote permissions
 
@@ -223,11 +226,6 @@ An unanswered request times out after `PERMISSION_TIMEOUT_SECONDS` (default
 
 ## Media
 
-- **Voice notes** — downloaded, converted with ffmpeg, and sent to the
-  session as text via Ollama's `/api/chat` (base64 audio, `think: false`).
-  The model is `TRANSCRIBE_MODEL` (default `gemma4:cloud`, which has **no**
-  audio — set it to a local audio model such as `gemma4:e2b` to enable voice;
-  the bot warns you when the configured model can't transcribe).
 - **Files** — saved to `~/.ollama-rc/inbox/` and forwarded to the session as
   a file-path reference, which the model can read via its extra directories.
 - **Photos** — saved to the inbox the same way and forwarded as a path
@@ -247,14 +245,14 @@ ollama-rc/
 │   ├── sessions/
 │   │   ├── manager.ts       session registry + armed switch + idle reaping
 │   │   ├── sdk-driver.ts    headless sessions (Claude Agent SDK query+resume)
-│   │   ├── mirror.ts        read-only tail of ~/.claude/projects/*.jsonl
-│   │   └── tmux-inject.ts   bracketed-paste text injection into tmux panes
+│   │   ├── tmux-watcher.ts  discover `claude:*` tmux sessions (gated on armed)
+│   │   └── tmux-inject.ts   capture-pane mirror + paste-and-Enter input
 │   ├── permissions.ts       SDK canUseTool → Approve/Reject flow
 │   ├── api.ts               loopback HTTP API (SessionStart hook attach, sessions)
-│   ├── input.ts             attachments → inbox; voice → /api/chat transcription
-│   └── ollama.ts            /api/show capabilities + audio transcription
+│   ├── input.ts             attachments → inbox
+│   └── ollama.ts            /api/show capabilities
 └── bot/
-    └── telegram.ts          grammy bot: commands, keyboards, throttled edits
+    └── telegram.ts          grammy bot: commands, keyboards, pane streaming
 ```
 
 Data flow: `Telegram ↔ bot ↔ bus ↔ sessions (SDK / tmux) ↔ Ollama`.
@@ -263,13 +261,12 @@ Data flow: `Telegram ↔ bot ↔ bus ↔ sessions (SDK / tmux) ↔ Ollama`.
   Agent SDK (`query` + `resume`, `canUseTool`), version **0.3.221** (pinned —
   the SDK is in preview and changes fast). Session ids are persisted, so
   sessions survive daemon restarts.
-- **Terminal sessions** are mirrored read-only from the Claude project JSONL
-  files and injected into via tmux with bracketed paste. The mirror only
-  runs while armed; offsets are persisted per file.
+- **Terminal sessions** are discovered from tmux (`claude:*`), mirrored by
+  capturing the pane, and driven 1:1 by pasting input + Enter. Streaming only
+  runs while armed and follows the session selected in `/sessions`.
 - **State** — the `armed` switch and the session registry — lives in
   `~/.ollama-rc/state.json`.
-- **Concurrency** — at most `MAX_HEADLESS_SESSIONS` headless turns at once;
-  terminal injection only happens when the mirror reports the pane idle.
+- **Concurrency** — at most `MAX_HEADLESS_SESSIONS` headless turns at once.
 
 ## Configuration
 
@@ -283,17 +280,16 @@ token and one authorization method.
 | `PAIRING_CODE` | — | secret code authorizing the first `/start <code>` |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | where Ollama listens |
 | `DEFAULT_MODEL` | `deepseek-v4-flash:0731-cloud` | model for headless sessions |
-| `TRANSCRIBE_MODEL` | `gemma4:cloud` | model for voice transcription (needs audio capability — use `gemma4:e2b` locally) |
 | `MAX_HEADLESS_SESSIONS` | `2` | concurrent headless sessions |
 | `PERMISSION_TIMEOUT_SECONDS` | `120` | unanswered permission → deny |
 | `WORKSPACE_DIRS` | — | `:`-separated project roots for `/attach` |
 | `STATE_DIR` | `~/.ollama-rc` | where state, logs and the inbox live |
 | `INBOX_DIR` | `<STATE_DIR>/inbox` | incoming attachments |
-| `PROJECTS_DIR` | `~/.claude/projects` | JSONL mirror source |
 | `API_PORT` | `4123` | loopback port for the local API (SessionStart hook) |
+| `PANE_REFRESH_MS` | `2000` | how often the active pane is captured and streamed |
 | `ARMED_ON_START` | `false` | arm the remote control on daemon start |
 | `IDLE_GRACE_MS` | `3000` | how long a session must be quiet to count as idle |
-| `POLL_INTERVAL_MS` | `500` | mirror polling interval |
+| `POLL_INTERVAL_MS` | `500` | tmux discovery polling interval |
 
 > Note: `~/.ollama-rc/logs/daemon.log` is a plain file without automatic
 > rotation — rotation is left to the OS (`newsyslog`) or to you.
@@ -320,18 +316,19 @@ Start Ollama (the app or `ollama serve`). The daemon needs it at
 Send `/stop` — it aborts the current turn via an `AbortController` and marks
 the session stopped.
 
-**"Session busy" when sending a message.**
-The session is mid-turn. Wait for it to go idle; terminal sessions accept
-text only while idle (the daemon never injects blindly).
-
 **The bot says text "can't be injected" into a session.**
 That session isn't running inside tmux. Restart it with `tmux new -s
 claude:<project>` and it becomes continuable from Telegram.
 
-**"Voice transcription is not available: … has no audio support."**
-`TRANSCRIBE_MODEL` (default `gemma4:cloud`) isn't an audio model — whisper was
-removed from Ollama. Set `TRANSCRIBE_MODEL=gemma4:e2b`, run
-`ollama pull gemma4:e2b`, and restart the daemon.
+**A session I started outside tmux doesn't show up.**
+Only tmux sessions are tracked, by design — anything else (plain Claude Code,
+other tools) is ignored. Start the session in tmux (`tmux new -s
+claude:<project>`) or attach it with `/attach`.
+
+**The stream looks like raw text or is mixed.**
+Make sure you've selected the session you want with `/sessions` — only the
+active session's pane is streamed. Terminal output arrives as plain text (the
+terminal already rendered the markdown); headless sessions arrive rendered.
 
 **Sessions aren't auto-attaching on start.**
 Check `~/.claude/settings.json` contains the SessionStart hook (re-run

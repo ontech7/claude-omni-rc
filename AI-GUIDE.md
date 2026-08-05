@@ -20,12 +20,12 @@ cd ollama-rc
 ./install.sh
 ```
 
-The installer is interactive: it checks prerequisites (Node 22, Ollama, tmux,
-ffmpeg), runs `npm install`, guides the human through the bot token and
-authorization into `.env`, optionally pulls the Ollama models, and on macOS
-registers the launchd daemon. It never overwrites existing `.env` values. If
-you are running it non-interactively, it does the silent steps only and prints
-what still needs manual edits.
+The installer is interactive: it checks prerequisites (Node 22, Ollama, tmux),
+runs `npm install`, guides the human through the bot token and authorization
+into `.env`, optionally pulls the Ollama models, registers the launchd daemon,
+and adds the Claude Code `SessionStart` hook (auto-attach). It never overwrites
+existing `.env` values. If you are running it non-interactively, it does the
+silent steps only and prints what still needs manual edits.
 
 Manual equivalent (same result, step by step):
 
@@ -50,7 +50,7 @@ npm install
 | attach a terminal (tmux) session | from Telegram: `/attach <project>` (session must be named `claude:<project>`) |
 | stop a session / a running turn | from Telegram: `/stop` |
 | approve / reject a permission | tap `✓ Approve` / `✗ Reject` on the bot message (timeout → deny) |
-| send a voice note | the bot transcribes it via `TRANSCRIBE_MODEL` and sends the text to the session (whisper is gone from Ollama — the default `gemma4:cloud` has no audio; set `TRANSCRIBE_MODEL=gemma4:e2b` + `ollama pull gemma4:e2b` for voice) |
+| see the active session's screen | from Telegram: `/view` |
 | send a file | the bot saves it to `~/.ollama-rc/inbox/` and forwards the path |
 | check what sessions exist | from Telegram: `/sessions` or `/status` |
 | run it without launchd | `npm run dev` in the repo (foreground) |
@@ -61,16 +61,19 @@ npm install
 - `/rc on` / `/rc off` / `/rc status` — global armed switch. **While disarmed
   the bot answers only `/rc`, `/help`, `/start`**; no mirroring, no injection,
   no relay.
-- `/sessions` — list sessions and switch the active one (inline buttons).
+- `/sessions` — list sessions and switch the active one (inline buttons). Only
+  the active session's screen is streamed.
+- `/view` — send the active session's current screen (tmux pane).
 - `/new <text>` — create a headless session and send it the prompt.
 - `/attach <project>` — attach the `claude:<project>` tmux session.
 - `/stop` — abort the active session's running turn.
 - `/status` — active session status.
 - `/help` — list commands.
 
-Plain messages go to the active session. Text is never accepted by a busy
-session ("Session busy"). Terminal sessions can only receive text when they
-run inside tmux (`claude:<project>`).
+Plain messages go to the active session: headless sessions receive them as a
+new turn, terminal sessions as pasted input + Enter (so the human can answer
+interactive prompts). Terminal sessions must run inside tmux (`claude:<project>`)
+to receive text.
 
 ## Configuration & data
 
@@ -90,8 +93,7 @@ run inside tmux (`claude:<project>`).
 - `node -v` is 22+; `./install.sh` finishes with the summary screen.
 - `.env` contains `TELEGRAM_BOT_TOKEN` and one of `ALLOWED_USER_IDS` /
   `PAIRING_CODE`.
-- `ollama list` shows `deepseek-v4-flash:0731-cloud` (and `gemma4:e2b` if
-  voice transcription is configured).
+- `ollama list` shows `deepseek-v4-flash:0731-cloud`.
 - From Telegram: `/rc on` replies "🔓 Remote control ARMED"; `/new hello`
   creates a session; a permission request shows `✓ Approve / ✗ Reject`.
 

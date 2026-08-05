@@ -30,25 +30,45 @@ describe('TmuxClient', () => {
     const tmux = new TmuxClient(exec);
     await expect(tmux.listSessions()).resolves.toEqual([]);
   });
-  it('injects multiline text via named buffer with bracketed paste', async () => {
+  it('injects multiline text via bracketed paste, then presses Enter (1:1)', async () => {
     const { exec, calls } = fakeExec([
-      { call: ['set-buffer', '-b', 'BUF', '-'], input: 'line1\nline2', result: { code: 0 } },
-      { call: ['paste-buffer', '-b', 'BUF', '-t', 'claude:proj', '-p'], result: { code: 0 } },
+      { call: ['list-sessions', '-F', '#{session_id} #{session_name}'], result: { code: 0, stdout: '$0 claude:proj\n' } },
+      { call: ['load-buffer', '-b', 'BUF', '-'], input: 'line1\nline2', result: { code: 0 } },
+      { call: ['paste-buffer', '-b', 'BUF', '-t', '$0', '-p'], result: { code: 0 } },
       { call: ['delete-buffer', '-b', 'BUF'], result: { code: 0 } },
+      { call: ['send-keys', '-t', '$0', 'Enter'], result: { code: 0 } },
     ]);
     const tmux = new TmuxClient(exec);
     await tmux.injectText('claude:proj', 'line1\nline2');
-    const buf = calls[0].args[2];
-    expect(calls[0].args[0]).toBe('set-buffer');
+    const buf = calls[1].args[2];
+    expect(calls[1].args[0]).toBe('load-buffer');
     expect(buf).toMatch(/^rc-/);
-    expect(calls[1].args[2]).toBe(buf);       // stesso buffer nel paste
-    expect(calls[1].args).toContain('-p');     // bracketed paste
-    expect(calls[2].args).toContain(buf);      // cleanup
+    expect(calls[2].args[2]).toBe(buf);       // stesso buffer nel paste
+    expect(calls[2].args).toContain('-p');     // bracketed paste
+    expect(calls[3].args).toContain(buf);      // cleanup
+    expect(calls[4].args).toEqual(['send-keys', '-t', '$0', 'Enter']);
+  });
+  it('captures the pane content, resolving the session id first', async () => {
+    const { exec, calls } = fakeExec([
+      { call: ['list-sessions', '-F', '#{session_id} #{session_name}'], result: { code: 0, stdout: '$0 claude:proj\n' } },
+      { call: ['capture-pane', '-p', '-t', '$0'], result: { code: 0, stdout: 'screen\ncontent' } },
+    ]);
+    const tmux = new TmuxClient(exec);
+    await expect(tmux.capturePane('claude:proj')).resolves.toBe('screen\ncontent');
+    expect(calls[1].args).toEqual(['capture-pane', '-p', '-t', '$0']);
+  });
+  it('throws when the session is not found', async () => {
+    const { exec } = fakeExec([
+      { call: ['list-sessions', '-F', '#{session_id} #{session_name}'], result: { code: 0, stdout: '' } },
+    ]);
+    const tmux = new TmuxClient(exec);
+    await expect(tmux.capturePane('claude:gone')).rejects.toThrow('session not found');
   });
   it('throws when the target pane is gone', async () => {
     const { exec } = fakeExec([
-      { call: ['set-buffer', '-b', 'BUF', '-'], input: 'x', result: { code: 0 } },
-      { call: ['paste-buffer', '-b', 'BUF', '-t', 'gone:pane', '-p'], result: { code: 1, stderr: 'no such pane' } },
+      { call: ['list-sessions', '-F', '#{session_id} #{session_name}'], result: { code: 0, stdout: '$0 gone:pane\n' } },
+      { call: ['load-buffer', '-b', 'BUF', '-'], input: 'x', result: { code: 0 } },
+      { call: ['paste-buffer', '-b', 'BUF', '-t', '$0', '-p'], result: { code: 1, stderr: 'no such pane' } },
     ]);
     const tmux = new TmuxClient(exec);
     await expect(tmux.injectText('gone:pane', 'x')).rejects.toThrow('paste-buffer');
