@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, diffTail, mdToHtml, relativeTime } from '../bot/telegram.js';
+import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator } from '../bot/telegram.js';
+import type { ToolBurstSink } from '../bot/telegram.js';
 
 describe('parseCommand', () => {
   it('classifies control commands', () => {
@@ -65,10 +66,6 @@ describe('pane/format helpers', () => {
   it('strips ANSI escapes and carriage returns', () => {
     expect(stripAnsi('\x1b[32mgreen\x1b[0m\r\nnext')).toBe('green\nnext');
   });
-  it('diffs trailing lines after the common prefix', () => {
-    expect(diffTail('a\nb\nc', 'a\nb\nc\nd\ne')).toBe('d\ne');
-    expect(diffTail('a\nb', 'a\nb')).toBe('');
-  });
   it('renders markdown to HTML', () => {
     expect(mdToHtml('**bold** and `code`')).toBe('<b>bold</b> and <code>code</code>');
     expect(mdToHtml('*italic*')).toBe('<i>italic</i>');
@@ -91,5 +88,54 @@ describe('EditThrottler', () => {
       await p1; await p2;
       expect(fn).toHaveBeenCalledTimes(2);
     } finally { vi.useRealTimers(); }
+  });
+});
+
+describe('ToolBurstAggregator', () => {
+  function makeAgg(maxLen = 3800) {
+    const edits: { id: number; text: string }[] = [];
+    const sends: string[] = [];
+    let nextId = 1;
+    const sink: ToolBurstSink = {
+      edit: vi.fn(async (id: number, text: string) => { edits.push({ id, text }); return true; }),
+      send: vi.fn(async (text: string) => { sends.push(text); return nextId++; }),
+    };
+    const agg = new ToolBurstAggregator(sink, maxLen);
+    return { agg, sink, edits, sends };
+  }
+  it('sends on first push, edits on following pushes', async () => {
+    const { agg, sink, edits, sends } = makeAgg();
+    await agg.push('t1');
+    await agg.push('t2');
+    await agg.push('t3');
+    expect(sends).toEqual(['t1']);
+    expect(sink.send).toHaveBeenCalledTimes(1);
+    expect(edits).toEqual([
+      { id: 1, text: 't1\nt2' },
+      { id: 1, text: 't1\nt2\nt3' },
+    ]);
+  });
+  it('close() closes the burst: the next push starts a new bubble', async () => {
+    const { agg, sink } = makeAgg();
+    await agg.push('t1');
+    agg.close();
+    await agg.push('t2');
+    expect(sink.send).toHaveBeenCalledTimes(2);
+    expect(sink.edit).not.toHaveBeenCalled();
+  });
+  it('starts a new bubble when appending would exceed maxLen', async () => {
+    const { agg, sink, edits, sends } = makeAgg(5);
+    await agg.push('t1'); // send
+    await agg.push('t2'); // 't1\nt2' = 5 ≤ 5 → edit
+    await agg.push('t3'); // 't1\nt2\nt3' = 8 > 5 → send
+    expect(sends).toEqual(['t1', 't3']);
+    expect(edits).toEqual([{ id: 1, text: 't1\nt2' }]);
+  });
+  it('falls back to a new bubble when the edit fails', async () => {
+    const { agg, sink, sends } = makeAgg();
+    (sink.edit as any).mockImplementation(async () => false);
+    await agg.push('t1');
+    await agg.push('t2');
+    expect(sends).toEqual(['t1', 't2']);
   });
 });

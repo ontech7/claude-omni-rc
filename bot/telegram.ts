@@ -67,17 +67,7 @@ export function stripAnsi(s: string): string {
     .replace(/\r/g, '');
 }
 
-// Righe di `cur` dopo il prefisso comune con `prev` (diff per linee, spazi finali
-// ignorati perché il terminale riempie le righe a larghezza fissa).
-export function diffTail(prev: string, cur: string): string {
-  const a = prev.split('\n').map(l => l.replace(/\s+$/, ''));
-  const b = cur.split('\n').map(l => l.replace(/\s+$/, ''));
-  let i = 0;
-  while (i < a.length && i < b.length && a[i] === b[i]) i++;
-  return b.slice(i).join('\n').replace(/\n+$/, '');
-}
-
-// Render minimale markdown → HTML per il testo delle sessioni headless.
+// Render minimale markdown → HTML per i messaggi in chat.
 export function mdToHtml(text: string): string {
   let out = htmlEscape(text);
   out = out.replace(/```([\s\S]*?)```/g, (_m, c: string) => `<pre>${c}</pre>`);
@@ -146,6 +136,42 @@ export class EditThrottler {
   }
 }
 
+// Aggregazione delle notifiche tool in una bubble per raffica: il primo tool_use
+// crea il messaggio, i successivi lo modificano (edit) finché la raffica è aperta.
+// `close()` viene chiamato su testo/domanda/permesso/errore → la raffica successiva
+// apre una bubble nuova. Cap su maxLen: oltre il limite si apre una bubble nuova.
+export interface ToolBurstSink {
+  edit(messageId: number, text: string): Promise<boolean>;
+  send(text: string): Promise<number | undefined>;
+}
+
+export class ToolBurstAggregator {
+  private open?: { messageId: number; text: string; at: number };
+  private lastWasTool = false;
+
+  constructor(private sink: ToolBurstSink, private maxLen = 3800) {}
+
+  async push(line: string): Promise<void> {
+    const open = this.open;
+    if (this.lastWasTool && open) {
+      const next = `${open.text}\n${line}`;
+      if (next.length <= this.maxLen && await this.sink.edit(open.messageId, next)) {
+        open.text = next;
+        open.at = Date.now();
+        return;
+      }
+    }
+    const id = await this.sink.send(line);
+    if (id !== undefined) this.open = { messageId: id, text: line, at: Date.now() };
+    this.lastWasTool = true;
+  }
+
+  close(): void {
+    this.open = undefined;
+    this.lastWasTool = false;
+  }
+}
+
 // ---------- bot ----------
 
 export interface BotDeps {
@@ -164,9 +190,8 @@ export class TelegramBot {
   private throttler = new EditThrottler(1000);
   private chatId?: number;
   private activeSessionId?: string;
-  private lastMsg = new Map<string, { messageId: number; text: string; at: number }>();
-  private paneTimer?: NodeJS.Timeout;
-  private lastPane = new Map<string, string>();
+  private lastMsg = new Map<string, { messageId: number; text: string; at: number; role: 'user' | 'assistant' }>();
+  private lastNotified = new Map<string, Session['status']>();
 
   constructor(private deps: BotDeps) {
     this.bot = new Bot(deps.config.telegramBotToken);
@@ -187,11 +212,8 @@ export class TelegramBot {
       { command: 'help', description: 'Show all commands' },
     ]).catch(() => {});
     await this.bot.start({ drop_pending_updates: true });
-    this.paneTimer = setInterval(() => void this.streamActivePane(), this.deps.config.paneRefreshMs);
-    this.paneTimer.unref();
   }
   async stop(): Promise<void> {
-    if (this.paneTimer) clearInterval(this.paneTimer);
     await this.bot.stop();
   }
 
@@ -201,18 +223,20 @@ export class TelegramBot {
   private notify(text: string): void {
     if (this.chatId) void this.bot.api.sendMessage(this.chatId, text, { parse_mode: 'HTML' }).catch(() => {});
   }
-  private async forwardText(sessionId: string, text: string): Promise<void> {
+  private async forwardText(sessionId: string, text: string, role: 'user' | 'assistant'): Promise<void> {
     const chatId = this.chatId;
     if (!chatId) return;
     const last = this.lastMsg.get(sessionId);
     const now = Date.now();
-    if (last && now - last.at < 10_000) {
+    // concatena solo messaggi dello stesso ruolo (un turno con più blocchi text
+    // diventa una bubble unica; non mischia mai un echo utente con una risposta).
+    if (last && last.role === role && now - last.at < 10_000) {
       const ok = await this.throttler.throttled(() =>
         this.bot.api.editMessageText(chatId, last.messageId, last.text + '\n' + text, { parse_mode: 'HTML' }).then(() => true).catch(() => false));
       if (ok) { last.text += '\n' + text; last.at = now; return; }
     }
     const msg = await this.bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' }).catch(() => undefined);
-    if (msg) this.lastMsg.set(sessionId, { messageId: msg.message_id, text, at: now });
+    if (msg) this.lastMsg.set(sessionId, { messageId: msg.message_id, text, at: now, role });
   }
 
   private isAuthorized(ctx: Context): boolean {
@@ -454,28 +478,10 @@ export class TelegramBot {
     }
     try {
       const pane = stripAnsi(await this.deps.tmux.capturePane(s.tmuxTarget)).trimEnd();
-      this.lastPane.set(s.tmuxTarget, pane);
       await this.send(ctx, `<pre>${htmlEscape(pane)}</pre>`);
     } catch (e) {
       await this.send(ctx, `❌ ${htmlEscape(e instanceof Error ? e.message : String(e))}`);
     }
-  }
-
-  // Streaming del pane tmux della sessione ATTIVA: mostra lo schermo reale
-  // (markdown reso dal terminale, UI interattiva inclusa) e inoltra solo le righe
-  // nuove rispetto all'ultima cattura. La prima cattura è la baseline (niente flood).
-  private async streamActivePane(): Promise<void> {
-    if (!this.deps.manager.isArmed()) return;
-    const s = this.activeSessionId ? this.deps.manager.get(this.activeSessionId) : undefined;
-    if (!s || s.kind !== 'terminal' || !s.tmuxTarget) return;
-    let cur: string;
-    try { cur = stripAnsi(await this.deps.tmux.capturePane(s.tmuxTarget)); } catch { return; }
-    const prev = this.lastPane.get(s.tmuxTarget);
-    this.lastPane.set(s.tmuxTarget, cur);
-    if (prev === undefined) return;
-    const lines = diffTail(prev, cur);
-    if (!lines) return;
-    await this.forwardText(s.id, lines.slice(-3500)); // sotto il limite dei 4096 di Telegram
   }
 
   private async onDocument(ctx: Context): Promise<void> {
@@ -495,11 +501,33 @@ export class TelegramBot {
     // constraint 8: da disattivo nessun relay — ogni handler del bus è gated su armed.
     bus.on('session.text', e => {
       if (!this.deps.manager.isArmed()) return;
-      if (e.role !== 'assistant') return;
       if (e.sessionId !== this.activeSessionId) return; // solo la sessione selezionata
-      const s = this.deps.manager.get(e.sessionId);
-      const text = s?.kind === 'headless' ? mdToHtml(e.text) : htmlEscape(e.text);
-      void this.forwardText(e.sessionId, text);
+      // sia le headless che i transcript delle terminali arrivano come markdown.
+      void this.forwardText(e.sessionId, mdToHtml(e.text), e.role);
+    });
+    // Stato della sessione terminale attiva: "al lavoro" vs "in attesa di te".
+    bus.on('session.updated', ({ sessionId }) => {
+      if (!this.deps.manager.isArmed()) return;
+      if (sessionId !== this.activeSessionId) return;
+      const s = this.deps.manager.get(sessionId);
+      if (!s || s.kind !== 'terminal') return;
+      if (this.lastNotified.get(sessionId) === s.status) return;
+      this.lastNotified.set(sessionId, s.status);
+      if (s.status === 'awaiting-input') {
+        this.notify('⚠️ <b>Claude is waiting for your response.</b> Send a message to continue.');
+      } else if (s.status === 'running') {
+        this.notify('🤖 Claude is working…');
+      }
+    });
+    bus.on('session.prompt', ({ sessionId, questions }) => {
+      if (!this.deps.manager.isArmed()) return;
+      if (sessionId !== this.activeSessionId) return;
+      const blocks = questions.map(q => {
+        const title = q.header ? `${q.header}: ${q.question}` : q.question;
+        const opts = q.options.map((o, i) => `${i + 1}) ${htmlEscape(o.label)}${o.description ? ` — ${htmlEscape(o.description)}` : ''}`).join('\n');
+        return `❓ <b>${htmlEscape(title)}</b>\n${opts}`;
+      }).join('\n\n');
+      this.notify(`${blocks}\n\nReply with the option number (or its text) to answer.`);
     });
     bus.on('session.tool', e => {
       if (!this.deps.manager.isArmed()) return;
@@ -510,8 +538,8 @@ export class TelegramBot {
     bus.on('session.permission', ({ permission }) => {
       if (!this.deps.manager.isArmed()) return;
       const kb = new InlineKeyboard()
-        .text('✓ Approva', `perm:approve:${permission.id}`)
-        .text('✗ Rifiuta', `perm:deny:${permission.id}`);
+        .text('✓ Approve', `perm:approve:${permission.id}`)
+        .text('✗ Reject', `perm:deny:${permission.id}`);
       if (this.chatId) {
         void this.bot.api.sendMessage(this.chatId, permissionMessage(permission), { parse_mode: 'HTML', reply_markup: kb }).catch(() => {});
       }
