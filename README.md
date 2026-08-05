@@ -5,7 +5,7 @@
   </picture>
 </div>
 
-<p align="center"><strong>Carry your Claude Code session with you.</strong><br>
+<p align="center"><strong>Take your session with you.</strong><br>
 A local daemon plus a Telegram bot that mimics Claude Code's
 <code>/remote-control</code> — keep talking to any running session from your
 phone, approve permissions, and pick up exactly where you left off — without
