@@ -34,9 +34,10 @@ export class SessionManager {
     return { id: randomUUID(), kind, title, projectDir, status: 'idle', lastActivity: now, createdAt: now };
   }
 
-  createHeadless(input: { title: string; projectDir: string; model?: string }): Session {
+  createHeadless(input: { title: string; projectDir: string; model?: string; permissionMode?: 'auto' | 'standard' }): Session {
     const s = this.makeSession('headless', input.title, input.projectDir);
     if (input.model) s.model = input.model;
+    s.permissionMode = input.permissionMode ?? 'auto';
     this.state.sessions.push(s);
     this.emitUpdated(s.id);
     return s;

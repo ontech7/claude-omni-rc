@@ -83,4 +83,12 @@ describe('SessionManager', () => {
       expect(manager.get(s.id)!.status).toBe('running');
     } finally { vi.useRealTimers(); }
   });
+  it('defaults headless sessions to automode and stores the requested mode', () => {
+    const { manager } = makeManager();
+    const auto = manager.createHeadless({ title: 'a', projectDir: '/tmp/a' });
+    expect(auto.permissionMode).toBe('auto');
+    const std = manager.createHeadless({ title: 's', projectDir: '/tmp/s', permissionMode: 'standard' });
+    expect(std.permissionMode).toBe('standard');
+    expect(manager.get(auto.id)!.permissionMode).toBe('auto');
+  });
 });

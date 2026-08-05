@@ -45,7 +45,7 @@ npm install
 | allow only themselves | set `ALLOWED_USER_IDS` to their Telegram numeric id (@userinfobot) |
 | allow via a code instead | set `PAIRING_CODE` in `.env`; they send `/start <code>` once |
 | arm / disarm remote control | from Telegram: `/rc on` / `/rc off` (or `ARMED_ON_START=true` in `.env`) |
-| create a headless session | from Telegram: `/new <prompt>` |
+| create a headless session | from Telegram: `/new <prompt>` (automode by default; `/new --standard <prompt>` for approve/reject prompts) |
 | continue an ongoing session from the phone | make sure it runs inside tmux (`tmux new -s claude:<project>`); it auto-appears in `/sessions` and streams as a chat |
 | see what the model is writing | select the session with `/sessions`: its messages stream as a chat automatically |
 | answer a multiple-choice question | the question arrives as a `❓` message with one button per option; tap it (or reply with the option number/text) |
@@ -68,7 +68,9 @@ npm install
 - `/sessions` — list sessions and switch the active one (inline buttons). Only
   the active session's screen is streamed.
 - `/view` — send the active session's current screen (tmux pane).
-- `/new <text>` — create a headless session and send it the prompt.
+- `/new <text>` — create a headless session and send it the prompt (automode by
+  default: permissions auto-approved; `/new --standard <text>` to get the
+  approve/reject buttons).
 - `/attach <project>` — attach the `claude:<project>` tmux session.
 - `/stop` — abort the active session's running turn (sends `Ctrl+C` to a tmux
   pane, like pressing ESC).

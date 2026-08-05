@@ -25,7 +25,7 @@ function makeDriver() {
   const ollama = { modelContext: vi.fn(async () => 1048576) };
   const sdk = new SdkDriver({ bus, manager, config, permissionFlow, ollama: ollama as any });
   const session = manager.createHeadless({ title: 'test', projectDir: '/tmp/x' });
-  return { bus, events, manager, sdk, session, ollama };
+  return { bus, events, manager, sdk, session, ollama, permissionFlow };
 }
 
 function assistantText(sessionId: string, text: string) {
@@ -135,6 +135,32 @@ describe('SdkDriver', () => {
     const opts = queryMock.mock.calls[0][0].options;
     const decision = await opts.canUseTool('AskUserQuestion', { questions: [{ question: 'x', options: [{ label: 'a' }] }] }, {});
     expect(decision).toEqual({ behavior: 'allow' });
+  });
+
+  it('automode (default): canUseTool auto-allows without a permission request', async () => {
+    const { sdk, session, bus } = makeDriver();
+    const perms: unknown[] = [];
+    bus.on('session.permission', e => perms.push(e));
+    queryMock.mockImplementationOnce(async function* () { yield resultMsg(session.id, 'ok'); });
+    await sdk.runTurn(session.id, 'x');
+    const opts = queryMock.mock.calls[0][0].options;
+    const decision = await opts.canUseTool('Bash', { command: 'ls' }, {});
+    expect(decision).toEqual({ behavior: 'allow' });
+    expect(perms).toHaveLength(0); // nessuna notifica di permesso
+  });
+
+  it('standard mode: canUseTool routes to the permission flow', async () => {
+    const { sdk, bus, manager, permissionFlow } = makeDriver();
+    const std = manager.createHeadless({ title: 'std', projectDir: '/tmp/s', permissionMode: 'standard' });
+    const perms: unknown[] = [];
+    bus.on('session.permission', e => perms.push(e));
+    queryMock.mockImplementationOnce(async function* () { yield resultMsg(std.id, 'ok'); });
+    await sdk.runTurn(std.id, 'x');
+    const opts = queryMock.mock.calls[0][0].options;
+    const pending = opts.canUseTool('Bash', { command: 'ls' }, {});
+    expect(perms).toHaveLength(1); // la richiesta arriva al flusso permessi
+    permissionFlow.approve((perms[0] as any).permission.id);
+    await expect(pending).resolves.toEqual({ behavior: 'allow' });
   });
 
   it('emits session.prompt for AskUserQuestion tool_use instead of a tool bubble', async () => {

@@ -72,6 +72,8 @@ export class SdkDriver {
           canUseTool: (toolName, input, opts) => {
             // AskUserQuestion: niente permesso — la risposta è la domanda stessa.
             if (toolName === 'AskUserQuestion') return Promise.resolve({ behavior: 'allow' });
+            // automode (default per /new): accetta ogni permesso senza chiedere.
+            if ((session.permissionMode ?? 'auto') === 'auto') return Promise.resolve({ behavior: 'allow' });
             return permissionFlow.request(sessionId, toolName, input as Record<string, unknown>, opts.signal);
           },
         },

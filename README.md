@@ -164,8 +164,10 @@ Anthropic-hosted Claude Code) never show up.
 - **Interact 1:1** — a message you send is pasted into the session and
   submitted (Enter). This needs tmux: a session not in tmux streams as chat
   but is read-only.
-- **Headless sessions** (`/new`) stream their assistant text the same way and
-  use the remote-permission buttons.
+- **Headless sessions** (`/new`) stream their assistant text the same way.
+  They run in **automode by default** (every permission is auto-approved, no
+  prompts); add `--standard` to `/new` to get the remote-permission
+  approve/reject buttons instead.
 - `/view` still grabs the full current screen of the active session whenever
   you want the raw terminal.
 
@@ -217,7 +219,7 @@ in-terminal prompt, so a regular session is never blocked.
 | `/rc on` / `/rc off` / `/rc status` | global armed switch |
 | `/sessions` | list sessions, switch the active one |
 | `/view` | show the active session's current screen |
-| `/new <text>` | create a headless session and send it your prompt |
+| `/new <text>` | create a headless session and send it your prompt (automode; add `--standard` for approve/reject prompts) |
 | `/attach <project>` | attach a `claude:<project>` tmux session |
 | `/stop` | stop the active session (aborts the running turn; sends Ctrl+C to a tmux pane) |
 | `/status` | show the active session's status |

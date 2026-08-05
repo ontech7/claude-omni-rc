@@ -7,6 +7,7 @@ export interface Session {
   title: string;
   projectDir: string;
   model?: string;
+  permissionMode?: 'auto' | 'standard'; // automode default: nessun prompt di permesso
   status: SessionStatus;
   claudeSessionId?: string;
   tmuxTarget?: string;

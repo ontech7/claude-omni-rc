@@ -21,6 +21,9 @@
     terminal panes are untracked, not killed.
   - **Approve/Reject feedback** — the permission message is edited in place
     (`✅ Approved` / `❌ Rejected`, buttons removed) instead of only a toast.
+  - **Automode by default for `/new`** — headless sessions auto-approve every
+    permission (no prompts); `/new --standard <text>` restores the approve/
+    reject flow. The mode is per-session and persisted.
 - **SessionStart hook + local API** — `./install.sh` adds a Claude Code
   `SessionStart` hook (`scripts/attach.sh`) that auto-attaches every session on
   start via a loopback HTTP API (`src/api.ts`, `API_PORT`, default 4123):

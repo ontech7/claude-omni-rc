@@ -420,17 +420,31 @@ export class TelegramBot {
 
   private async onNew(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
-    const text = ctx.match?.toString().trim() ?? '';
-    if (!text) { await this.send(ctx, 'Usage: /new &lt;text&gt;'); return; }
+    const raw = ctx.match?.toString().trim() ?? '';
+    if (!raw) {
+      await this.send(ctx, 'Usage: /new &lt;text&gt; — automode di default; /new --standard &lt;text&gt; per le approvazioni manuali');
+      return;
+    }
+    // Flag in testa: --standard (approve/reject) o --auto (default).
+    let mode: 'auto' | 'standard' = 'auto';
+    let text = raw;
+    const flag = raw.match(/^--(auto|standard)(?:\s+|$)/);
+    if (flag) {
+      mode = flag[1] === 'standard' ? 'standard' : 'auto';
+      text = raw.slice(flag[0].length).trim();
+      if (!text) { await this.send(ctx, 'Usage: /new &lt;text&gt;'); return; }
+    }
     const running = this.deps.manager.list().filter(s => s.kind === 'headless' && s.status === 'running').length;
     if (running >= this.deps.config.maxHeadlessSessions) { await this.send(ctx, `Reached the limit of ${this.deps.config.maxHeadlessSessions} active headless sessions.`); return; }
     const projectDir = this.deps.config.workspaceDirs[0] ?? homedir();
     const session = this.deps.manager.createHeadless({
       title: text.slice(0, 40), projectDir, model: this.deps.config.defaultModel,
+      permissionMode: mode,
     });
     this.activeSessionId = session.id;
     this.deps.manager.persist();
-    await this.send(ctx, `🆕 Session <b>${htmlEscape(session.id.slice(0, 8))}</b> started.`);
+    const modeLabel = mode === 'standard' ? ' (standard — approvals via buttons)' : ' (automode — no approvals)';
+    await this.send(ctx, `🆕 Session <b>${htmlEscape(session.id.slice(0, 8))}</b> started${modeLabel}.`);
     // NON await: grammy processa gli update in sequenza — aspettare un turno di minuti
     // bloccherebbe /stop, /rc off e i callback. Il driver emette gli eventi sul bus.
     void this.deps.sdk.runTurn(session.id, text);
