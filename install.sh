@@ -57,8 +57,8 @@ Usage: ./install.sh [--help|--uninstall]
 Guided installer for the ollama-rc daemon + Telegram bot.
 It checks prerequisites, installs npm dependencies, helps you configure
 .env (bot token + authorization), pulls the Ollama models, registers the
-background daemon (launchd) and adds the Claude Code SessionStart hook so
-every session auto-attaches to remote control.
+background daemon (launchd) and adds the Claude Code hooks (SessionStart
+auto-attach + PermissionRequest approve/reject from Telegram).
 
 Options:
   --uninstall   remove the launchd agent, the SessionStart hook and (on
@@ -240,14 +240,15 @@ install_service() {
   esac
 }
 
-# Claude Code SessionStart hook: ogni sessione che parte si auto-aggancia al
-# remote control (analogo del /remote-control nativo). Il merge preserva tutto
-# ciò che è già in ~/.claude/settings.json ed è idempotente.
+# Claude Code hook: la sessione che parte si auto-aggancia al remote control
+# (SessionStart, analogo del /remote-control nativo) e le richieste di permesso
+# vengono delegate al daemon (permissionPromptTool → bot Telegram). Il merge
+# preserva tutto ciò che è già in ~/.claude/settings.json ed è idempotente.
 install_hook() {
   if ! have node; then return; fi
-  info "Adding the Claude Code SessionStart hook (auto-attach)…"
-  if node "$REPO_DIR/scripts/setup-hook.mjs" "$HOME/.claude/settings.json" "$REPO_DIR/scripts/attach.sh"; then
-    ok "SessionStart hook installed."
+  info "Adding the Claude Code hooks (SessionStart auto-attach + PermissionRequest approve/reject)…"
+  if node "$REPO_DIR/scripts/setup-hook.mjs" "$HOME/.claude/settings.json" "$REPO_DIR/scripts/attach.sh" "$REPO_DIR/scripts/permission-hook.sh"; then
+    ok "Claude Code hooks installed."
   else
     warn "Hook install failed — add it manually (see README → \"Auto-attach\")."
   fi
@@ -266,11 +267,12 @@ uninstall() {
     warn "No launchd agent found — nothing to remove."
   fi
 
-  # 2. SessionStart hook da ~/.claude/settings.json (preserva il resto)
+  # 2. hook (SessionStart + PermissionRequest) da ~/.claude/settings.json
+  #    (preserva il resto)
   if have node; then
-    node "$REPO_DIR/scripts/setup-hook.mjs" --remove "$HOME/.claude/settings.json" "$REPO_DIR/scripts/attach.sh"
+    node "$REPO_DIR/scripts/setup-hook.mjs" --remove "$HOME/.claude/settings.json" "$REPO_DIR/scripts/attach.sh" "$REPO_DIR/scripts/permission-hook.sh"
   else
-    warn "node not found — remove the SessionStart hook manually from ~/.claude/settings.json."
+    warn "node not found — remove the ollama-rc hooks manually from ~/.claude/settings.json."
   fi
 
   # 3. modello Ollama (solo su conferma: può essere usato anche fuori da ollama-rc)

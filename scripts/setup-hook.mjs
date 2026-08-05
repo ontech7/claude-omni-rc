@@ -1,17 +1,22 @@
 #!/usr/bin/env node
-// Adds or removes the ollama-rc SessionStart hook in a Claude Code
-// settings.json, preserving everything else. Idempotent.
+// Adds or removes the ollama-rc hooks in a Claude Code settings.json,
+// preserving everything else. Idempotent.
+//
+// It manages:
+//   - the SessionStart hook (auto-attach), a hook command entry
+//   - the PermissionRequest hook (remote approve/reject), a hook command entry
+//     that delegates CLI permission decisions to the ollama-rc daemon
 //
 // Usage:
-//   node setup-hook.mjs <settings.json> <attach-script>         # add
-//   node setup-hook.mjs --remove <settings.json> <attach-script> # remove
+//   node setup-hook.mjs <settings.json> <attach-script> <permission-hook>          # add
+//   node setup-hook.mjs --remove <settings.json> <attach-script> <permission-hook> # remove
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
 const removeMode = process.argv[2] === '--remove';
 const args = removeMode ? process.argv.slice(3) : process.argv.slice(2);
-const [settingsPath, attachScript] = args;
-if (!settingsPath || !attachScript) {
-  console.error('usage: setup-hook.mjs [--remove] <settings.json> <attach-script>');
+const [settingsPath, attachScript, permissionHook] = args;
+if (!settingsPath || !attachScript || !permissionHook) {
+  console.error('usage: setup-hook.mjs [--remove] <settings.json> <attach-script> <permission-hook>');
   process.exit(2);
 }
 if (!existsSync(settingsPath)) {
@@ -28,29 +33,53 @@ try {
   process.exit(1);
 }
 
-const groups = settings.hooks?.SessionStart ?? [];
+// Timeout generoso: l'hook di permesso resta bloccato ad attendere la
+// decisione da Telegram (fino a PERMISSION_TIMEOUT_SECONDS + margine).
+const PERMISSION_HOOK_TIMEOUT = 600;
+
+function hasCommand(groups, script) {
+  return groups.some(g => (g.hooks ?? []).some(h => h.command === script));
+}
+function filterGroups(groups, script) {
+  return groups.filter(g => !(g.hooks ?? []).some(h => h.command === script));
+}
 
 if (removeMode) {
-  const remaining = groups.filter(g => !(g.hooks ?? []).some(h => h.command === attachScript));
-  if (remaining.length === groups.length) {
-    console.log('SessionStart hook not present — nothing to remove.');
-    process.exit(0);
+  let changed = false;
+  for (const [key, script] of [['SessionStart', attachScript], ['PermissionRequest', permissionHook]]) {
+    const groups = settings.hooks?.[key] ?? [];
+    const remaining = filterGroups(groups, script);
+    if (remaining.length !== groups.length) {
+      if (remaining.length) settings.hooks[key] = remaining;
+      else delete settings.hooks[key];
+      changed = true;
+    }
   }
-  if (remaining.length) settings.hooks.SessionStart = remaining;
-  else delete settings.hooks.SessionStart;
-  if (Object.keys(settings.hooks ?? {}).length === 0) delete settings.hooks;
-  writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
-  console.log(`SessionStart hook removed from ${settingsPath}.`);
+  if (settings.hooks && Object.keys(settings.hooks).length === 0) delete settings.hooks;
+  if (changed) {
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+    console.log(`ollama-rc hooks removed from ${settingsPath}.`);
+  } else {
+    console.log('ollama-rc hooks not present — nothing to remove.');
+  }
   process.exit(0);
 }
 
 settings.hooks = settings.hooks ?? {};
-const already = groups.some(g => (g.hooks ?? []).some(h => h.command === attachScript));
-if (already) {
-  console.log(`SessionStart hook already present (${attachScript}).`);
-  process.exit(0);
+let changed = false;
+for (const [key, script] of [['SessionStart', attachScript], ['PermissionRequest', permissionHook]]) {
+  const groups = settings.hooks[key] ?? [];
+  if (hasCommand(groups, script)) {
+    console.log(`${key} hook already present (${script}).`);
+    continue;
+  }
+  groups.push({ hooks: [{ type: 'command', command: script, timeout: key === 'SessionStart' ? 10 : PERMISSION_HOOK_TIMEOUT }] });
+  settings.hooks[key] = groups;
+  changed = true;
 }
-groups.push({ hooks: [{ type: 'command', command: attachScript, timeout: 10 }] });
-settings.hooks.SessionStart = groups;
-writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
-console.log(`SessionStart hook added to ${settingsPath}.`);
+if (changed) {
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+  console.log(`ollama-rc hooks added to ${settingsPath}.`);
+} else {
+  console.log('ollama-rc hooks already present.');
+}

@@ -11,7 +11,15 @@
 # Never fails loudly: if the daemon isn't running, the hook does nothing and
 # Claude Code starts normally.
 #
+# Solo le sessioni Ollama vengono registrate: senza ANTHROPIC_BASE_URL (o con
+# quello di Anthropic) la sessione non è servita dal nostro daemon e non interessa.
+#
 set -uo pipefail
+
+case "${ANTHROPIC_BASE_URL:-}" in
+  '') exit 0 ;;
+  *anthropic.com*) exit 0 ;;
+esac
 
 PORT="${API_PORT:-4123}"
 BASE="http://127.0.0.1:${PORT}"
