@@ -12,6 +12,7 @@ import type { OllamaClient } from '../src/ollama.js';
 import type { Inbox } from '../src/input.js';
 import type { Session, PermissionRequest, PromptQuestion } from '../src/types.js';
 import type { RecentMessage } from '../src/sessions/transcript.js';
+import { readRecentMessages, resolveSessionTranscript } from '../src/sessions/transcript.js';
 
 // ---------- pure helpers ----------
 
@@ -246,6 +247,10 @@ export class TelegramBot {
   private activeSessionId?: string;
   private lastMsg = new Map<string, { messageId: number; text: string; at: number; role: 'user' | 'assistant' }>();
   private toolBursts = new Map<string, ToolBurstAggregator>();
+  // Fix 1: testi iniettati dal bot per sessione (per sopprimere l'echo del transcript).
+  private recentInjected = new Map<string, { text: string; at: number }[]>();
+  // Fix 2: domande a scelta multipla in attesa, token → domanda (per i bottoni).
+  private pendingPrompts = new Map<string, { sessionId: string; questions: PromptQuestion[]; text: string }>();
 
   constructor(private deps: BotDeps) {
     this.bot = new Bot(deps.config.telegramBotToken);
@@ -263,6 +268,8 @@ export class TelegramBot {
       { command: 'stop', description: 'Stop the active session' },
       { command: 'status', description: 'Active session status' },
       { command: 'attach', description: 'Attach a tmux terminal session' },
+      { command: 'history', description: 'Show the last messages of a session' },
+      { command: 'delete', description: 'Delete a session' },
       { command: 'help', description: 'Show all commands' },
     ]).catch(() => {});
     await this.bot.start({ drop_pending_updates: true });
@@ -333,7 +340,7 @@ export class TelegramBot {
   private register(): void {
     const bot = this.bot;
     bot.command('start', ctx => this.onStart(ctx));
-    bot.command('help', ctx => { if (this.authorize(ctx)) this.send(ctx, 'Commands: /rc on|off|status · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /help'); });
+    bot.command('help', ctx => { if (this.authorize(ctx)) this.send(ctx, 'Commands: /rc on|off|status · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /help'); });
     bot.command('rc', ctx => this.onRc(ctx));
     bot.command('sessions', ctx => this.onSessions(ctx));
     bot.command('view', ctx => this.onView(ctx));
@@ -341,6 +348,8 @@ export class TelegramBot {
     bot.command('stop', ctx => this.onStop(ctx));
     bot.command('status', ctx => this.onStatus(ctx));
     bot.command('attach', ctx => this.onAttach(ctx));
+    bot.command('history', ctx => this.onHistory(ctx));
+    bot.command('delete', ctx => this.onDelete(ctx));
     bot.on('callback_query:data', ctx => this.onCallback(ctx));
     bot.on('message:text', ctx => this.onMessage(ctx));
     bot.on('message:photo', ctx => this.onPhoto(ctx));
@@ -428,11 +437,22 @@ export class TelegramBot {
 
   private async onStop(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
-    if (this.activeSessionId) {
-      this.deps.permissionFlow.cancelAllForSession(this.activeSessionId);
-      this.deps.sdk.stop(this.activeSessionId); // abort del turno in corso
+    const s = this.activeSessionId ? this.deps.manager.get(this.activeSessionId) : undefined;
+    if (!s) { await this.send(ctx, 'No active session.'); return; }
+    if (s.kind === 'headless') {
+      this.deps.permissionFlow.cancelAllForSession(s.id);
+      this.deps.sdk.stop(s.id); // abort del turno in corso
+      await this.send(ctx, '🛑 Stop requested for the active session.');
+    } else if (s.tmuxTarget) {
+      try {
+        await this.deps.tmux.sendKeys(s.tmuxTarget, 'C-c');
+        await this.send(ctx, `🛑 Ctrl+C sent to <code>${htmlEscape(s.tmuxTarget)}</code> — generation interrupted.`);
+      } catch (e) {
+        await this.send(ctx, `❌ ${htmlEscape(e instanceof Error ? e.message : String(e))}`);
+      }
+    } else {
+      await this.send(ctx, 'This terminal session has no tmux pane to interrupt.');
     }
-    await this.send(ctx, '🛑 Stop requested for the active session.');
   }
 
   private async onStatus(ctx: Context): Promise<void> {
@@ -461,6 +481,51 @@ export class TelegramBot {
       if (existsSync(candidate)) return candidate;
     }
     return undefined;
+  }
+
+  private async onHistory(ctx: Context): Promise<void> {
+    if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
+    const id = ctx.match?.toString().trim() || this.activeSessionId;
+    if (!id) { await this.send(ctx, 'No active session. Select one with /sessions.'); return; }
+    const hist = await this.readHistory(id);
+    if (!hist) { await this.send(ctx, 'No transcript available for this session yet.'); return; }
+    await this.send(ctx, hist);
+  }
+
+  // Fix 5: gli ultimi ~10 messaggi del transcript della sessione, come chat.
+  private async readHistory(sessionId: string): Promise<string | undefined> {
+    const s = this.deps.manager.get(sessionId);
+    if (!s) return undefined;
+    const file = s.transcriptFile
+      ?? resolveSessionTranscript(this.deps.config.projectsDir, s.projectDir, s.kind === 'headless' ? s.claudeSessionId : undefined);
+    if (!file) return undefined;
+    const msgs = readRecentMessages(file, 10);
+    if (!msgs.length) return undefined;
+    return renderHistory(msgs, s.title || s.id.slice(0, 8));
+  }
+
+  private async onDelete(ctx: Context): Promise<void> {
+    if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
+    const id = ctx.match?.toString().trim() || this.activeSessionId;
+    if (!id) { await this.send(ctx, 'Usage: /delete [session id]'); return; }
+    const s = this.deps.manager.get(id);
+    if (!s) { await this.send(ctx, 'Session not found.'); return; }
+    const kb = new InlineKeyboard()
+      .text('✓ Yes, delete', `sess:del-yes:${s.id}`)
+      .text('✗ No', `sess:del-no:${s.id}`);
+    await ctx.reply(`Delete session <b>${htmlEscape(s.title) || htmlEscape(s.id.slice(0, 8))}</b> [${s.kind}]?`, {
+      parse_mode: 'HTML', reply_markup: kb,
+    });
+  }
+
+  // Fix 6: ferma il turno headless e rimuove la sessione dal registro.
+  // Per le terminali il pane tmux continua a girare: si perde solo il tracking.
+  private deleteSession(id: string): boolean {
+    this.deps.permissionFlow.cancelAllForSession(id);
+    this.deps.sdk.stop(id); // abort del turno headless in corso
+    const ok = this.deps.manager.remove(id);
+    if (ok) this.deps.manager.persist();
+    return ok;
   }
 
   private async onCallback(ctx: Context): Promise<void> {
@@ -503,7 +568,20 @@ export class TelegramBot {
         return;
       }
       await this.deps.tmux.injectText(session.tmuxTarget, text);
+      this.recordInjected(session.id, text);
     }
+  }
+
+  // Fix 1: registra i testi iniettati dal bot (per sopprimere l'echo del transcript).
+  private recordInjected(sessionId: string, text: string): void {
+    const list = this.recentInjected.get(sessionId) ?? [];
+    list.push({ text, at: Date.now() });
+    if (list.length > 5) list.shift();
+    this.recentInjected.set(sessionId, list);
+  }
+
+  private isInjectedEcho(sessionId: string, text: string): boolean {
+    return matchesInjected(this.recentInjected.get(sessionId) ?? [], text, Date.now());
   }
 
   private async onMessage(ctx: Context): Promise<void> {
@@ -512,8 +590,10 @@ export class TelegramBot {
     // grammy 1.45: `text` è `text?: string` anche su message:text — la guardia non lo
     // restringe; `?? ''` è sicuro perché il filtro message:text scatta solo su testi.
     const text = ctx.message.text ?? '';
-    if (text.startsWith('/')) return; // gestiti dai comandi
     if (!this.deps.manager.isArmed()) { await this.send(ctx, '🔒 Remote control is off. Send /rc on.'); return; }
+    // I comandi del bot sono già gestiti da grammy (bot.command). Quelli che
+    // arrivano qui (slash command di Claude: /clear, /compact, /exit,
+    // /frontend-release, …) vengono inoltrati alla sessione attiva, slash incluso.
     await this.routeMessageToSession(ctx, text);
   }
 
