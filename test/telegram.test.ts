@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator } from '../bot/telegram.js';
+import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, matchesInjected, renderHistory } from '../bot/telegram.js';
 import type { ToolBurstSink } from '../bot/telegram.js';
 
 describe('parseCommand', () => {
@@ -25,6 +25,46 @@ describe('parseCallbackData', () => {
   });
   it('throws on malformed data', () => {
     expect(() => parseCallbackData('junk')).toThrow();
+  });
+});
+
+describe('parseCallbackData extensions', () => {
+  it('parses question answer callbacks', () => {
+    expect(parseCallbackData('q:answer:tok1:0:2')).toEqual({ action: 'answer', id: 'tok1', questionIndex: 0, index: 2 });
+  });
+  it('parses delete callbacks', () => {
+    expect(parseCallbackData('sess:del:abc')).toEqual({ action: 'del', id: 'abc' });
+    expect(parseCallbackData('sess:del-yes:abc')).toEqual({ action: 'del-yes', id: 'abc' });
+    expect(parseCallbackData('sess:del-no:abc')).toEqual({ action: 'del-no', id: 'abc' });
+  });
+});
+
+describe('promptMessage', () => {
+  it('renders the header with HTML escaping', () => {
+    const qs = [{ header: 'Lens', question: 'Pick <one>?', options: [{ label: 'a' }] }];
+    const out = promptMessage(qs);
+    expect(out).toContain('Lens');
+    expect(out).toContain('Pick &lt;one&gt;?');
+  });
+});
+
+describe('matchesInjected', () => {
+  it('matches recent injected text and ignores old or different text', () => {
+    const now = 1_000_000;
+    const recent = [{ text: 'ciao', at: now - 1_000 }, { text: 'vecchio', at: now - 61_000 }];
+    expect(matchesInjected(recent, 'ciao', now)).toBe(true);
+    expect(matchesInjected(recent, '  ciao  ', now)).toBe(true); // trim
+    expect(matchesInjected(recent, 'vecchio', now)).toBe(false);  // fuori finestra
+    expect(matchesInjected(recent, 'altro', now)).toBe(false);
+  });
+});
+
+describe('renderHistory', () => {
+  it('renders messages with role icons and markdown', () => {
+    const html = renderHistory([{ role: 'user', text: 'ciao' }, { role: 'assistant', text: '**ok**' }], 'proj');
+    expect(html).toContain('🧑 ciao');
+    expect(html).toContain('<b>ok</b>');
+    expect(html).toContain('proj');
   });
 });
 

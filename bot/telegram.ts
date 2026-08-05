@@ -10,7 +10,8 @@ import type { SdkDriver } from '../src/sessions/sdk-driver.js';
 import type { TmuxClient } from '../src/sessions/tmux-inject.js';
 import type { OllamaClient } from '../src/ollama.js';
 import type { Inbox } from '../src/input.js';
-import type { Session, PermissionRequest } from '../src/types.js';
+import type { Session, PermissionRequest, PromptQuestion } from '../src/types.js';
+import type { RecentMessage } from '../src/sessions/transcript.js';
 
 // ---------- pure helpers ----------
 
@@ -42,12 +43,27 @@ export function parseCommand(text: string): ParsedCommand {
   return { kind: 'unknown' };
 }
 
-export function parseCallbackData(data: string): { action: 'approve' | 'deny' | 'select'; id: string } {
+export interface CallbackData {
+  action: 'approve' | 'deny' | 'select' | 'answer' | 'del' | 'del-yes' | 'del-no';
+  id: string;
+  index?: number;        // per 'answer': indice opzione
+  questionIndex?: number; // per 'answer': indice domanda
+}
+
+export function parseCallbackData(data: string): CallbackData {
   const parts = data.split(':');
   if (parts.length === 3) {
     const [ns, action, id] = parts;
     if (ns === 'perm' && (action === 'approve' || action === 'deny') && id) return { action, id };
     if (ns === 'sess' && action === 'select' && id) return { action: 'select', id };
+    if (ns === 'sess' && action === 'del' && id) return { action: 'del', id };
+    if (ns === 'sess' && (action === 'del-yes' || action === 'del-no') && id) return { action, id };
+  }
+  if (parts.length === 5) {
+    const [ns, action, token, q, o] = parts;
+    if (ns === 'q' && action === 'answer' && token && /^\d+$/.test(q) && /^\d+$/.test(o)) {
+      return { action: 'answer', id: token, questionIndex: Number(q), index: Number(o) };
+    }
   }
   throw new Error(`bad callback data: ${data}`);
 }
@@ -83,6 +99,29 @@ export function mdToHtml(text: string): string {
 export function permissionMessage(req: PermissionRequest): string {
   const input = htmlEscape(JSON.stringify(req.input, null, 2).slice(0, 1000));
   return `🔧 Permission requested — session <b>${htmlEscape(req.sessionId.slice(0, 8))}</b>\nTool: <code>${htmlEscape(req.toolName)}</code>\n<pre>${input}</pre>`;
+}
+
+// Intestazione della domanda a scelta multipla (le opzioni diventano bottoni).
+export function promptMessage(questions: PromptQuestion[]): string {
+  return questions
+    .map(q => {
+      const title = q.header ? `${q.header}: ${q.question}` : q.question;
+      return `❓ <b>${htmlEscape(title)}</b>`;
+    })
+    .join('\n\n');
+}
+
+// Matcher per il Fix 1: sopprime l'echo di un testo che il bot ha appena
+// iniettato nel pane (l'utente lo vede già). Confronto trim, finestra 60s.
+export function matchesInjected(recent: { text: string; at: number }[], text: string, now: number, windowMs = 60_000): boolean {
+  const t = text.trim();
+  return recent.some(item => now - item.at <= windowMs && item.text.trim() === t);
+}
+
+// Blocco di storia per il Fix 5: gli ultimi messaggi renderizzati come chat.
+export function renderHistory(messages: RecentMessage[], title: string, maxChars = 3000): string {
+  const body = messages.map(m => `${m.role === 'user' ? '🧑' : '🤖'} ${mdToHtml(m.text)}`).join('\n\n');
+  return `<b>Last messages · ${htmlEscape(title)}</b>\n\n${body.slice(0, maxChars)}`;
 }
 
 export function relativeTime(iso: string): string {
