@@ -2,12 +2,25 @@
 
 ## [Unreleased]
 
+- **SessionStart hook + local API** — `./install.sh` now adds a Claude Code
+  `SessionStart` hook (`scripts/attach.sh`) that auto-attaches every session
+  on start via a new loopback HTTP API (`src/api.ts`, `API_PORT`, default
+  4123): project dir from cwd, tmux target auto-detected. The closest
+  equivalent to Claude Code's native `/remote-control`. Idempotent; silent
+  when the daemon is down.
 - **Session discovery** — the daemon now surfaces *every* session with recent
   activity in `~/.claude/projects`, not only tmux `claude:*` ones, so
   `/sessions` always reflects what's running. tmux `claude:*` sessions stay
   fully controllable (mirror + inject); other sessions are read-only mirrors.
   Pre-existing history is consumed silently on attach — no replay flood on the
   bot, only activity from that point on.
+- **Voice transcription reworked** — whisper was removed from the Ollama
+  registry, so transcription now goes through `/api/chat` with base64 audio
+  and `think: false`. The config key is now `TRANSCRIBE_MODEL` (default
+  `gemma4:cloud` — no audio capability; set it to a local model like
+  `gemma4:e2b` for voice). The bot pre-checks the model's audio capability
+  and explains what to set. `install.sh` migrates a stale `WHISPER_MODEL`
+  in an existing `.env`.
 - **Bot in English** — all user-facing bot messages are now English (the bot
   was previously Italian).
 - **Command menu** — the bot registers `/rc`, `/sessions`, `/new`, `/stop`,

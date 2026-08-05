@@ -388,6 +388,14 @@ export class TelegramBot {
   private async onVoice(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
     if (!ctx.message?.voice) return;
+    // pre-check: il modello di trascrizione deve dichiarare la capability audio
+    const model = this.deps.config.transcribeModel;
+    let hasAudio = false;
+    try { hasAudio = await this.deps.ollama.hasAudio(model); } catch { /* assume no audio */ }
+    if (!hasAudio) {
+      await this.send(ctx, `Voice transcription is not available: <code>${htmlEscape(model)}</code> has no audio support (whisper was removed from Ollama). Set <code>TRANSCRIBE_MODEL</code> to a local audio model such as <code>gemma4:e2b</code>.`);
+      return;
+    }
     const file = await ctx.getFile();
     if (!file.file_path) { await this.send(ctx, 'File not downloadable.'); return; }
     const buf = await this.downloadTelegramFile(file.file_path);

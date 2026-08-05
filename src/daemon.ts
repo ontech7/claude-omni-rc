@@ -10,6 +10,7 @@ import { SdkDriver } from './sessions/sdk-driver.js';
 import { JsonlMirror } from './sessions/mirror.js';
 import { TmuxClient } from './sessions/tmux-inject.js';
 import { Inbox } from './input.js';
+import { startApi } from './api.js';
 import { TelegramBot } from '../bot/telegram.js';
 
 export interface Daemon { start(): Promise<void>; stop(): Promise<void>; }
@@ -25,7 +26,7 @@ export function createDaemon(
     bus, config,
     setStatus: (id, s) => manager.setStatus(id, s),
   });
-  const ollama = new OllamaClient({ baseUrl: config.ollamaBaseUrl, whisperModel: config.whisperModel });
+  const ollama = new OllamaClient({ baseUrl: config.ollamaBaseUrl, transcribeModel: config.transcribeModel });
   const sdk = new SdkDriver({ bus, manager, config, permissionFlow });
   const tmux = new TmuxClient();
   const mirror = new JsonlMirror({ bus, manager, config, tmux });
@@ -34,6 +35,7 @@ export function createDaemon(
 
   const reaper = setInterval(() => manager.reapIdle(), 1000);
   reaper.unref();
+  const api = startApi(config.apiPort, { manager });
 
   return {
     async start() {
@@ -43,6 +45,7 @@ export function createDaemon(
     async stop() {
       clearInterval(reaper);
       mirror.stop();
+      await api.close();
       await bot.stop();
       manager.persist();
     },

@@ -46,10 +46,11 @@ npm install
 | arm / disarm remote control | from Telegram: `/rc on` / `/rc off` (or `ARMED_ON_START=true` in `.env`) |
 | create a headless session | from Telegram: `/new <prompt>` |
 | continue an ongoing session from the phone | make sure it runs inside tmux (`tmux new -s claude:<project>`); it then auto-appears in `/sessions` and accepts injected text |
+| auto-attach every session on start | `./install.sh` already adds the `SessionStart` hook (calls `scripts/attach.sh`); verify it in `~/.claude/settings.json` |
 | attach a terminal (tmux) session | from Telegram: `/attach <project>` (session must be named `claude:<project>`) |
 | stop a session / a running turn | from Telegram: `/stop` |
 | approve / reject a permission | tap `✓ Approve` / `✗ Reject` on the bot message (timeout → deny) |
-| send a voice note | the bot transcribes it (whisper) and sends the text to the session |
+| send a voice note | the bot transcribes it via `TRANSCRIBE_MODEL` and sends the text to the session (whisper is gone from Ollama — the default `gemma4:cloud` has no audio; set `TRANSCRIBE_MODEL=gemma4:e2b` + `ollama pull gemma4:e2b` for voice) |
 | send a file | the bot saves it to `~/.ollama-rc/inbox/` and forwards the path |
 | check what sessions exist | from Telegram: `/sessions` or `/status` |
 | run it without launchd | `npm run dev` in the repo (foreground) |
@@ -89,7 +90,8 @@ run inside tmux (`claude:<project>`).
 - `node -v` is 22+; `./install.sh` finishes with the summary screen.
 - `.env` contains `TELEGRAM_BOT_TOKEN` and one of `ALLOWED_USER_IDS` /
   `PAIRING_CODE`.
-- `ollama list` shows `deepseek-v4-flash:0731-cloud` and `whisper:large-v3`.
+- `ollama list` shows `deepseek-v4-flash:0731-cloud` (and `gemma4:e2b` if
+  voice transcription is configured).
 - From Telegram: `/rc on` replies "🔓 Remote control ARMED"; `/new hello`
   creates a session; a permission request shows `✓ Approve / ✗ Reject`.
 

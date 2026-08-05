@@ -82,8 +82,9 @@ Prefer to see what's happening? [Manual install](#manual-install) below.
 Models (pulled by the installer, or `ollama pull <name>` yourself):
 
 - `deepseek-v4-flash:0731-cloud` — the default model for headless sessions
-- `whisper:large-v3` — transcribes voice notes (a lighter, faster option is
-  `whisper:large-v3-turbo` — lower latency, slightly less accurate)
+- `gemma4:cloud` — `TRANSCRIBE_MODEL` default. **It has no audio capability**:
+  for voice notes set `TRANSCRIBE_MODEL` to a local audio model such as
+  `gemma4:e2b` (`ollama pull gemma4:e2b`). Whisper was removed from Ollama.
 
 ## Manual install
 
@@ -153,6 +154,38 @@ with `/attach` you can also attach one explicitly.
 History is never replayed: when a session attaches, Telegram only sees
 activity from that point on — no flood of the past transcript.
 
+### Auto-attach with a SessionStart hook
+
+`./install.sh` also adds a Claude Code **`SessionStart` hook** that registers
+every session with the daemon the moment it starts — the closest equivalent to
+Claude Code's native `/remote-control`. The hook:
+
+1. reads the project dir from the working directory,
+2. if you're inside tmux, records the tmux session as the injection target
+   (any tmux session works, not just `claude:*`),
+3. tells the daemon on `127.0.0.1:${API_PORT}` to attach it.
+
+So the session you're running right now can be continued from Telegram even
+if it wasn't started with the `claude:` naming convention. To add it
+manually, merge into `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/abs/path/to/ollama-rc/scripts/attach.sh", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The hook is idempotent and silently does nothing when the daemon isn't
+running, so it never blocks Claude Code from starting.
+
 | Command | What it does |
 |---------|--------------|
 | `/start <code>` | pair this Telegram account (first time) |
@@ -190,8 +223,11 @@ An unanswered request times out after `PERMISSION_TIMEOUT_SECONDS` (default
 
 ## Media
 
-- **Voice notes** — downloaded, converted with ffmpeg, transcribed with the
-  Ollama whisper model, and sent to the session as text.
+- **Voice notes** — downloaded, converted with ffmpeg, and sent to the
+  session as text via Ollama's `/api/chat` (base64 audio, `think: false`).
+  The model is `TRANSCRIBE_MODEL` (default `gemma4:cloud`, which has **no**
+  audio — set it to a local audio model such as `gemma4:e2b` to enable voice;
+  the bot warns you when the configured model can't transcribe).
 - **Files** — saved to `~/.ollama-rc/inbox/` and forwarded to the session as
   a file-path reference, which the model can read via its extra directories.
 - **Photos** — saved to the inbox the same way and forwarded as a path
@@ -214,8 +250,9 @@ ollama-rc/
 │   │   ├── mirror.ts        read-only tail of ~/.claude/projects/*.jsonl
 │   │   └── tmux-inject.ts   bracketed-paste text injection into tmux panes
 │   ├── permissions.ts       SDK canUseTool → Approve/Reject flow
-│   ├── input.ts             attachments → inbox; voice → whisper transcription
-│   └── ollama.ts            /api/show capabilities + whisper transcription
+│   ├── api.ts               loopback HTTP API (SessionStart hook attach, sessions)
+│   ├── input.ts             attachments → inbox; voice → /api/chat transcription
+│   └── ollama.ts            /api/show capabilities + audio transcription
 └── bot/
     └── telegram.ts          grammy bot: commands, keyboards, throttled edits
 ```
@@ -246,13 +283,14 @@ token and one authorization method.
 | `PAIRING_CODE` | — | secret code authorizing the first `/start <code>` |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | where Ollama listens |
 | `DEFAULT_MODEL` | `deepseek-v4-flash:0731-cloud` | model for headless sessions |
-| `WHISPER_MODEL` | `whisper:large-v3` | model for voice transcription |
+| `TRANSCRIBE_MODEL` | `gemma4:cloud` | model for voice transcription (needs audio capability — use `gemma4:e2b` locally) |
 | `MAX_HEADLESS_SESSIONS` | `2` | concurrent headless sessions |
 | `PERMISSION_TIMEOUT_SECONDS` | `120` | unanswered permission → deny |
 | `WORKSPACE_DIRS` | — | `:`-separated project roots for `/attach` |
 | `STATE_DIR` | `~/.ollama-rc` | where state, logs and the inbox live |
 | `INBOX_DIR` | `<STATE_DIR>/inbox` | incoming attachments |
 | `PROJECTS_DIR` | `~/.claude/projects` | JSONL mirror source |
+| `API_PORT` | `4123` | loopback port for the local API (SessionStart hook) |
 | `ARMED_ON_START` | `false` | arm the remote control on daemon start |
 | `IDLE_GRACE_MS` | `3000` | how long a session must be quiet to count as idle |
 | `POLL_INTERVAL_MS` | `500` | mirror polling interval |
@@ -289,6 +327,16 @@ text only while idle (the daemon never injects blindly).
 **The bot says text "can't be injected" into a session.**
 That session isn't running inside tmux. Restart it with `tmux new -s
 claude:<project>` and it becomes continuable from Telegram.
+
+**"Voice transcription is not available: … has no audio support."**
+`TRANSCRIBE_MODEL` (default `gemma4:cloud`) isn't an audio model — whisper was
+removed from Ollama. Set `TRANSCRIBE_MODEL=gemma4:e2b`, run
+`ollama pull gemma4:e2b`, and restart the daemon.
+
+**Sessions aren't auto-attaching on start.**
+Check `~/.claude/settings.json` contains the SessionStart hook (re-run
+`./install.sh` to add it), the daemon is running, and `API_PORT` isn't taken
+by something else.
 
 **Where is my data stored?**
 State (`armed`, sessions) in `~/.ollama-rc/state.json`, attachments in

@@ -1,13 +1,13 @@
 import { readFile } from 'node:fs/promises';
-import { basename } from 'node:path';
 
 export interface OllamaDeps {
   baseUrl: string;
-  whisperModel: string;
+  transcribeModel: string;
   fetchImpl?: typeof fetch;
 }
 
 interface ShowResponse { capabilities?: string[]; }
+interface ChatResponse { message?: { content?: Array<{ type?: string; text?: string }> } }
 
 export class OllamaClient {
   private fetchImpl: typeof fetch;
@@ -27,23 +27,43 @@ export class OllamaClient {
     return (data.capabilities ?? []).includes('vision');
   }
 
+  // I modelli audio (es. gemma4:e2b/e4b) dichiarano la capability "audio".
+  async hasAudio(model: string): Promise<boolean> {
+    const res = await this.fetchImpl(`${this.deps.baseUrl}/api/show`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model }),
+    });
+    if (!res.ok) return false;
+    const data = (await res.json()) as ShowResponse;
+    return (data.capabilities ?? []).includes('audio');
+  }
+
+  // La trascrizione passa da /api/chat con l'audio in base64 nel campo `images`:
+  // whisper è stato rimosso dal registry di Ollama e i modelli audio attuali
+  // (gemma4:e2b/e4b) trascrivono così. `think:false` evita il bug di Ollama che
+  // svuota le risposte audio quando il thinking è attivo.
   async transcribe(audioPath: string): Promise<string> {
     const buf = await readFile(audioPath);
-    const name = basename(audioPath);
-    const mime = name.endsWith('.wav') ? 'audio/wav' : 'audio/ogg';
-    const form = new FormData();
-    form.append('model', this.deps.whisperModel);
-    form.append('file', new Blob([buf], { type: mime }), name);
-    const endpoints = ['/api/transcribe', '/v1/audio/transcriptions'];
-    let lastErr: unknown = new Error('transcription failed');
-    for (const ep of endpoints) {
-      try {
-        const res = await this.fetchImpl(`${this.deps.baseUrl}${ep}`, { method: 'POST', body: form });
-        if (!res.ok) { lastErr = new Error(`Ollama ${ep} ${res.status}`); continue; }
-        const data = (await res.json()) as { text?: string };
-        return data.text ?? '';
-      } catch (e) { lastErr = e; }
-    }
-    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+    const res = await this.fetchImpl(`${this.deps.baseUrl}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: this.deps.transcribeModel,
+        messages: [{ role: 'user', content: 'Transcribe the audio.', images: [buf.toString('base64')] }],
+        stream: false,
+        think: false,
+        options: { think: false, num_ctx: 8192 },
+      }),
+    });
+    if (!res.ok) throw new Error(`Ollama /api/chat ${res.status}`);
+    const data = (await res.json()) as ChatResponse;
+    const text = (data.message?.content ?? [])
+      .filter(b => b.type === 'text')
+      .map(b => b.text ?? '')
+      .join('')
+      .trim();
+    if (!text) throw new Error('empty transcription');
+    return text;
   }
 }
