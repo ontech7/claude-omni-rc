@@ -86,4 +86,11 @@ export class TmuxClient {
     await this.exec(['delete-buffer', '-b', buf]);
     await this.exec(['send-keys', '-t', t, 'Enter']);
   }
+
+  // Invia tasti grezzi al pane (es. 'C-c' per interrompere la generazione come ESC).
+  async sendKeys(target: string, keys: string): Promise<void> {
+    const t = await this.resolveTarget(target);
+    const r = await this.exec(['send-keys', '-t', t, keys]);
+    if (r.code !== 0) throw new Error(`tmux send-keys failed: ${r.stderr}`);
+  }
 }

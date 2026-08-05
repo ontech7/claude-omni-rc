@@ -73,4 +73,13 @@ describe('TmuxClient', () => {
     const tmux = new TmuxClient(exec);
     await expect(tmux.injectText('gone:pane', 'x')).rejects.toThrow('paste-buffer');
   });
+  it('sends keys to the pane (C-c interrupt)', async () => {
+    const { exec, calls } = fakeExec([
+      { call: ['list-sessions', '-F', '#{session_id} #{session_name}'], result: { code: 0, stdout: '$0 claude:proj\n' } },
+      { call: ['send-keys', '-t', '$0', 'C-c'], result: { code: 0 } },
+    ]);
+    const tmux = new TmuxClient(exec);
+    await tmux.sendKeys('claude:proj', 'C-c');
+    expect(calls[1].args).toEqual(['send-keys', '-t', '$0', 'C-c']);
+  });
 });
