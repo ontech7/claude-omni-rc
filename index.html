@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ollama-rc — remote control for Claude Code, served by Ollama</title>
+<meta name="description" content="Unofficial local daemon + Telegram bot that mimics Claude Code's /remote-control when your models are served by Ollama: see sessions, chat, and approve permissions from your phone.">
+<style>
+  :root {
+    /* light-only page: stop the UA from auto-darkening it under a dark OS */
+    color-scheme: light;
+    --ink: #101014;
+    --muted: #6b6b76;
+    --faint: #9a9aa4;
+    --fill: rgba(0, 0, 0, 0.05);
+    --rounded: "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: var(--rounded);
+    background: #fff;
+    color: var(--ink);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  body > * {
+    min-width: 0;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* ---------- nav ---------- */
+  .nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 24px;
+  }
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--ink);
+    text-decoration: none;
+    white-space: nowrap;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .brand .glyph { font-size: 19px; line-height: 1; }
+  .nav-links {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .nav-links a {
+    font-size: 15px;
+    color: var(--muted);
+    text-decoration: none;
+    transition: color 0.15s;
+  }
+  .nav-links a:hover { color: var(--ink); }
+  .sep {
+    color: var(--faint);
+    font-size: 14px;
+    user-select: none;
+  }
+  .icon-link {
+    display: inline-flex;
+    align-items: center;
+    color: var(--muted);
+  }
+  .icon-link:hover { color: var(--ink); }
+  .icon-link svg { display: block; }
+
+  /* ---------- hero ---------- */
+  .hero {
+    min-height: calc(100vh - 62px);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 40px 20px 64px;
+  }
+
+  .logo { display: block; margin: 0 auto 34px; }
+  .logo img { display: block; width: min(100vw - 40px, 544px); height: auto; }
+
+  h1 {
+    font-size: clamp(25px, 3.4vw, 40px);
+    font-weight: 500;
+    line-height: 1.14;
+    letter-spacing: -0.01em;
+    max-width: 26ch;
+    text-wrap: balance;
+  }
+
+  /* ---------- install command ---------- */
+  .cmd {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 44px;
+    padding: 4px 6px 4px 18px;
+    width: 100%;
+    max-width: 660px;
+    border-radius: 12px;
+    background: var(--fill);
+  }
+  .cmd code {
+    flex: 1;
+    min-width: 0;
+    padding: 10px 0;
+    font-family: var(--mono);
+    font-size: clamp(12px, 2.2vw, 14px);
+    color: var(--ink);
+    white-space: nowrap;
+    overflow-x: auto;
+    text-align: left;
+    scrollbar-width: none;
+  }
+  .cmd code::-webkit-scrollbar { display: none; }
+  .cmd button {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .cmd button:hover { background: rgba(0, 0, 0, 0.07); color: var(--ink); }
+  .cmd button svg { display: block; }
+  .cmd button .check { display: none; }
+  .cmd button.copied { color: #15803d; }
+  .cmd button.copied .copy { display: none; }
+  .cmd button.copied .check { display: block; }
+
+  .sub {
+    margin-top: 16px;
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .sub a { color: var(--muted); text-underline-offset: 3px; }
+  .sub a:hover { color: var(--ink); }
+
+  /* ---------- sections ---------- */
+  .section {
+    width: 100%;
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 76px 24px;
+    border-top: 1px solid rgba(0, 0, 0, 0.07);
+  }
+  .section > header { text-align: center; margin-bottom: 48px; }
+  .section h2 {
+    font-size: clamp(23px, 2.6vw, 31px);
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    line-height: 1.2;
+  }
+  .section .lede {
+    margin: 12px auto 0;
+    max-width: 54ch;
+    color: var(--muted);
+    font-size: 16px;
+    line-height: 1.6;
+  }
+  .section .lede a { color: var(--ink); text-underline-offset: 3px; }
+
+  .steps {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 34px;
+    margin-bottom: 48px;
+    list-style: none;
+  }
+  .steps h3 {
+    font-size: 16px;
+    font-weight: 500;
+    margin: 10px 0 6px;
+  }
+  .steps p {
+    color: var(--muted);
+    font-size: 14.5px;
+    line-height: 1.6;
+  }
+  .steps code {
+    font-family: var(--mono);
+    font-size: 13px;
+    background: var(--fill);
+    border-radius: 5px;
+    padding: 1px 5px;
+  }
+  .step-n {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 999px;
+    background: var(--ink);
+    color: #fff;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  /* terminal card — the one dark element on the page */
+  .term {
+    background: var(--ink);
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.13);
+  }
+  .term-bar {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 13px 15px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .term-bar i {
+    width: 11px;
+    height: 11px;
+    border-radius: 999px;
+    background: #3f3f46;
+  }
+  .term-bar i:nth-child(1) { background: #ff5f57; }
+  .term-bar i:nth-child(2) { background: #febc2e; }
+  .term-bar i:nth-child(3) { background: #28c840; }
+  .term-bar span {
+    margin-left: 6px;
+    color: #71717a;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .term pre {
+    margin: 0;
+    padding: 18px 20px;
+    color: #d4d4d8;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .term .prompt { color: #71717a; }
+  .term .g { color: #4ade80; }
+  .term .b { color: #60a5fa; }
+  .term .y { color: #fbbf24; }
+  .term .dim { color: #71717a; }
+
+  .note {
+    margin-top: 18px;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.65;
+  }
+  .note a { color: var(--ink); text-underline-offset: 3px; }
+
+  /* ---------- footer ---------- */
+  footer {
+    padding: 20px 24px 26px;
+    text-align: center;
+    color: var(--faint);
+    font-size: 13px;
+    line-height: 1.8;
+  }
+  footer a { color: var(--faint); text-decoration: none; }
+  footer a:hover { color: var(--muted); text-decoration: underline; }
+
+  .sr-only {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  @media (max-width: 760px) {
+    .logo img { width: min(100vw - 40px, 380px); }
+  }
+
+  @media (max-width: 620px) {
+    .nav { padding: 12px 16px; }
+    .nav-links a, .brand { font-size: 14px; }
+    .hero { padding: 24px 16px 48px; }
+    .logo { margin-bottom: 26px; }
+    h1 { max-width: 18ch; }
+    .section { padding: 56px 20px; }
+    .section > header { margin-bottom: 34px; }
+  }
+  @media (max-width: 700px) {
+    .steps { grid-template-columns: 1fr; gap: 26px; }
+  }
+  @media (max-width: 560px) {
+    .nav-links .optional { display: none; }
+  }
+</style>
+</head>
+<body>
+
+  <header class="nav">
+    <a class="brand" href="https://github.com/ontech7/ollama-rc">
+      <span class="glyph" aria-hidden="true">📲</span>ollama-rc
+    </a>
+    <nav class="nav-links">
+      <a href="https://github.com/ontech7/ollama-rc#readme">Docs</a>
+      <span class="sep optional" aria-hidden="true">·</span>
+      <a class="optional" href="https://github.com/ontech7/ollama-rc/blob/main/AI-GUIDE.md">AI-GUIDE.md</a>
+      <span class="sep" aria-hidden="true">·</span>
+      <a class="icon-link" href="https://github.com/ontech7/ollama-rc" aria-label="GitHub">
+        <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>
+        </svg>
+      </a>
+    </nav>
+  </header>
+
+  <main class="hero">
+    <span class="sr-only">ollama-rc</span>
+    <picture class="logo">
+      <source media="(max-width: 760px)" srcset="assets/wordmark-mobile-light.svg">
+      <img src="assets/wordmark-light.svg" alt="ollama-rc" width="544" height="auto">
+    </picture>
+
+    <h1>Remote control for Claude Code, served by Ollama</h1>
+
+    <div class="cmd">
+      <code id="install-cmd">git clone https://github.com/ontech7/ollama-rc &amp;&amp; cd ollama-rc &amp;&amp; ./install.sh</code>
+      <button id="copy-btn" type="button" aria-label="Copy install command">
+        <svg class="copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="9" y="9" width="13" height="13" rx="2"/>
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+        </svg>
+        <svg class="check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+      </button>
+    </div>
+
+    <p class="sub">
+      paste this in terminal — the installer guides you through the rest, or
+      <a href="https://github.com/ontech7/ollama-rc#manual-install">install manually</a>
+    </p>
+
+    <div class="ai-path" style="margin-top:56px">
+      <p class="sub" style="margin-top:0;margin-bottom:10px">…or let your AI agent set it all up:</p>
+      <div class="cmd">
+        <code id="ai-prompt">Set up ollama-rc with the Telegram bot and arm remote control</code>
+        <button id="copy-ai" type="button" aria-label="Copy the AI prompt">
+          <svg class="copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="9" y="9" width="13" height="13" rx="2"/>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+          </svg>
+          <svg class="check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+        </button>
+      </div>
+      <p class="sub">
+        paste this to your AI agent, or read
+        <a href="https://github.com/ontech7/ollama-rc/blob/main/AI-GUIDE.md">AI-GUIDE.md</a>
+        for what it does step by step
+      </p>
+    </div>
+  </main>
+
+  <section class="section" id="how-it-works">
+    <header>
+      <h2>How it works</h2>
+      <p class="lede">
+        Claude Code's own <code>/remote-control</code> is disabled the moment
+        your models come from Ollama. This is a local daemon plus a Telegram
+        bot that replaces it — no Anthropic account, no open ports.
+      </p>
+    </header>
+
+    <ol class="steps">
+      <li>
+        <span class="step-n">1</span>
+        <h3>Run <code>./install.sh</code></h3>
+        <p>The guided installer checks prerequisites, walks you through your
+        bot token and permissions, downloads the models, and registers the
+        background daemon.</p>
+      </li>
+      <li>
+        <span class="step-n">2</span>
+        <h3>Pair &amp; arm</h3>
+        <p>Open your bot on Telegram, send <code>/start &lt;code&gt;</code>,
+        then <code>/rc on</code>. While disarmed the daemon does nothing at
+        all.</p>
+      </li>
+      <li>
+        <span class="step-n">3</span>
+        <h3>Chat from anywhere</h3>
+        <p><code>/new</code> creates headless sessions, <code>/attach</code>
+        connects your tmux terminals, and permission requests land on your
+        phone.</p>
+      </li>
+    </ol>
+
+    <div class="term">
+      <div class="term-bar"><i></i><i></i><i></i><span>Telegram</span></div>
+      <pre><span class="prompt">@your_bot</span>
+/rc on
+<span class="g">🔓 Remote control ARMED.</span>
+/new write a haiku about tmux
+<span class="b">🆕 Session a1b2c3d4 started.</span>
+🔧 Permission requested — session a1b2c3d4
+Tool: Bash
+{"command":"ollama list"}
+<span class="y">[✓ Approve]  [✗ Reject]</span>
+<span class="g">✅ Ran it.</span></pre>
+    </div>
+  </section>
+
+  <section class="section" id="on-your-phone">
+    <header>
+      <h2>Approvals and voice, from the couch</h2>
+      <p class="lede">
+        Headless sessions ask before running tools — you tap
+        <code>✓ Approve</code> or <code>✗ Reject</code> from your phone, and
+        unanswered requests expire into a deny.
+      </p>
+    </header>
+
+    <div class="term">
+      <div class="term-bar"><i></i><i></i><i></i><span>Telegram</span></div>
+      <pre><span class="prompt">🎙️ voice note</span>  →  🎙️ Transcription in progress…
+<span class="g">"fix the typo in the README and commit"</span>
+
+🔧 Permission requested — session a1b2c3d4
+Tool: Bash
+{"command":"git commit -am fix"}
+<span class="y">[✓ Approve]  [✗ Reject]</span></pre>
+    </div>
+
+    <p class="note">
+      Voice notes are transcribed with Ollama's whisper model. Files you send
+      are saved to <code>~/.ollama-rc/inbox/</code> and forwarded to the
+      session as a path the model can read.
+    </p>
+  </section>
+
+  <footer>
+    headless sessions · terminal mirroring · remote permissions · voice transcription<br>
+    Unofficial, not affiliated with <a href="https://anthropic.com">Anthropic</a> or <a href="https://ollama.com">Ollama</a> ·
+    <a href="https://github.com/ontech7/ollama-rc/blob/main/LICENSE">MIT</a>
+  </footer>
+
+<script>
+  (function () {
+    function wire(btn, source) {
+      var timer;
+
+      function flash() {
+        btn.classList.add('copied');
+        clearTimeout(timer);
+        timer = setTimeout(function () { btn.classList.remove('copied'); }, 2000);
+      }
+
+      function selectAndCopy() {
+        var range = document.createRange();
+        range.selectNodeContents(source);
+        var sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        document.execCommand('copy');
+        sel.removeAllRanges();
+      }
+
+      btn.addEventListener('click', function () {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(source.textContent).then(flash, function () {
+            selectAndCopy();
+            flash();
+          });
+        } else {
+          selectAndCopy();
+          flash();
+        }
+      });
+    }
+
+    wire(document.getElementById('copy-btn'), document.getElementById('install-cmd'));
+    wire(document.getElementById('copy-ai'), document.getElementById('ai-prompt'));
+  })();
+</script>
+</body>
+</html>
