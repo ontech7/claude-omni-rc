@@ -4,6 +4,7 @@ import type { Config } from '../config.js';
 import type { OllamaClient } from '../ollama.js';
 import type { PermissionFlow } from '../permissions.js';
 import type { SessionManager } from './manager.js';
+import { parseAskUserQuestions } from './transcript.js';
 
 export interface SdkDriverDeps {
   bus: Bus;
@@ -68,8 +69,11 @@ export class SdkDriver {
           additionalDirectories: [config.inboxDir],
           abortController: ac,
           env,
-          canUseTool: (toolName, input, opts) =>
-            permissionFlow.request(sessionId, toolName, input as Record<string, unknown>, opts.signal),
+          canUseTool: (toolName, input, opts) => {
+            // AskUserQuestion: niente permesso — la risposta è la domanda stessa.
+            if (toolName === 'AskUserQuestion') return Promise.resolve({ behavior: 'allow' });
+            return permissionFlow.request(sessionId, toolName, input as Record<string, unknown>, opts.signal);
+          },
         },
       });
       let finished = false;
@@ -84,6 +88,13 @@ export class SdkDriver {
           if (text.trim()) bus.emit({ type: 'session.text', sessionId, role: 'assistant', text });
           for (const block of msg.message.content) {
             if (block.type === 'tool_use') {
+              if (block.name === 'AskUserQuestion') {
+                // il menu a scelta multipla diventa una domanda ❓ con bottoni
+                // (stesso percorso delle terminali), non una bubble di tool col JSON.
+                const questions = parseAskUserQuestions(block.input);
+                if (questions.length) bus.emit({ type: 'session.prompt', sessionId, questions });
+                continue;
+              }
               bus.emit({
                 type: 'session.tool', sessionId, toolName: block.name, kind: 'tool_use',
                 toolUseId: block.id, input: block.input as Record<string, unknown>,

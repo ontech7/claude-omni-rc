@@ -128,6 +128,34 @@ describe('SdkDriver', () => {
     expect((tools[0] as any).kind).toBe('tool_result');
     expect((tools[0] as any).result).toBe('out');
   });
+  it('auto-allows AskUserQuestion in canUseTool without a permission request', async () => {
+    const { sdk, session } = makeDriver();
+    queryMock.mockImplementationOnce(async function* () { yield resultMsg(session.id, 'ok'); });
+    await sdk.runTurn(session.id, 'x');
+    const opts = queryMock.mock.calls[0][0].options;
+    const decision = await opts.canUseTool('AskUserQuestion', { questions: [{ question: 'x', options: [{ label: 'a' }] }] }, {});
+    expect(decision).toEqual({ behavior: 'allow' });
+  });
+
+  it('emits session.prompt for AskUserQuestion tool_use instead of a tool bubble', async () => {
+    const { sdk, session, bus, events } = makeDriver();
+    const prompts: unknown[] = [];
+    bus.on('session.prompt', e => prompts.push(e));
+    queryMock.mockImplementationOnce(async function* () {
+      yield {
+        type: 'assistant', uuid: 'u', session_id: session.id,
+        message: { id: 'm', type: 'message', role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'AskUserQuestion', input: { questions: [{ question: 'q', options: [{ label: 'a' }, { label: 'b' }] }] } }] },
+        parent_tool_use_id: null,
+      };
+      yield resultMsg(session.id, 'ok');
+    });
+    await sdk.runTurn(session.id, 'x');
+    expect(prompts).toHaveLength(1);
+    expect((prompts[0] as any).questions[0].options).toHaveLength(2);
+    const toolBubbles = events.filter(e => (e as any).type === 'session.tool' && (e as any).kind === 'tool_use');
+    expect(toolBubbles).toHaveLength(0);
+  });
+
   it('emits the joined SDK errors on an error result', async () => {
     const { sdk, session, events, manager } = makeDriver();
     queryMock.mockImplementationOnce(async function* () {
