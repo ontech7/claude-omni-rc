@@ -1,5 +1,5 @@
 export type SessionKind = 'headless' | 'terminal';
-export type SessionStatus = 'idle' | 'running' | 'waiting-permission' | 'error' | 'stopped';
+export type SessionStatus = 'idle' | 'running' | 'awaiting-input' | 'waiting-permission' | 'error' | 'stopped';
 
 export interface Session {
   id: string;
@@ -10,6 +10,7 @@ export interface Session {
   status: SessionStatus;
   claudeSessionId?: string;
   tmuxTarget?: string;
+  transcriptFile?: string; // transcript del CLI risolto dal TranscriptWatcher
   lastActivity: string; // ISO
   createdAt: string;
 }
@@ -22,9 +23,19 @@ export interface PermissionRequest {
   createdAt: string;
 }
 
+// Domanda a scelta multipla fatta dal modello (tool AskUserQuestion del CLI),
+// leggibile dal transcript per le sessioni terminali.
+export interface PromptQuestion {
+  header?: string;
+  question: string;
+  multiSelect?: boolean;
+  options: { label: string; description?: string }[];
+}
+
 export type BusEvent =
   | { type: 'session.updated'; sessionId: string }
   | { type: 'session.text'; sessionId: string; role: 'user' | 'assistant'; text: string }
+  | { type: 'session.prompt'; sessionId: string; questions: PromptQuestion[] }
   | {
       type: 'session.tool';
       sessionId: string;

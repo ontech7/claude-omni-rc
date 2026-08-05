@@ -27,6 +27,14 @@ export class TmuxClient {
     return r.stdout.split('\n').map(s => s.trim()).filter(Boolean);
   }
 
+  // Il server tmux è attivo? (list-sessions vuoto può essere "nessuna sessione"
+  // o "server spento" — il pruning delle sessioni morte non deve scattare nel
+  // secondo caso.)
+  async serverRunning(): Promise<boolean> {
+    const r = await this.exec(['list-sessions']);
+    return r.code === 0;
+  }
+
   // I nomi sessione `claude:<progetto>` contengono ":" e tmux li leggerebbe come
   // session:window → fallisce. Ogni operazione risolve il nome nel session id
   // corrente (`$0`…), che è sempre univoco e resta valido anche dopo i restart.
@@ -52,6 +60,16 @@ export class TmuxClient {
     const r = await this.exec(['capture-pane', '-p', '-t', t]);
     if (r.code !== 0) throw new Error(`tmux capture-pane failed: ${r.stderr}`);
     return r.stdout;
+  }
+
+  // Directory di lavoro corrente del pane — serve a risolvere il transcript del
+  // CLI per le sessioni tmux scoperte (il nome `claude:<progetto>` da solo non
+  // basta a trovare ~/.claude/projects).
+  async paneCwd(target: string): Promise<string> {
+    const t = await this.resolveTarget(target);
+    const r = await this.exec(['display-message', '-p', '-t', t, '#{pane_current_path}']);
+    if (r.code !== 0) throw new Error(`tmux display-message failed: ${r.stderr}`);
+    return r.stdout.trim();
   }
 
   // 1:1: incolla il testo (bracketed paste, niente interpretazione shell) e preme

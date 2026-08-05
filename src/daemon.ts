@@ -8,6 +8,7 @@ import { PermissionFlow } from './permissions.js';
 import { OllamaClient } from './ollama.js';
 import { SdkDriver } from './sessions/sdk-driver.js';
 import { TmuxWatcher } from './sessions/tmux-watcher.js';
+import { TranscriptWatcher } from './sessions/transcript-watcher.js';
 import { TmuxClient } from './sessions/tmux-inject.js';
 import { Inbox } from './input.js';
 import { startApi } from './api.js';
@@ -30,21 +31,27 @@ export function createDaemon(
   const sdk = new SdkDriver({ bus, manager, config, permissionFlow });
   const tmux = new TmuxClient();
   const watcher = new TmuxWatcher({ config, manager, tmux });
+  const transcriptWatcher = new TranscriptWatcher({
+    config, manager, bus,
+    ollamaModels: async () => { try { return await ollama.listModels(); } catch { return new Set(); } },
+  });
   const inbox = new Inbox({ dir: config.inboxDir });
   const bot = overrides.bot ?? new TelegramBot({ config, bus, manager, permissionFlow, sdk, tmux, inbox, ollama });
 
   const reaper = setInterval(() => manager.reapIdle(), 1000);
   reaper.unref();
-  const api = startApi(config.apiPort, { manager });
+  const api = startApi(config.apiPort, { manager, permissionFlow, config });
 
   return {
     async start() {
       watcher.start(); // gated su armed
+      transcriptWatcher.start();
       await bot.start();
     },
     async stop() {
       clearInterval(reaper);
       watcher.stop();
+      transcriptWatcher.stop();
       await api.close();
       await bot.stop();
       manager.persist();

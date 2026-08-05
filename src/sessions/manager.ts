@@ -62,10 +62,24 @@ export class SessionManager {
     this.emitUpdated(id);
   }
 
+  remove(id: string): boolean {
+    const i = this.state.sessions.findIndex(s => s.id === id);
+    if (i === -1) return false;
+    this.state.sessions.splice(i, 1);
+    this.emitUpdated(id);
+    return true;
+  }
+
   setClaudeSessionId(id: string, claudeSessionId: string): void {
     const s = this.get(id);
     if (!s) return;
     if (s.claudeSessionId !== claudeSessionId) { s.claudeSessionId = claudeSessionId; this.emitUpdated(id); }
+  }
+
+  setTranscriptFile(id: string, transcriptFile: string): void {
+    const s = this.get(id);
+    if (!s) return;
+    if (s.transcriptFile !== transcriptFile) { s.transcriptFile = transcriptFile; this.emitUpdated(id); }
   }
 
   touch(id: string): void {
@@ -95,6 +109,9 @@ export class SessionManager {
       // restare in tool-execution/think > idleGraceMs senza touch → mai reaping,
       // altrimenti /status mentirebbe e il cap maxHeadlessSessions (spec §8) perderebbe.
       if (s.kind === 'headless') continue;
+      // terminali con transcript: lo stato è gestito dal TranscriptWatcher
+      // (running / awaiting-input) in base al flusso reale dei messaggi.
+      if (s.transcriptFile) continue;
       if (s.status === 'running' && now - new Date(s.lastActivity).getTime() >= this.deps.idleGraceMs) {
         s.status = 'idle';
         this.emitUpdated(s.id);

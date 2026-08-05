@@ -14,7 +14,6 @@ export interface Config {
   inboxDir: string;
   projectsDir: string;
   apiPort: number;
-  paneRefreshMs: number;
   armedOnStart: boolean;
   idleGraceMs: number;
   pollIntervalMs: number;
@@ -49,7 +48,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     inboxDir: env.INBOX_DIR ?? join(stateDir, 'inbox'),
     projectsDir: expandHome(env.PROJECTS_DIR ?? '~/.claude/projects'),
     apiPort: parseNum(env, 'API_PORT', 4123),
-    paneRefreshMs: parseNum(env, 'PANE_REFRESH_MS', 2000),
     armedOnStart: env.ARMED_ON_START === 'true',
     idleGraceMs: parseNum(env, 'IDLE_GRACE_MS', 3000),
     pollIntervalMs: parseNum(env, 'POLL_INTERVAL_MS', 500),
