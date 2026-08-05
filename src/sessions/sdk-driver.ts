@@ -1,6 +1,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Bus } from '../bus.js';
 import type { Config } from '../config.js';
+import type { OllamaClient } from '../ollama.js';
 import type { PermissionFlow } from '../permissions.js';
 import type { SessionManager } from './manager.js';
 
@@ -9,6 +10,7 @@ export interface SdkDriverDeps {
   manager: SessionManager;
   config: Config;
   permissionFlow: PermissionFlow;
+  ollama: Pick<OllamaClient, 'modelContext'>;
 }
 
 export class SdkDriver {
@@ -37,15 +39,35 @@ export class SdkDriver {
     const ac = new AbortController();
     this.aborters.set(sessionId, ac);
     try {
+      const model = session.model ?? config.defaultModel;
+      const ctx = await this.deps.ollama.modelContext(model);
+      // /stop durante la finestra di modelContext: l'abort è già scattato prima
+      // che query() attacchi il listener → va onorato qui, o si perderebbe.
+      if (ac.signal.aborted) throw new DOMException('aborted', 'AbortError');
+      // L'SDK spawna `claude --model <modello>` con l'ambiente del daemon, che
+      // non ha le env Ollama → il CLI fallirebbe. Replica l'ambiente che
+      // `ollama launch claude` setta (verificato empiricamente): base URL +
+      // auth token + mapping del modello sui default + context length reale.
+      const env = {
+        ...process.env,
+        ANTHROPIC_BASE_URL: config.ollamaBaseUrl,
+        ANTHROPIC_AUTH_TOKEN: 'ollama',
+        ANTHROPIC_API_KEY: '',
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+        ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+        ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+        CLAUDE_CODE_MAX_CONTEXT_TOKENS: ctx !== undefined ? String(ctx) : undefined,
+      };
       const stream = query({
         prompt,
         options: {
-          model: session.model ?? config.defaultModel,
+          model,
           cwd: session.projectDir,
           resume: session.claudeSessionId,
           permissionMode: 'default',
           additionalDirectories: [config.inboxDir],
           abortController: ac,
+          env,
           canUseTool: (toolName, input, opts) =>
             permissionFlow.request(sessionId, toolName, input as Record<string, unknown>, opts.signal),
         },

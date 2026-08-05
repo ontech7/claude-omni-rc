@@ -22,9 +22,10 @@ function makeDriver() {
   const state = new StateStore(join(mkdtempSync(join(tmpdir(), 'orc-sdk-')), 'state.json'));
   const manager = new SessionManager({ bus, state, idleGraceMs: 3000, armedOnStart: false });
   const permissionFlow = new PermissionFlow({ bus, config, setStatus: (id, s) => manager.setStatus(id, s) });
-  const sdk = new SdkDriver({ bus, manager, config, permissionFlow });
+  const ollama = { modelContext: vi.fn(async () => 1048576) };
+  const sdk = new SdkDriver({ bus, manager, config, permissionFlow, ollama: ollama as any });
   const session = manager.createHeadless({ title: 'test', projectDir: '/tmp/x' });
-  return { bus, events, manager, sdk, session };
+  return { bus, events, manager, sdk, session, ollama };
 }
 
 function assistantText(sessionId: string, text: string) {
@@ -140,5 +141,27 @@ describe('SdkDriver', () => {
     const err = events.find(e => (e as any).type === 'session.error');
     expect((err as any).message).toBe('boom1\nboom2');
     expect(manager.get(session.id)!.status).toBe('error');
+  });
+  it('passes the Ollama env (as ollama launch claude sets it) to the SDK query', async () => {
+    const { sdk, session, ollama } = makeDriver();
+    queryMock.mockImplementationOnce(async function* () { yield resultMsg(session.id, 'ok'); });
+    await sdk.runTurn(session.id, 'a');
+    const opts = queryMock.mock.calls[0][0].options;
+    expect(opts.env.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:11434');
+    expect(opts.env.ANTHROPIC_AUTH_TOKEN).toBe('ollama');
+    expect(opts.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe(opts.model);
+    expect(opts.env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe(opts.model);
+    expect(opts.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe(opts.model);
+    expect(opts.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('1048576');
+    expect(ollama.modelContext).toHaveBeenCalledWith(opts.model);
+  });
+  it('omits CLAUDE_CODE_MAX_CONTEXT_TOKENS when the context length is unknown', async () => {
+    const { sdk, session, ollama } = makeDriver();
+    (ollama.modelContext as any).mockResolvedValue(undefined);
+    queryMock.mockImplementationOnce(async function* () { yield resultMsg(session.id, 'ok'); });
+    await sdk.runTurn(session.id, 'a');
+    const opts = queryMock.mock.calls[0][0].options;
+    expect(opts.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBeUndefined();
+    expect(opts.env.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:11434');
   });
 });

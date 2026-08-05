@@ -28,7 +28,7 @@ export function createDaemon(
     setStatus: (id, s) => manager.setStatus(id, s),
   });
   const ollama = new OllamaClient({ baseUrl: config.ollamaBaseUrl });
-  const sdk = new SdkDriver({ bus, manager, config, permissionFlow });
+  const sdk = new SdkDriver({ bus, manager, config, permissionFlow, ollama });
   const tmux = new TmuxClient();
   const watcher = new TmuxWatcher({ config, manager, tmux });
   const transcriptWatcher = new TranscriptWatcher({

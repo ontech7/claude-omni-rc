@@ -24,6 +24,27 @@ export class OllamaClient {
     return (data.capabilities ?? []).includes('vision');
   }
 
+  // Lunghezza del context del modello (`ollama show` → model_info.*.context_length),
+  // usata per CLAUDE_CODE_MAX_CONTEXT_TOKENS come fa `ollama launch claude`.
+  // Best-effort: se il modello non risponde o manca la chiave, undefined.
+  async modelContext(model: string): Promise<number | undefined> {
+    try {
+      const res = await this.fetchImpl(`${this.deps.baseUrl}/api/show`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model }),
+      });
+      if (!res.ok) return undefined;
+      const data = (await res.json()) as { model_info?: Record<string, unknown> };
+      for (const [key, value] of Object.entries(data.model_info ?? {})) {
+        if (key.endsWith('.context_length') && typeof value === 'number') return value;
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   // Nomi dei modelli locali (`ollama list`): usati per distinguere le sessioni
   // Ollama da quelle Anthropic-hosted nel TranscriptWatcher.
   async listModels(): Promise<Set<string>> {

@@ -31,4 +31,23 @@ describe('OllamaClient', () => {
     const client = new OllamaClient({ baseUrl: 'http://127.0.0.1:11434', fetchImpl });
     await expect(client.hasVision('m')).rejects.toThrow('404');
   });
+  it('reads the model context length from /api/show model_info', async () => {
+    const { fetchImpl } = fakeFetch([
+      { url: '/api/show', ok: true, body: { model_info: { 'deepseek4.context_length': 1048576 } } },
+    ]);
+    const client = new OllamaClient({ baseUrl: 'http://127.0.0.1:11434', fetchImpl });
+    await expect(client.modelContext('deepseek-v4-flash:0731-cloud')).resolves.toBe(1048576);
+  });
+  it('returns undefined when the context length is missing', async () => {
+    const { fetchImpl } = fakeFetch([
+      { url: '/api/show', ok: true, body: { model_info: { 'llama2.embedding_length': 4096 } } },
+    ]);
+    const client = new OllamaClient({ baseUrl: 'http://127.0.0.1:11434', fetchImpl });
+    await expect(client.modelContext('m')).resolves.toBeUndefined();
+  });
+  it('returns undefined when /api/show fails', async () => {
+    const { fetchImpl } = fakeFetch([{ url: '/api/show', ok: false, status: 500 }]);
+    const client = new OllamaClient({ baseUrl: 'http://127.0.0.1:11434', fetchImpl });
+    await expect(client.modelContext('m')).resolves.toBeUndefined();
+  });
 });
