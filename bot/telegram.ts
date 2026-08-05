@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -411,7 +412,7 @@ export class TelegramBot {
       return;
     }
     const kb = new InlineKeyboard();
-    for (const s of list) kb.text(s.id.slice(0, 6), `sess:select:${s.id}`);
+    for (const s of list) kb.text(s.id.slice(0, 6), `sess:select:${s.id}`).text('🗑', `sess:del:${s.id}`).row();
     await ctx.reply(sessionListText(list, this.activeSessionId), {
       parse_mode: 'HTML', reply_markup: kb,
     });
@@ -528,6 +529,48 @@ export class TelegramBot {
     return ok;
   }
 
+  // Feedback persistente (Fix 7): sostituisce i bottoni con l'esito della decisione.
+  private async editCallbackDecision(ctx: Context, header: string): Promise<void> {
+    const msg = ctx.callbackQuery?.message;
+    if (!msg || !('text' in msg)) return;
+    await ctx.editMessageText(`${header}\n\n${msg.text}`, {
+      parse_mode: 'HTML',
+      reply_markup: new InlineKeyboard(), // svuota i bottoni
+    }).catch(() => {});
+  }
+
+  // Risponde a una domanda a scelta multipla: inietta l'etichetta nel pane
+  // (terminali) o la invia come testo (headless, best-effort). Il messaggio
+  // viene modificato per mostrare la risposta scelta.
+  private async answerPrompt(ctx: Context, parsed: CallbackData): Promise<void> {
+    const pending = this.pendingPrompts.get(parsed.id);
+    if (!pending) { await ctx.answerCallbackQuery({ text: 'Expired question' }); return; }
+    const q = pending.questions[parsed.questionIndex ?? 0];
+    const opt = q?.options[parsed.index ?? 0];
+    if (!q || !opt) { await ctx.answerCallbackQuery({ text: 'Invalid option' }); return; }
+    const s = this.deps.manager.get(pending.sessionId);
+    if (!s) { await ctx.answerCallbackQuery({ text: 'Session gone' }); return; }
+    this.pendingPrompts.delete(parsed.id);
+    let toast = `✓ ${opt.label}`;
+    try {
+      if (s.kind === 'terminal' && s.tmuxTarget) {
+        await this.deps.tmux.injectText(s.tmuxTarget, opt.label);
+        this.recordInjected(s.id, opt.label);
+      } else if (s.kind === 'headless') {
+        if (this.deps.sdk.isBusy(s.id)) {
+          toast = '⏳ Session busy — reply by text';
+        } else {
+          void this.deps.sdk.runTurn(s.id, opt.label);
+        }
+      }
+    } catch (e) {
+      toast = `⚠️ ${e instanceof Error ? e.message : String(e)}`;
+    }
+    await ctx.answerCallbackQuery({ text: toast });
+    const ack = `${pending.text}\n\n✅ <b>Risposta:</b> ${htmlEscape(opt.label)}`;
+    await ctx.editMessageText(ack, { parse_mode: 'HTML', reply_markup: new InlineKeyboard() }).catch(() => {});
+  }
+
   private async onCallback(ctx: Context): Promise<void> {
     if (!this.authorize(ctx)) return;
     // da disattivo nessuna approvazione/deny/switch (constraint 8): un permesso
@@ -535,18 +578,58 @@ export class TelegramBot {
     if (!this.deps.manager.isArmed()) { await ctx.answerCallbackQuery({ text: '🔒 Remote control is off' }); return; }
     const data = ctx.callbackQuery?.data ?? '';
     try {
-      const { action, id } = parseCallbackData(data);
-      if (action === 'approve') {
-        const ok = this.deps.permissionFlow.approve(id);
-        await ctx.answerCallbackQuery({ text: ok ? '✓ Approved' : 'Already resolved' });
-      } else if (action === 'deny') {
-        const ok = this.deps.permissionFlow.deny(id);
-        await ctx.answerCallbackQuery({ text: ok ? '✗ Rejected' : 'Already resolved' });
-      } else {
-        const s = this.deps.manager.get(id);
-        if (s) this.activeSessionId = s.id;
-        await ctx.answerCallbackQuery({ text: 'Session selected' });
-        await ctx.editMessageText(sessionListText(this.deps.manager.list(), this.activeSessionId), { parse_mode: 'HTML' });
+      const parsed = parseCallbackData(data);
+      switch (parsed.action) {
+        case 'approve': {
+          const ok = this.deps.permissionFlow.approve(parsed.id);
+          await ctx.answerCallbackQuery({ text: ok ? '✓ Approved' : 'Already resolved' });
+          if (ok) await this.editCallbackDecision(ctx, '✅ <b>Approved</b>');
+          break;
+        }
+        case 'deny': {
+          const ok = this.deps.permissionFlow.deny(parsed.id);
+          await ctx.answerCallbackQuery({ text: ok ? '✗ Rejected' : 'Already resolved' });
+          if (ok) await this.editCallbackDecision(ctx, '❌ <b>Rejected</b>');
+          break;
+        }
+        case 'select': {
+          const s = this.deps.manager.get(parsed.id);
+          if (s) this.activeSessionId = s.id;
+          await ctx.answerCallbackQuery({ text: 'Session selected' });
+          await ctx.editMessageText(sessionListText(this.deps.manager.list(), this.activeSessionId), { parse_mode: 'HTML' });
+          // Fix 5: mostra la storia recente della sessione appena selezionata.
+          const hist = await this.readHistory(parsed.id);
+          if (hist && this.chatId) void this.bot.api.sendMessage(this.chatId, hist, { parse_mode: 'HTML' }).catch(() => {});
+          break;
+        }
+        case 'answer': {
+          await this.answerPrompt(ctx, parsed);
+          break;
+        }
+        case 'del': {
+          const s = this.deps.manager.get(parsed.id);
+          if (!s) { await ctx.answerCallbackQuery({ text: 'Session not found' }); return; }
+          await ctx.answerCallbackQuery({ text: 'Confirm?' });
+          const kb = new InlineKeyboard()
+            .text('✓ Yes, delete', `sess:del-yes:${s.id}`)
+            .text('✗ No', `sess:del-no:${s.id}`);
+          await ctx.reply(`Delete session <b>${htmlEscape(s.title) || htmlEscape(s.id.slice(0, 8))}</b> [${s.kind}]?`, {
+            parse_mode: 'HTML', reply_markup: kb,
+          }).catch(() => {});
+          break;
+        }
+        case 'del-yes': {
+          const ok = this.deleteSession(parsed.id);
+          await ctx.answerCallbackQuery({ text: ok ? '🗑 Deleted' : 'Already deleted' });
+          await ctx.editMessageText(ok ? '🗑 Session deleted.' : 'Session already gone.', { parse_mode: 'HTML' }).catch(() => {});
+          if (this.activeSessionId === parsed.id) this.activeSessionId = undefined;
+          break;
+        }
+        case 'del-no': {
+          await ctx.answerCallbackQuery({ text: 'Cancelled' });
+          await ctx.editMessageText('Delete cancelled.', { parse_mode: 'HTML' }).catch(() => {});
+          break;
+        }
       }
     } catch {
       await ctx.answerCallbackQuery({ text: 'Invalid data' });
@@ -663,6 +746,8 @@ export class TelegramBot {
       if (!this.deps.manager.isArmed()) return;
       if (e.sessionId !== this.activeSessionId) return; // solo la sessione selezionata
       this.toolBurst(e.sessionId).close(); // il testo chiude la raffica di tool
+      // Fix 1: l'echo di un testo iniettato dal bot non viene reinoltrato.
+      if (e.role === 'user' && this.isInjectedEcho(e.sessionId, e.text)) return;
       // sia le headless che i transcript delle terminali arrivano come markdown.
       void this.forwardText(e.sessionId, mdToHtml(e.text), e.role);
     });
@@ -670,12 +755,18 @@ export class TelegramBot {
       if (!this.deps.manager.isArmed()) return;
       if (sessionId !== this.activeSessionId) return;
       this.toolBurst(sessionId).close();
-      const blocks = questions.map(q => {
-        const title = q.header ? `${q.header}: ${q.question}` : q.question;
-        const opts = q.options.map((o, i) => `${i + 1}) ${htmlEscape(o.label)}${o.description ? ` — ${htmlEscape(o.description)}` : ''}`).join('\n');
-        return `❓ <b>${htmlEscape(title)}</b>\n${opts}`;
-      }).join('\n\n');
-      this.notify(`${blocks}\n\nReply with the option number (or its text) to answer.`);
+      // Fix 2: un bottone per opzione, la risposta "1"/"2"/"3" via testo resta
+      // valida come fallback.
+      const token = randomUUID();
+      this.pendingPrompts.set(token, { sessionId, questions, text: promptMessage(questions) });
+      const kb = new InlineKeyboard();
+      questions.forEach((q, qi) => q.options.forEach((o, oi) => {
+        kb.text(htmlEscape(o.label.slice(0, 24)), `q:answer:${token}:${qi}:${oi}`).row();
+      }));
+      const hint = '\n\n<i>Tocca un\'opzione o rispondi con il numero.</i>';
+      if (this.chatId) {
+        void this.bot.api.sendMessage(this.chatId, promptMessage(questions) + hint, { parse_mode: 'HTML', reply_markup: kb }).catch(() => {});
+      }
     });
     bus.on('session.tool', e => {
       if (!this.deps.manager.isArmed()) return;
