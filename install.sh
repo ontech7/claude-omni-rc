@@ -62,7 +62,7 @@ every session auto-attaches to remote control.
 
 Options:
   --uninstall   remove the launchd agent, the SessionStart hook and (on
-                confirmation) the Ollama model, the state dir and .env
+                confirmation) the Ollama model and the state dir (.env is kept)
 
 Environment:
   STATE_DIR   where state and logs live (default: ~/.ollama-rc)
@@ -287,19 +287,15 @@ uninstall() {
     warn "Keeping the Ollama model '$model'."
   fi
 
-  # 4. stato e segreti (su conferma)
+  # 3. stato (su conferma) — .env è lasciato intatto per un eventuale reinstall
   if ask_yes_no "Remove the state dir '$STATE_DIR' (state, logs, inbox)?"; then
     rm -rf "$STATE_DIR"
     ok "Removed $STATE_DIR."
   else
     warn "Keeping $STATE_DIR."
   fi
-  if [ -f "$ENV_FILE" ] && ask_yes_no "Remove '$ENV_FILE' (your local secrets)?"; then
-    rm -f "$ENV_FILE"
-    ok "Removed $ENV_FILE."
-  fi
 
-  ok "ollama-rc uninstalled. The repo itself is not removed — delete it manually if you want."
+  ok "ollama-rc uninstalled. .env and the repo itself are kept — re-run ./install.sh to set it up again."
 }
 
 print_summary() {

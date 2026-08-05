@@ -19,8 +19,8 @@
 - **Voice transcription removed** — text-only for now (whisper was removed
   from Ollama); transcription may return in the future.
 - **`./install.sh --uninstall`** — removes the launchd agent and the
-  SessionStart hook, and asks before removing the Ollama model, the state dir
-  and `.env`.
+  SessionStart hook, and asks before removing the Ollama model and the state
+  dir (`.env` is kept for a quick reinstall).
 - **Bot in English** — all user-facing bot messages are now English (the bot
   was previously Italian).
 - **Command menu** — `/rc`, `/sessions`, `/view`, `/new`, `/stop`, `/status`,

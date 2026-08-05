@@ -95,10 +95,28 @@ export function permissionMessage(req: PermissionRequest): string {
   return `🔧 Permission requested — session <b>${htmlEscape(req.sessionId.slice(0, 8))}</b>\nTool: <code>${htmlEscape(req.toolName)}</code>\n<pre>${input}</pre>`;
 }
 
+export function relativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  if (diff < 60_000) return 'just now';
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  return `${Math.floor(diff / 86_400_000)}d ago`;
+}
+
+// Una riga per sessione, con le info che servono a riconoscerla: per le
+// terminali il target tmux, per le headless il modello, più l'ultima attività
+// relativa (la sessione "in uso" è quella con "just now").
 export function sessionListText(sessions: Session[], activeId?: string): string {
   if (!sessions.length) return 'No sessions.';
   return sessions
-    .map(s => `${s.id === activeId ? '▸' : ' '} <b>${htmlEscape(s.id.slice(0, 8))}</b> [${s.kind}] ${htmlEscape(s.title)} — ${s.status}`)
+    .map(s => {
+      const marker = s.id === activeId ? '▸' : ' ';
+      const title = htmlEscape(s.title) || htmlEscape(s.id.slice(0, 8));
+      const detail = s.kind === 'terminal'
+        ? (s.tmuxTarget ? `<code>${htmlEscape(s.tmuxTarget)}</code>` : 'no tmux')
+        : `<code>${htmlEscape(s.model ?? 'model')}</code>`;
+      return `${marker} <b>${title}</b> · ${s.kind} · ${detail} — ${s.status} · ${relativeTime(s.lastActivity)}`;
+    })
     .join('\n');
 }
 
@@ -422,8 +440,16 @@ export class TelegramBot {
   private async onView(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
     const s = this.activeSessionId ? this.deps.manager.get(this.activeSessionId) : undefined;
-    if (!s || s.kind !== 'terminal' || !s.tmuxTarget) {
-      await this.send(ctx, 'No tmux session selected. Pick one with /sessions, or /attach &lt;project&gt;.');
+    if (!s) {
+      await this.send(ctx, 'No session selected. Pick one with /sessions.');
+      return;
+    }
+    if (s.kind !== 'terminal') {
+      await this.send(ctx, 'This is a headless session — it has no terminal screen. Its replies stream here; send a message to chat. To view a terminal, pick a tmux session with /sessions.');
+      return;
+    }
+    if (!s.tmuxTarget) {
+      await this.send(ctx, 'This session is not running in tmux, so there is no pane to capture. Start it with:\n<code>tmux new -s claude:&lt;project&gt;</code>');
       return;
     }
     try {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, diffTail, mdToHtml } from '../bot/telegram.js';
+import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, diffTail, mdToHtml, relativeTime } from '../bot/telegram.js';
 
 describe('parseCommand', () => {
   it('classifies control commands', () => {
@@ -33,14 +33,23 @@ describe('permissionMessage / sessionListText', () => {
     expect(msg).toContain('Bash');
     expect(msg).toContain('ls');
   });
-  it('marks the active session', () => {
+  it('marks the active session and shows identifying details', () => {
     const sessions = [
-      { id: 'aaa', kind: 'headless', title: 't1', projectDir: '/x', status: 'idle', lastActivity: '2026-08-04T00:00:00.000Z', createdAt: '' },
-      { id: 'bbb', kind: 'terminal', title: 't2', projectDir: '/y', status: 'running', lastActivity: '2026-08-05T00:00:00.000Z', createdAt: '' },
+      { id: 'aaa', kind: 'headless', title: 't1', projectDir: '/x', model: 'deepseek-v4-flash:0731-cloud', status: 'idle', lastActivity: '2026-08-05T12:00:00.000Z', createdAt: '' },
+      { id: 'bbb', kind: 'terminal', title: 't2', projectDir: '/y', tmuxTarget: 'claude:my-branch', status: 'running', lastActivity: new Date().toISOString(), createdAt: '' },
     ] as any;
     const txt = sessionListText(sessions, 'bbb');
     expect(txt).toContain('▸');
     expect(txt).toContain('running');
+    expect(txt).toContain('claude:my-branch'); // per le terminali il target tmux
+    expect(txt).toContain('deepseek-v4-flash:0731-cloud'); // per le headless il modello
+    expect(txt).toContain('just now');
+  });
+  it('formats relative time', () => {
+    const now = Date.now();
+    expect(relativeTime(new Date(now - 10_000).toISOString())).toBe('just now');
+    expect(relativeTime(new Date(now - 2 * 60_000).toISOString())).toBe('2m ago');
+    expect(relativeTime(new Date(now - 3 * 3_600_000).toISOString())).toBe('3h ago');
   });
 });
 

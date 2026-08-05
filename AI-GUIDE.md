@@ -54,7 +54,7 @@ npm install
 | send a file | the bot saves it to `~/.ollama-rc/inbox/` and forwards the path |
 | check what sessions exist | from Telegram: `/sessions` or `/status` |
 | run it without launchd | `npm run dev` in the repo (foreground) |
-| uninstall ollama-rc | `./install.sh --uninstall` (asks about the Ollama model, then removes launchd, the hook, and on confirmation the state dir + `.env`) |
+| uninstall ollama-rc | `./install.sh --uninstall` (asks about the Ollama model, then removes launchd, the hook, and on confirmation the state dir; `.env` is kept) |
 
 ## Command reference (bot)
 
