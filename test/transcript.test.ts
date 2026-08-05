@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -233,6 +233,10 @@ describe('readRecentMessages / resolveSessionTranscript', () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'abc.jsonl'), '');
     writeFileSync(join(dir, 'xyz.jsonl'), '');
+    // mtime espliciti: due file creati in rapida successione possono avere
+    // mtime identici (granularità del fs) → l'ordine di readdir vincerebbe.
+    utimesSync(join(dir, 'abc.jsonl'), new Date(), new Date(Date.now() - 10_000));
+    utimesSync(join(dir, 'xyz.jsonl'), new Date(), new Date());
     expect(resolveSessionTranscript(base, '/Users/u/proj', 'abc')).toBe(join(dir, 'abc.jsonl'));
     expect(resolveSessionTranscript(base, '/Users/u/proj')).toBe(join(dir, 'xyz.jsonl')); // più recente
     expect(resolveSessionTranscript(base, '/Users/u/other')).toBeUndefined();
