@@ -578,7 +578,11 @@ export class TelegramBot {
     bus.on('session.result', e => {
       if (!this.deps.manager.isArmed() || e.sessionId !== this.activeSessionId) return;
       this.toolBurst(e.sessionId).close(); // fine turno headless: chiude la raffica di tool
-      this.notify(`✅ ${htmlEscape(e.result.slice(0, 500))}`);
+      // solo segnale di completamento: il testo della risposta è già arrivato
+      // streammato (session.text → mdToHtml). Re-inviarlo qui (come faceva la
+      // vecchia notifica `✅ <result>`) duplicava l'ultimo messaggio, e senza
+      // rendering markdown (htmlEscape soltanto).
+      this.notify('✅ Turn complete.');
     });
     bus.on('session.error', e => {
       if (!this.deps.manager.isArmed() || e.sessionId !== this.activeSessionId) return;
