@@ -48,7 +48,7 @@ npm install
 | create a headless session | from Telegram: `/new <prompt>` |
 | continue an ongoing session from the phone | make sure it runs inside tmux (`tmux new -s claude:<project>`); it auto-appears in `/sessions` and streams as a chat |
 | see what the model is writing | select the session with `/sessions`: its messages stream as a chat automatically |
-| answer a multiple-choice question | the question arrives as a `❓` message with the options; reply with the option number (or its text) |
+| answer a multiple-choice question | the question arrives as a `❓` message with one button per option; tap it (or reply with the option number/text) |
 | auto-attach every session on start | `./install.sh` already adds the `SessionStart` + `PermissionRequest` hooks (see `~/.claude/settings.json`) |
 | attach a terminal (tmux) session | from Telegram: `/attach <project>` (session must be named `claude:<project>`) |
 | stop a session / a running turn | from Telegram: `/stop` |
@@ -70,14 +70,19 @@ npm install
 - `/view` — send the active session's current screen (tmux pane).
 - `/new <text>` — create a headless session and send it the prompt.
 - `/attach <project>` — attach the `claude:<project>` tmux session.
-- `/stop` — abort the active session's running turn.
+- `/stop` — abort the active session's running turn (sends `Ctrl+C` to a tmux
+  pane, like pressing ESC).
 - `/status` — active session status.
+- `/history [id]` — show the last messages of a session.
+- `/delete [id]` — delete a session (with an inline confirm).
 - `/help` — list commands.
 
 Plain messages go to the active session: headless sessions receive them as a
 new turn, terminal sessions as pasted input + Enter (so the human can answer
-interactive prompts). Terminal sessions must run inside tmux (`claude:<project>`)
-to receive text.
+interactive prompts). Slash commands the bot doesn't own (`/clear`, `/compact`,
+`/exit`, custom commands, …) are forwarded verbatim to the active session.
+Selecting a session in `/sessions` also shows its last messages.
+Terminal sessions must run inside tmux (`claude:<project>`) to receive text.
 
 ## Configuration & data
 

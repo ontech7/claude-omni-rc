@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- **Telegram UX fixes** —
+  - **No echo of your own messages** — text the bot injects into a tmux
+    session is not forwarded back from the transcript; messages typed at the
+    terminal still stream.
+  - **Multiple-choice questions as buttons** — `AskUserQuestion` is
+    auto-allowed (no raw-JSON permission bubble) and appears with one inline
+    button per option; tapping answers the session. Numbered replies still work.
+  - **Claude slash commands** — `/`-commands the bot doesn't own (e.g.
+    `/clear`, `/compact`, `/exit`, `/frontend-release`) are forwarded verbatim
+    to the active session instead of being dropped.
+  - **Interrupt** — `/stop` now sends `Ctrl+C` to the active terminal session's
+    pane (like pressing ESC), and still aborts headless turns.
+  - **Session history** — selecting a session shows its last messages; a new
+    `/history [id]` command re-reads them on demand.
+  - **Session delete** — new `/delete [id]` command and a 🗑 button per row in
+    `/sessions`, with an inline confirm. Headless turns are stopped first;
+    terminal panes are untracked, not killed.
+  - **Approve/Reject feedback** — the permission message is edited in place
+    (`✅ Approved` / `❌ Rejected`, buttons removed) instead of only a toast.
 - **SessionStart hook + local API** — `./install.sh` adds a Claude Code
   `SessionStart` hook (`scripts/attach.sh`) that auto-attaches every session on
   start via a loopback HTTP API (`src/api.ts`, `API_PORT`, default 4123):

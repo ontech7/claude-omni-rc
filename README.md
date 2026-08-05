@@ -157,9 +157,10 @@ Anthropic-hosted Claude Code) never show up.
   on serious errors — with no status chatter while Claude works. History is
   never replayed: streaming starts from the moment you select
   the session with `/sessions`.
-- **Multiple-choice questions** — when the model asks a question, the question
-  and its options arrive as a `❓` message; reply with the option number (or
-  its text) and it's answered 1:1.
+- **Multiple-choice questions** — when the model asks a question, it arrives as
+  a `❓` message with **one inline button per option**; tap to answer (a reply
+  with the option number or its text also works). `AskUserQuestion` is
+  auto-allowed, so no raw-JSON permission bubble appears.
 - **Interact 1:1** — a message you send is pasted into the session and
   submitted (Enter). This needs tmux: a session not in tmux streams as chat
   but is read-only.
@@ -218,14 +219,19 @@ in-terminal prompt, so a regular session is never blocked.
 | `/view` | show the active session's current screen |
 | `/new <text>` | create a headless session and send it your prompt |
 | `/attach <project>` | attach a `claude:<project>` tmux session |
-| `/stop` | stop the active session (aborts the running turn) |
+| `/stop` | stop the active session (aborts the running turn; sends Ctrl+C to a tmux pane) |
 | `/status` | show the active session's status |
+| `/history [id]` | show the last messages of a session (default: active) |
+| `/delete [id]` | delete a session (headless: stops it; terminal: untracks only) |
 | `/help` | list the commands |
 
 Plain text messages go to the active session (default: the most recent one):
 headless sessions receive them as a new turn, terminal sessions receive them
-as typed input (pasted into the pane + Enter). Up to `MAX_HEADLESS_SESSIONS`
-headless sessions run concurrently — the Ollama Cloud quota is finite.
+as typed input (pasted into the pane + Enter). Slash commands the bot doesn't
+own (e.g. `/clear`, `/compact`, `/exit`, `/frontend-release`) are forwarded
+verbatim to the active session too, so Claude Code's own commands work from
+the phone. Up to `MAX_HEADLESS_SESSIONS` headless sessions run concurrently —
+the Ollama Cloud quota is finite.
 
 ## Remote permissions
 
