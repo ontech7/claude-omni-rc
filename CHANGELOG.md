@@ -8,14 +8,25 @@
   project dir from cwd, tmux target auto-detected. The closest equivalent to
   Claude Code's native `/remote-control`. Idempotent; silent when the daemon is
   down.
-- **Pane mirroring (1:1)** — terminal sessions are mirrored from the tmux pane
-  itself: the active session's screen is captured and streamed, so rendered
-  markdown and interactive UI (multiple-choice prompts included) show up, and
-  input is pasted + Enter. Only the session selected in `/sessions` is
-  streamed; `/view` grabs the current screen. History is never replayed.
+- **Chat streaming for terminal sessions** — the active session's conversation
+  is streamed as a chat by tailing the transcript Claude Code writes
+  (`~/.claude/projects/…`): assistant messages rendered from markdown, your
+  prompts echoed, tool calls grouped into one `🔧` notice per work burst (the
+  first call creates the bubble, later ones update it). Notifications are
+  event-driven: `❓` questions with the options (reply with the option number),
+  permission buttons, and a `❌` on serious errors (e.g. `max_tokens`) — no
+  status chatter while Claude works. `/view` still grabs the raw screen.
+  History is never replayed.
+- **Remote permissions for terminal sessions** — a `PermissionRequest` hook in
+  `~/.claude/settings.json` delegates CLI permission decisions to Telegram
+  (✓ Approve / ✗ Reject); it falls back to the native in-terminal prompt when
+  the daemon is down or remote control is disarmed.
+- **Session lifecycle** — sessions whose tmux target disappears are pruned from
+  `/sessions`; a new status (`awaiting-input`) marks sessions that are waiting
+  for you.
 - **Tmux-only discovery** — only `claude:*` tmux sessions (plus hook / `/attach`
-  ones) are tracked; no `~/.claude/projects` scanning, so non-Ollama sessions
-  never appear. The JSONL mirror was removed.
+  ones) are tracked, registered with the pane's real cwd; no `~/.claude/projects`
+  scanning, so non-Ollama sessions never appear.
 - **Voice transcription removed** — text-only for now (whisper was removed
   from Ollama); transcription may return in the future.
 - **`./install.sh --uninstall`** — removes the launchd agent and the
