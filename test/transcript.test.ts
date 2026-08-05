@@ -12,6 +12,8 @@ import {
   peekTranscriptState,
   transcriptModel,
   parseAskUserQuestions,
+  readRecentMessages,
+  resolveSessionTranscript,
 } from '../src/sessions/transcript.js';
 
 function tmpDir(): string { return mkdtempSync(join(tmpdir(), 'orc-tr-')); }
@@ -192,5 +194,47 @@ describe('peekTranscriptState / transcriptModel', () => {
     const file = join(dir, 's.jsonl');
     writeFileSync(file, userLine('a') + '\n' + textLine('m1', 'hi', 'end_turn') + '\n');
     expect(transcriptModel(file)).toBe('deepseek-v4-flash:0731');
+  });
+});
+
+describe('readRecentMessages / resolveSessionTranscript', () => {
+  it('returns the last text messages, skipping tools and thinking', () => {
+    const dir = tmpDir();
+    const file = join(dir, 's.jsonl');
+    writeFileSync(file, [
+      userLine('primo'),
+      textLine('m1', 'risposta 1', 'tool_use'),
+      toolLine,
+      textLine('m2', 'risposta 2', 'end_turn'),
+      userLine('secondo'),
+      textLine('m3', 'risposta 3', 'end_turn'),
+    ].join('\n') + '\n');
+    const msgs = readRecentMessages(file, 10);
+    expect(msgs).toEqual([
+      { role: 'user', text: 'primo' },
+      { role: 'assistant', text: 'risposta 1' },
+      { role: 'assistant', text: 'risposta 2' },
+      { role: 'user', text: 'secondo' },
+      { role: 'assistant', text: 'risposta 3' },
+    ]);
+  });
+  it('respects max, keeping the newest messages', () => {
+    const dir = tmpDir();
+    const file = join(dir, 's.jsonl');
+    writeFileSync(file, [userLine('a'), userLine('b'), userLine('c')].join('\n') + '\n');
+    expect(readRecentMessages(file, 2)).toEqual([{ role: 'user', text: 'b' }, { role: 'user', text: 'c' }]);
+  });
+  it('returns [] for missing/empty files', () => {
+    expect(readRecentMessages(join(tmpDir(), 'nope.jsonl'))).toEqual([]);
+  });
+  it('resolves by claudeSessionId, falling back to the newest file', () => {
+    const base = tmpDir();
+    const dir = join(base, mungedProjectDir('/Users/u/proj'));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'abc.jsonl'), '');
+    writeFileSync(join(dir, 'xyz.jsonl'), '');
+    expect(resolveSessionTranscript(base, '/Users/u/proj', 'abc')).toBe(join(dir, 'abc.jsonl'));
+    expect(resolveSessionTranscript(base, '/Users/u/proj')).toBe(join(dir, 'xyz.jsonl')); // più recente
+    expect(resolveSessionTranscript(base, '/Users/u/other')).toBeUndefined();
   });
 });

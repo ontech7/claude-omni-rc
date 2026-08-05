@@ -1,4 +1,4 @@
-import { existsSync, openSync, readSync, closeSync, fstatSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, openSync, readSync, closeSync, fstatSync, readdirSync, statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { PromptQuestion } from '../types.js';
 
@@ -89,6 +89,51 @@ export function newestTranscriptFile(dir: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+export interface RecentMessage { role: 'user' | 'assistant'; text: string }
+
+// Storia retroattiva per il Fix 5: legge gli ultimi `max` messaggi testuali
+// (user/assistant) dal transcript, saltando thinking e tool. Usata quando si
+// seleziona una sessione e dal comando /history.
+export function readRecentMessages(file: string, max = 10): RecentMessage[] {
+  try {
+    const out: RecentMessage[] = [];
+    for (const raw of readFileSync(file, 'utf8').split('\n')) {
+      if (!raw.trim()) continue;
+      let d: { type?: string; message?: { content?: unknown } };
+      try { d = JSON.parse(raw); } catch { continue; }
+      if (d.type === 'assistant') {
+        const blocks = Array.isArray(d.message?.content) ? d.message.content : [];
+        for (const b of blocks) {
+          if (!b || typeof b !== 'object') continue;
+          const bb = b as { type?: string; text?: string };
+          if (bb.type === 'text' && typeof bb.text === 'string' && bb.text.trim()) {
+            out.push({ role: 'assistant', text: bb.text });
+          }
+        }
+      } else if (d.type === 'user') {
+        const c = d.message?.content;
+        if (typeof c === 'string' && c.trim()) out.push({ role: 'user', text: c });
+      }
+    }
+    return out.slice(-max);
+  } catch {
+    return [];
+  }
+}
+
+// Risolve il file transcript di una sessione: quello esatto per claudeSessionId
+// (le headless lo scrivono in ~/.claude/projects), altrimenti il più recente
+// per il project dir (stessa logica del TranscriptWatcher).
+export function resolveSessionTranscript(projectsDir: string, projectDir: string, claudeSessionId?: string): string | undefined {
+  const dir = resolveTranscriptDir(projectsDir, projectDir);
+  if (!dir) return undefined;
+  if (claudeSessionId) {
+    const p = join(dir, `${claudeSessionId}.jsonl`);
+    if (existsSync(p)) return p;
+  }
+  return newestTranscriptFile(dir);
 }
 
 // Il modello usato dalla sessione: prima riga assistant con `model`.
