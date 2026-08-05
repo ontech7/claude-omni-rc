@@ -71,8 +71,9 @@ bot, pair with `/start <code>` (if you chose a pairing code), then `/rc on`.
 Prefer to see what's happening? [Manual install](#manual-install) below.
 
 To remove everything: `./install.sh --uninstall` — it asks before removing the
-Ollama model, then removes the launchd agent, the SessionStart hook and (on
-confirmation) the state dir. Your `.env` is kept so a reinstall is one command.
+Ollama model, then removes the launchd agent, the Claude Code hooks
+(SessionStart + PermissionRequest) and (on confirmation) the state dir. Your
+`.env` is kept so a reinstall is one command.
 
 ## Prerequisites
 
@@ -167,20 +168,21 @@ Anthropic-hosted Claude Code) never show up.
 - `/view` still grabs the full current screen of the active session whenever
   you want the raw terminal.
 
-### Auto-attach with a SessionStart hook
+### Auto-attach and remote permissions via hooks
 
-`./install.sh` also adds a Claude Code **`SessionStart` hook** that registers
-every session with the daemon the moment it starts — the closest equivalent to
-Claude Code's native `/remote-control`. The hook:
+`./install.sh` also adds two Claude Code **hooks** that make a running session
+behave like the native `/remote-control`:
 
-1. reads the project dir from the working directory,
-2. if you're inside tmux, records the tmux session as the injection target
-   (any tmux session works, not just `claude:*`),
-3. tells the daemon on `127.0.0.1:${API_PORT}` to attach it.
+- **`SessionStart`** — registers every session with the daemon the moment it
+  starts: it reads the project dir from the working directory, records the
+  tmux session as the injection target if you're inside tmux (any tmux session
+  works, not just `claude:*`), and tells the daemon on
+  `127.0.0.1:${API_PORT}` to attach it. So a session you started without the
+  `claude:` naming convention can still be continued from Telegram.
+- **`PermissionRequest`** — delegates CLI permission decisions to Telegram for
+  terminal (tmux) sessions; see [Remote permissions](#remote-permissions).
 
-So the session you're running right now can be continued from Telegram even
-if it wasn't started with the `claude:` naming convention. To add it
-manually, merge into `~/.claude/settings.json`:
+To add them manually, merge into `~/.claude/settings.json`:
 
 ```json
 {
@@ -191,13 +193,22 @@ manually, merge into `~/.claude/settings.json`:
           { "type": "command", "command": "/abs/path/to/ollama-rc/scripts/attach.sh", "timeout": 10 }
         ]
       }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/abs/path/to/ollama-rc/scripts/permission-hook.sh", "timeout": 600 }
+        ]
+      }
     ]
   }
 }
 ```
 
-The hook is idempotent and silently does nothing when the daemon isn't
-running, so it never blocks Claude Code from starting.
+Both hooks are idempotent. When the daemon is down or remote control is
+disarmed, SessionStart does nothing (Claude Code starts normally) and
+PermissionRequest returns no decision — Claude Code shows its native
+in-terminal prompt, so a regular session is never blocked.
 
 | Command | What it does |
 |---------|--------------|
@@ -269,7 +280,7 @@ ollama-rc/
 │   │   ├── transcript.ts    read the CLI transcripts (~/.claude/projects/…)
 │   │   └── transcript-watcher.ts  tail transcripts → chat events + status
 │   ├── permissions.ts       SDK canUseTool → Approve/Reject flow
-│   ├── api.ts               loopback HTTP API (SessionStart hook attach, sessions)
+│   ├── api.ts               loopback HTTP API (SessionStart attach, permission hook, sessions)
 │   ├── input.ts             attachments → inbox
 │   └── ollama.ts            /api/show capabilities
 └── bot/

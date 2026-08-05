@@ -431,34 +431,37 @@ Tool: Bash
 
   <section class="section" id="on-your-phone">
     <header>
-      <h2>Approvals and voice, from the couch</h2>
+      <h2>Ongoing sessions stream as chat</h2>
       <p class="lede">
-        Headless sessions ask before running tools — you tap
-        <code>✓ Approve</code> or <code>✗ Reject</code> from your phone, and
-        unanswered requests expire into a deny.
+        A session running in tmux mirrors into Telegram as a conversation —
+        assistant messages, tool calls grouped into one <code>🔧</code> notice
+        per work burst, and <code>❓</code> multiple-choice questions you answer
+        with the option number. No screen-scraping.
       </p>
     </header>
 
     <div class="term">
       <div class="term-bar"><i></i><i></i><i></i><span>Telegram</span></div>
-      <pre><span class="prompt">🎙️ voice note</span>  →  🎙️ Transcription in progress…
-<span class="g">"fix the typo in the README and commit"</span>
-
-🔧 Permission requested — session a1b2c3d4
-Tool: Bash
-{"command":"git commit -am fix"}
-<span class="y">[✓ Approve]  [✗ Reject]</span></pre>
+      <pre><span class="prompt">/sessions</span>
+<span class="dim">▸</span> claude:my-project
+🔧 Bash — {"command":"npm test"}
+🔧 Read — {"path":"README.md"}
+12 tests pass, coverage 94%
+<span class="b">❓ Which approach do you prefer?</span>
+1) Refactor the parser
+2) Add a timeout + retry</pre>
     </div>
 
     <p class="note">
-      Voice notes are transcribed with Ollama's whisper model. Files you send
-      are saved to <code>~/.ollama-rc/inbox/</code> and forwarded to the
-      session as a path the model can read.
+      Files you send are saved to <code>~/.ollama-rc/inbox/</code> and forwarded
+      to the session as a path the model can read. Permissions — for headless
+      and terminal sessions alike — arrive as <code>✓ Approve</code> /
+      <code>✗ Reject</code> buttons; unanswered requests expire into a deny.
     </p>
   </section>
 
   <footer>
-    headless sessions · terminal mirroring · remote permissions · voice transcription<br>
+    session continuity · chat streaming · remote permissions · file attachments<br>
     Unofficial, not affiliated with <a href="https://anthropic.com">Anthropic</a> or <a href="https://ollama.com">Ollama</a> ·
     <a href="https://github.com/ontech7/ollama-rc/blob/main/LICENSE">MIT</a>
   </footer>

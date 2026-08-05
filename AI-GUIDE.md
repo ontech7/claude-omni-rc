@@ -23,9 +23,10 @@ cd ollama-rc
 The installer is interactive: it checks prerequisites (Node 22, Ollama, tmux),
 runs `npm install`, guides the human through the bot token and authorization
 into `.env`, optionally pulls the Ollama models, registers the launchd daemon,
-and adds the Claude Code `SessionStart` hook (auto-attach). It never overwrites
-existing `.env` values. If you are running it non-interactively, it does the
-silent steps only and prints what still needs manual edits.
+and adds the Claude Code hooks (`SessionStart` auto-attach + `PermissionRequest`
+approve/reject from Telegram). It never overwrites existing `.env` values. If
+you are running it non-interactively, it does the silent steps only and prints
+what still needs manual edits.
 
 Manual equivalent (same result, step by step):
 
@@ -62,7 +63,7 @@ npm install
 
 - `/start <code>` — pair this Telegram account (first time, if pairing is used).
 - `/rc on` / `/rc off` / `/rc status` — global armed switch. **While disarmed
-  the bot answers only `/rc`, `/help`, `/start`**; no mirroring, no injection,
+  the bot answers only `/rc`, `/help`, `/start`**; no streaming, no injection,
   no relay.
 - `/sessions` — list sessions and switch the active one (inline buttons). Only
   the active session's screen is streamed.
