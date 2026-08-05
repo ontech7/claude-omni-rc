@@ -138,4 +138,30 @@ describe('ToolBurstAggregator', () => {
     await agg.push('t2');
     expect(sends).toEqual(['t1', 't2']);
   });
+  it('serializes concurrent pushes: back-to-back calls produce one bubble', async () => {
+    const { agg, sink, edits, sends } = makeAgg();
+    await Promise.all([agg.push('t1'), agg.push('t2'), agg.push('t3')]);
+    expect(sends).toEqual(['t1']);
+    expect(edits).toEqual([
+      { id: 1, text: 't1\nt2' },
+      { id: 1, text: 't1\nt2\nt3' },
+    ]);
+  });
+  it('after an edit-failure fallback, the next push edits the new bubble', async () => {
+    const { agg, sink, sends, edits } = makeAgg();
+    (sink.edit as any).mockImplementation(async () => false);
+    await agg.push('t1'); // send id=1
+    await agg.push('t2'); // edit fallisce → send id=2
+    (sink.edit as any).mockImplementation(async (id: number, text: string) => { edits.push({ id, text }); return true; });
+    await agg.push('t3'); // deve editare la bubble 2, non ri-sendare
+    expect(sends).toEqual(['t1', 't2']);
+    expect(edits).toEqual([{ id: 2, text: 't2\nt3' }]);
+  });
+  it('when send fails (undefined), the next push starts a fresh bubble', async () => {
+    const { agg, sink, sends } = makeAgg();
+    (sink.send as any).mockImplementationOnce(async () => undefined).mockImplementation(async () => { sends.push('ok'); return 9; });
+    await agg.push('t1'); // send fallisce → nessuna bubble aperta
+    await agg.push('t2'); // send ok → bubble nuova
+    expect(sends).toEqual(['ok']);
+  });
 });

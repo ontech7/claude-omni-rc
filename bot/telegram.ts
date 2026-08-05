@@ -148,10 +148,19 @@ export interface ToolBurstSink {
 export class ToolBurstAggregator {
   private open?: { messageId: number; text: string; at: number };
   private lastWasTool = false;
+  private chain: Promise<void> = Promise.resolve();
 
   constructor(private sink: ToolBurstSink, private maxLen = 3800) {}
 
-  async push(line: string): Promise<void> {
+  // Serializza le push: il bus emette in modo sincrono e due tool_use nello stesso
+  // tick leggerebbero open/lastWasTool prima di ogni await — la catena rende le
+  // mutazioni atomiche rispetto alle push concorrenti.
+  push(line: string): Promise<void> {
+    this.chain = this.chain.then(() => this.pushNow(line)).catch(() => { /* la catena sopravvive a un errore inatteso del sink */ });
+    return this.chain;
+  }
+
+  private async pushNow(line: string): Promise<void> {
     const open = this.open;
     if (this.lastWasTool && open) {
       const next = `${open.text}\n${line}`;
@@ -162,8 +171,14 @@ export class ToolBurstAggregator {
       }
     }
     const id = await this.sink.send(line);
-    if (id !== undefined) this.open = { messageId: id, text: line, at: Date.now() };
-    this.lastWasTool = true;
+    if (id !== undefined) {
+      this.open = { messageId: id, text: line, at: Date.now() };
+      this.lastWasTool = true;
+    } else {
+      // send fallita (es. chatId assente): senza bubble aperta la prossima push
+      // deve aprirne una nuova, non editare una bubble stantia.
+      this.lastWasTool = false;
+    }
   }
 
   close(): void {
@@ -560,7 +575,11 @@ export class TelegramBot {
         void this.bot.api.sendMessage(this.chatId, permissionMessage(permission), { parse_mode: 'HTML', reply_markup: kb }).catch(() => {});
       }
     });
-    bus.on('session.result', e => { if (this.deps.manager.isArmed() && e.sessionId === this.activeSessionId) this.notify(`✅ ${htmlEscape(e.result.slice(0, 500))}`); });
+    bus.on('session.result', e => {
+      if (!this.deps.manager.isArmed() || e.sessionId !== this.activeSessionId) return;
+      this.toolBurst(e.sessionId).close(); // fine turno headless: chiude la raffica di tool
+      this.notify(`✅ ${htmlEscape(e.result.slice(0, 500))}`);
+    });
     bus.on('session.error', e => {
       if (!this.deps.manager.isArmed() || e.sessionId !== this.activeSessionId) return;
       this.toolBurst(e.sessionId).close();

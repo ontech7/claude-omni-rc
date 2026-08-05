@@ -138,7 +138,8 @@ export function peekTranscriptState(file: string): TranscriptState {
 }
 
 // Stato "in attesa dell'umano" derivato dall'ultima riga del file: un turno
-// finisce con un assistant stop_reason "end_turn" o con un system turn_duration.
+// finisce con un assistant stop_reason "end_turn"/"max_tokens" o con un system
+// turn_duration.
 export function stateFromLine(raw: string): TranscriptState {
   let d: { type?: string; subtype?: string; message?: { stop_reason?: string | null } };
   try { d = JSON.parse(raw); } catch { return 'unknown'; }
