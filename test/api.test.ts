@@ -119,4 +119,20 @@ describe('startApi', () => {
     expect(await res.text()).toBe('deny');
     expect(Date.now() - started).toBeGreaterThanOrEqual(900);
   });
+
+  it('auto-allows AskUserQuestion without a permission request', async () => {
+    const { manager, api, bus } = makeApi();
+    open.push(api);
+    await api.ready;
+    manager.setArmed(true);
+    let permissionEvents = 0;
+    bus.on('session.permission', () => { permissionEvents++; });
+    const res = await fetch(`http://127.0.0.1:${api.port()}/api/permission`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ toolName: 'AskUserQuestion', input: { questions: [{ question: 'x', options: [{ label: 'a' }] }] } }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('allow');
+    expect(permissionEvents).toBe(0); // nessuna notifica di permesso
+  });
 });

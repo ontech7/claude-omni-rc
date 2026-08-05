@@ -36,6 +36,14 @@ export function startApi(port: number, deps: ApiDeps): ApiHandle {
         let input: { toolName?: string; input?: unknown; sessionId?: string };
         try { input = JSON.parse(body); } catch { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ask'); return; }
         const toolName = input.toolName ?? 'tool';
+        // AskUserQuestion non è una richiesta di permesso: il CLI mostra il menu
+        // nel pane e la risposta arriva via tmux (bottoni della domanda). Auto-allow,
+        // niente JSON + Approve/Reject in chat.
+        if (toolName === 'AskUserQuestion') {
+          res.writeHead(200, { 'content-type': 'text/plain' });
+          res.end('allow');
+          return;
+        }
         const sid = resolveSessionId(deps.manager, input.sessionId);
         // long-poll: la richiesta resta aperta finché l'utente non decide
         // (o scade PERMISSION_TIMEOUT_SECONDS → deny).
