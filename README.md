@@ -82,7 +82,8 @@ Prefer to see what's happening? [Manual install](#manual-install) below.
 Models (pulled by the installer, or `ollama pull <name>` yourself):
 
 - `deepseek-v4-flash:0731-cloud` — the default model for headless sessions
-- `whisper-large-v3` — transcribes voice notes
+- `whisper:large-v3` — transcribes voice notes (a lighter, faster option is
+  `whisper:large-v3-turbo` — lower latency, slightly less accurate)
 
 ## Manual install
 
@@ -229,7 +230,7 @@ token and one authorization method.
 | `PAIRING_CODE` | — | secret code authorizing the first `/start <code>` |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | where Ollama listens |
 | `DEFAULT_MODEL` | `deepseek-v4-flash:0731-cloud` | model for headless sessions |
-| `WHISPER_MODEL` | `whisper-large-v3` | model for voice transcription |
+| `WHISPER_MODEL` | `whisper:large-v3` | model for voice transcription |
 | `MAX_HEADLESS_SESSIONS` | `2` | concurrent headless sessions |
 | `PERMISSION_TIMEOUT_SECONDS` | `120` | unanswered permission → deny |
 | `WORKSPACE_DIRS` | — | `:`-separated project roots for `/attach` |

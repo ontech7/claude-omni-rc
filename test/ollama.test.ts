@@ -22,7 +22,7 @@ describe('OllamaClient', () => {
     const { fetchImpl } = fakeFetch([
       { url: '/api/show', ok: true, body: { capabilities: ['vision', 'tools'] } },
     ]);
-    const client = new OllamaClient({ baseUrl: 'http://127.0.0.1:11434', whisperModel: 'whisper-large-v3', fetchImpl });
+    const client = new OllamaClient({ baseUrl: 'http://127.0.0.1:11434', whisperModel: 'whisper:large-v3', fetchImpl });
     await expect(client.hasVision('kimi-k3:cloud')).resolves.toBe(true);
   });
   it('returns false for models without vision', async () => {
@@ -42,7 +42,7 @@ describe('OllamaClient', () => {
       { url: '/api/transcribe', ok: false, status: 404 },
       { url: '/v1/audio/transcriptions', ok: true, body: { text: 'ciao mondo' } },
     ]);
-    const client = new OllamaClient({ baseUrl: 'http://127.0.0.1:11434', whisperModel: 'whisper-large-v3', fetchImpl });
+    const client = new OllamaClient({ baseUrl: 'http://127.0.0.1:11434', whisperModel: 'whisper:large-v3', fetchImpl });
     await expect(client.transcribe('/tmp/voice.wav')).resolves.toBe('ciao mondo');
   });
   it('throws when both endpoints fail', async () => {

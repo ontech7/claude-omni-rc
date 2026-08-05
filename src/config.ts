@@ -41,7 +41,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     pairingCode: env.PAIRING_CODE || undefined,
     ollamaBaseUrl: env.OLLAMA_BASE_URL ?? 'http://127.0.0.1:11434',
     defaultModel: env.DEFAULT_MODEL ?? 'deepseek-v4-flash:0731-cloud',
-    whisperModel: env.WHISPER_MODEL ?? 'whisper-large-v3',
+    whisperModel: env.WHISPER_MODEL ?? 'whisper:large-v3',
     maxHeadlessSessions: parseNum(env, 'MAX_HEADLESS_SESSIONS', 2),
     permissionTimeoutSeconds: parseNum(env, 'PERMISSION_TIMEOUT_SECONDS', 120),
     workspaceDirs: (env.WORKSPACE_DIRS ?? '').split(':').map(s => expandHome(s.trim())).filter(Boolean),

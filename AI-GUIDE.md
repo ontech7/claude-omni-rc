@@ -87,7 +87,7 @@ session ("Sessione occupata").
 - `node -v` is 22+; `./install.sh` finishes with the summary screen.
 - `.env` contains `TELEGRAM_BOT_TOKEN` and one of `ALLOWED_USER_IDS` /
   `PAIRING_CODE`.
-- `ollama list` shows `deepseek-v4-flash:0731-cloud` and `whisper-large-v3`.
+- `ollama list` shows `deepseek-v4-flash:0731-cloud` and `whisper:large-v3`.
 - From Telegram: `/rc on` replies "🔓 Remote control ARMATO"; `/new hello`
   creates a session; a permission request shows `✓ Approve / ✗ Reject`.
 
