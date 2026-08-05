@@ -191,7 +191,7 @@ export class TelegramBot {
   private chatId?: number;
   private activeSessionId?: string;
   private lastMsg = new Map<string, { messageId: number; text: string; at: number; role: 'user' | 'assistant' }>();
-  private lastNotified = new Map<string, Session['status']>();
+  private toolBursts = new Map<string, ToolBurstAggregator>();
 
   constructor(private deps: BotDeps) {
     this.bot = new Bot(deps.config.telegramBotToken);
@@ -237,6 +237,32 @@ export class TelegramBot {
     }
     const msg = await this.bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' }).catch(() => undefined);
     if (msg) this.lastMsg.set(sessionId, { messageId: msg.message_id, text, at: now, role });
+  }
+
+  // Bubble di raffica per le notifiche tool (una per sessione); il sink usa
+  // l'EditThrottler condiviso e l'API del bot. `close()` è chiamato dai handler
+  // di testo/domanda/permesso/errore (via `toolBurst(id).close()`).
+  private toolBurst(sessionId: string): ToolBurstAggregator {
+    let agg = this.toolBursts.get(sessionId);
+    if (!agg) {
+      agg = new ToolBurstAggregator({
+        edit: async (messageId, text) => {
+          const chatId = this.chatId;
+          if (!chatId) return false;
+          const ok = await this.throttler.throttled(() =>
+            this.bot.api.editMessageText(chatId, messageId, text, { parse_mode: 'HTML' }).then(() => true).catch(() => false));
+          return ok ?? false;
+        },
+        send: async text => {
+          const chatId = this.chatId;
+          if (!chatId) return undefined;
+          const msg = await this.bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' }).catch(() => undefined);
+          return msg?.message_id;
+        },
+      });
+      this.toolBursts.set(sessionId, agg);
+    }
+    return agg;
   }
 
   private isAuthorized(ctx: Context): boolean {
@@ -502,26 +528,14 @@ export class TelegramBot {
     bus.on('session.text', e => {
       if (!this.deps.manager.isArmed()) return;
       if (e.sessionId !== this.activeSessionId) return; // solo la sessione selezionata
+      this.toolBurst(e.sessionId).close(); // il testo chiude la raffica di tool
       // sia le headless che i transcript delle terminali arrivano come markdown.
       void this.forwardText(e.sessionId, mdToHtml(e.text), e.role);
-    });
-    // Stato della sessione terminale attiva: "al lavoro" vs "in attesa di te".
-    bus.on('session.updated', ({ sessionId }) => {
-      if (!this.deps.manager.isArmed()) return;
-      if (sessionId !== this.activeSessionId) return;
-      const s = this.deps.manager.get(sessionId);
-      if (!s || s.kind !== 'terminal') return;
-      if (this.lastNotified.get(sessionId) === s.status) return;
-      this.lastNotified.set(sessionId, s.status);
-      if (s.status === 'awaiting-input') {
-        this.notify('⚠️ <b>Claude is waiting for your response.</b> Send a message to continue.');
-      } else if (s.status === 'running') {
-        this.notify('🤖 Claude is working…');
-      }
     });
     bus.on('session.prompt', ({ sessionId, questions }) => {
       if (!this.deps.manager.isArmed()) return;
       if (sessionId !== this.activeSessionId) return;
+      this.toolBurst(sessionId).close();
       const blocks = questions.map(q => {
         const title = q.header ? `${q.header}: ${q.question}` : q.question;
         const opts = q.options.map((o, i) => `${i + 1}) ${htmlEscape(o.label)}${o.description ? ` — ${htmlEscape(o.description)}` : ''}`).join('\n');
@@ -532,11 +546,13 @@ export class TelegramBot {
     bus.on('session.tool', e => {
       if (!this.deps.manager.isArmed()) return;
       if (e.kind === 'tool_use' && e.sessionId === this.activeSessionId && e.input) {
-        this.notify(`🔧 <code>${htmlEscape(e.toolName)}</code> — <pre>${htmlEscape(JSON.stringify(e.input).slice(0, 300))}</pre>`);
+        const line = `🔧 <code>${htmlEscape(e.toolName)}</code> — <pre>${htmlEscape(JSON.stringify(e.input).slice(0, 300))}</pre>`;
+        void this.toolBurst(e.sessionId).push(line);
       }
     });
     bus.on('session.permission', ({ permission }) => {
       if (!this.deps.manager.isArmed()) return;
+      this.toolBurst(permission.sessionId).close();
       const kb = new InlineKeyboard()
         .text('✓ Approve', `perm:approve:${permission.id}`)
         .text('✗ Reject', `perm:deny:${permission.id}`);
@@ -545,6 +561,10 @@ export class TelegramBot {
       }
     });
     bus.on('session.result', e => { if (this.deps.manager.isArmed() && e.sessionId === this.activeSessionId) this.notify(`✅ ${htmlEscape(e.result.slice(0, 500))}`); });
-    bus.on('session.error', e => { if (this.deps.manager.isArmed() && e.sessionId === this.activeSessionId) this.notify(`❌ <b>${htmlEscape(e.message.slice(0, 500))}</b>`); });
+    bus.on('session.error', e => {
+      if (!this.deps.manager.isArmed() || e.sessionId !== this.activeSessionId) return;
+      this.toolBurst(e.sessionId).close();
+      this.notify(`❌ <b>${htmlEscape(e.message.slice(0, 500))}</b>`);
+    });
   }
 }
