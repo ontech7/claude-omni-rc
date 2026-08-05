@@ -5,10 +5,11 @@
   </picture>
 </div>
 
-<p align="center"><strong>Remote control for Claude Code, served by Ollama.</strong><br>
+<p align="center"><strong>Carry your Claude Code session with you.</strong><br>
 A local daemon plus a Telegram bot that mimics Claude Code's
-<code>/remote-control</code> — see your sessions, chat with them, and approve
-permissions from your phone — without any Anthropic infrastructure.</p>
+<code>/remote-control</code> — keep talking to any running session from your
+phone, approve permissions, and pick up exactly where you left off — without
+any Anthropic infrastructure.</p>
 
 <p align="center">
   <a href="https://github.com/ontech7/ollama-rc/actions/workflows/ci.yml"><img src="https://github.com/ontech7/ollama-rc/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -32,6 +33,11 @@ Tool: Bash
 [✓ Approve]  [✗ Reject]         ← you tap Approve from the couch
 ✅ Ran it: ollama list …
 ```
+
+Headline use case: you leave a long task running (a build, a migration, a
+multi-hour review), arm ollama-rc, walk out the door — and keep steering that
+same session, plus any other session you have running, from your phone.
+Starting brand-new conversations is a bonus, not the point.
 
 ## Why there is no native remote control
 
