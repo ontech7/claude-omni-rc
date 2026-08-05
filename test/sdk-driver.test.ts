@@ -96,4 +96,49 @@ describe('SdkDriver', () => {
     await expect(sdk.runTurn(session.id, 'b')).rejects.toThrow('busy');
     void p1;
   });
+  it('stop() aborts an in-flight turn and sets status stopped', async () => {
+    const { sdk, session, manager } = makeDriver();
+    let ac: AbortController | undefined;
+    queryMock.mockImplementationOnce(async function* (config: any) {
+      ac = config.options.abortController;
+      await new Promise<void>((_, reject) => {
+        ac!.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      });
+    });
+    const p = sdk.runTurn(session.id, 'x');
+    expect(sdk.stop(session.id)).toBe(true);
+    await p;
+    expect(manager.get(session.id)!.status).toBe('stopped');
+    expect(sdk.stop(session.id)).toBe(false); // già fermata
+  });
+  it('maps user tool_result blocks to session.tool', async () => {
+    const { sdk, session, events } = makeDriver();
+    queryMock.mockImplementationOnce(async function* () {
+      yield {
+        type: 'user', uuid: 'u', session_id: session.id,
+        message: { id: 'm', type: 'message', role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'out', is_error: false }] },
+        parent_tool_use_id: null,
+      };
+      yield resultMsg(session.id, 'ok');
+    });
+    await sdk.runTurn(session.id, 'x');
+    const tools = events.filter(e => (e as any).type === 'session.tool');
+    expect(tools).toHaveLength(1);
+    expect((tools[0] as any).kind).toBe('tool_result');
+    expect((tools[0] as any).result).toBe('out');
+  });
+  it('emits the joined SDK errors on an error result', async () => {
+    const { sdk, session, events, manager } = makeDriver();
+    queryMock.mockImplementationOnce(async function* () {
+      yield {
+        type: 'result', subtype: 'error_during_execution', uuid: 'u', session_id: session.id,
+        is_error: true, num_turns: 1, total_cost_usd: 0, usage: {}, modelUsage: {}, permission_denials: [],
+        errors: ['boom1', 'boom2'],
+      };
+    });
+    await sdk.runTurn(session.id, 'x');
+    const err = events.find(e => (e as any).type === 'session.error');
+    expect((err as any).message).toBe('boom1\nboom2');
+    expect(manager.get(session.id)!.status).toBe('error');
+  });
 });

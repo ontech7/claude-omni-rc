@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Bus } from '../src/bus.js';
@@ -114,5 +114,22 @@ describe('JsonlMirror', () => {
     appendFileSync(file, full.slice(20)); // append del resto
     mirror.poll();
     expect(events.filter(e => (e as any).text === 'parziale')).toHaveLength(1);
+  });
+  it('persists mirror offsets to disk after the debounce', () => {
+    vi.useFakeTimers();
+    try {
+      const { manager, mirror, projectsDir, dir } = makeMirror();
+      const projDir = join(dir, 'proj');
+      const encoded = encodeProjectPath(projDir);
+      manager.registerTerminal({ title: 'proj', projectDir: projDir, tmuxTarget: 'claude:proj' });
+      manager.setArmed(true);
+      const sessionDir = join(projectsDir, encoded);
+      mkdirSync(sessionDir, { recursive: true });
+      writeFileSync(join(sessionDir, 'a.jsonl'), JSON.stringify({ message: { type: 'message', role: 'assistant', content: [{ type: 'text', text: 'x' }] } }) + '\n');
+      mirror.poll();
+      vi.advanceTimersByTime(2100);
+      const state = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'));
+      expect(Object.keys(state.mirrorOffsets).length).toBeGreaterThan(0);
+    } finally { vi.useRealTimers(); }
   });
 });

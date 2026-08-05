@@ -13,10 +13,19 @@ export interface SdkDriverDeps {
 
 export class SdkDriver {
   private busy = new Set<string>();
+  private aborters = new Map<string, AbortController>();
 
   constructor(private deps: SdkDriverDeps) {}
 
   isBusy(sessionId: string): boolean { return this.busy.has(sessionId); }
+
+  // /stop (e /rc off): abort del turno in corso via AbortController (opzione SDK).
+  stop(sessionId: string): boolean {
+    const ac = this.aborters.get(sessionId);
+    if (!ac) return false;
+    ac.abort();
+    return true;
+  }
 
   async runTurn(sessionId: string, prompt: string): Promise<void> {
     const { bus, manager, config, permissionFlow } = this.deps;
@@ -25,6 +34,8 @@ export class SdkDriver {
     if (!session || session.kind !== 'headless') throw new Error(`no headless session ${sessionId}`);
     this.busy.add(sessionId);
     manager.setStatus(sessionId, 'running');
+    const ac = new AbortController();
+    this.aborters.set(sessionId, ac);
     try {
       const stream = query({
         prompt,
@@ -34,6 +45,7 @@ export class SdkDriver {
           resume: session.claudeSessionId,
           permissionMode: 'default',
           additionalDirectories: [config.inboxDir],
+          abortController: ac,
           canUseTool: (toolName, input, opts) =>
             permissionFlow.request(sessionId, toolName, input as Record<string, unknown>, opts.signal),
         },
@@ -78,10 +90,16 @@ export class SdkDriver {
       }
       if (!finished) manager.setStatus(sessionId, 'idle');
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      bus.emit({ type: 'session.error', sessionId, message });
-      manager.setStatus(sessionId, 'error');
+      if ((err as Error)?.name === 'AbortError') {
+        bus.emit({ type: 'session.error', sessionId, message: "Fermata dall'utente" });
+        manager.setStatus(sessionId, 'stopped');
+      } else {
+        const message = err instanceof Error ? err.message : String(err);
+        bus.emit({ type: 'session.error', sessionId, message });
+        manager.setStatus(sessionId, 'error');
+      }
     } finally {
+      this.aborters.delete(sessionId);
       this.busy.delete(sessionId);
     }
   }

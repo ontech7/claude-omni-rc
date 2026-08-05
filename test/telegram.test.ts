@@ -45,14 +45,10 @@ describe('permissionMessage / sessionListText', () => {
 });
 
 describe('attachmentPlan', () => {
-  it('attaches image only when the model has vision', () => {
-    expect(attachmentPlan(true, 'image')).toEqual({ attach: true });
-    const plan = attachmentPlan(false, 'image');
-    expect(plan.attach).toBe(false);
-    expect(plan.warning).toBeTruthy();
-  });
-  it('never attaches documents inline', () => {
-    expect(attachmentPlan(true, 'document')).toEqual({ attach: false });
+  it('warns only for text-only models on images (path-reference, no image blocks)', () => {
+    expect(attachmentPlan(true, 'image')).toEqual({});
+    expect(attachmentPlan(false, 'image').warning).toBeTruthy();
+    expect(attachmentPlan(true, 'document')).toEqual({});
   });
 });
 

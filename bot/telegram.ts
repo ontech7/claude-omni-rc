@@ -71,14 +71,19 @@ export function sessionListText(sessions: Session[], activeId?: string): string 
     .join('\n');
 }
 
-// spec §8: mai inoltrare blocchi immagine a modelli text-only
+// spec §8: mai inoltrare blocchi immagine a modelli text-only.
+// Nota onesta (review finale): l'inoltro immagine è un "path reference" — il modello
+// legge il file via additionalDirectories: inboxDir — NON un blocco immagine nel
+// prompt, perché l'SDK query accetta solo prompt testuali. Il flag attach è
+// volutamente assente (il codice non deve fingere un attach che non fa).
 export function attachmentPlan(
   modelHasVision: boolean,
   kind: 'image' | 'document',
-): { attach: boolean; warning?: string } {
-  if (kind === 'image' && modelHasVision) return { attach: true };
-  if (kind === 'image') return { attach: false, warning: '⚠️ Modello senza vision: inoltro solo il riferimento al file.' };
-  return { attach: false };
+): { warning?: string } {
+  if (kind === 'image' && !modelHasVision) {
+    return { warning: '⚠️ Modello senza vision: inoltro solo il riferimento al file.' };
+  }
+  return {};
 }
 
 export class EditThrottler {
@@ -199,7 +204,10 @@ export class TelegramBot {
       await this.send(ctx, '🔓 Remote control ARMATO.');
     } else if (arg === 'off') {
       this.deps.manager.setArmed(false);
-      for (const s of this.deps.manager.list()) this.deps.permissionFlow.cancelAllForSession(s.id);
+      for (const s of this.deps.manager.list()) {
+        this.deps.permissionFlow.cancelAllForSession(s.id);
+        this.deps.sdk.stop(s.id); // spegne anche i turni headless in corso
+      }
       this.deps.manager.persist();
       await this.send(ctx, '🔒 Remote control DISATTIVATO. Nessun mirror, iniezione o relay.');
     } else if (arg === 'status') {
@@ -243,7 +251,10 @@ export class TelegramBot {
 
   private async onStop(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
-    if (this.activeSessionId) this.deps.permissionFlow.cancelAllForSession(this.activeSessionId);
+    if (this.activeSessionId) {
+      this.deps.permissionFlow.cancelAllForSession(this.activeSessionId);
+      this.deps.sdk.stop(this.activeSessionId); // abort del turno in corso
+    }
     await this.send(ctx, '🛑 Fermata richiesta per la sessione attiva.');
   }
 
@@ -260,7 +271,7 @@ export class TelegramBot {
     const name = (ctx.match?.toString().trim() ?? '').toLowerCase();
     if (!name) { await this.send(ctx, 'Uso: /attach &lt;progetto&gt;'); return; }
     const projectDir = this.resolveProjectDir(name);
-    if (!projectDir) { await this.send(ctx, `Progetto "${name}" non trovato nei workspace.`); return; }
+    if (!projectDir) { await this.send(ctx, `Progetto "${htmlEscape(name)}" non trovato nei workspace.`); return; }
     const session = this.deps.manager.registerTerminal({ title: name, projectDir, tmuxTarget: `claude:${name}` });
     this.activeSessionId = session.id;
     this.deps.manager.persist();

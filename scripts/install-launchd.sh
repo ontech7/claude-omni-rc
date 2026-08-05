@@ -6,6 +6,11 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # prima della guardia -z — il || true rende raggiungibile il messaggio di errore.
 NODE="$(command -v node || true)"
 TSX="$(command -v tsx || true)"
+# tsx è una devDependency locale (node_modules/.bin) — spesso non è su PATH:
+# fallback al bin locale dopo `npm install` (vedi README).
+if [ -z "$TSX" ] && [ -x "$REPO/node_modules/.bin/tsx" ]; then
+  TSX="$REPO/node_modules/.bin/tsx"
+fi
 STATE="${STATE_DIR:-$HOME/.ollama-rc}"
 PLIST="$HOME/Library/LaunchAgents/com.ontech7.ollama-rc.plist"
 LABEL="com.ontech7.ollama-rc"

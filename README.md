@@ -17,6 +17,9 @@ Mima `/remote-control` di Claude Code senza infrastruttura Anthropic.
 - Da Telegram: `/rc on` armare · `/sessions` · `/new <testo>` · `/attach <progetto>` · `/stop` · `/status`
 - Da disattivo il bot risponde solo a `/rc`, `/help`, `/start`
 - Permessi headless: bottoni `✓ Approva` / `✗ Rifiuta` direttamente in chat
+- Media: foto/voci/file salvati in `~/.ollama-rc/inbox/`; le immagini viaggiano come
+  *riferimento al path* (il modello headless le legge via `additionalDirectories`) — non
+  come blocco immagine nel prompt (limite dell'SDK query testuale). Voci trascritte via whisper.
 
 ## Architettura
 Daemon (Node 22 + tsx) → bus eventi → bot grammy (long-polling).

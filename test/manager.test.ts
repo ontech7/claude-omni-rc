@@ -72,4 +72,15 @@ describe('SessionManager', () => {
       expect(manager.get(s.id)!.status).toBe('idle');
     } finally { vi.useRealTimers(); }
   });
+  it('never reaps a running headless session (busy-guard owns concurrency)', () => {
+    vi.useFakeTimers();
+    try {
+      const { manager } = makeManager();
+      const s = manager.createHeadless({ title: 'h', projectDir: '/tmp/h' });
+      manager.setStatus(s.id, 'running');
+      vi.advanceTimersByTime(10_000);
+      manager.reapIdle();
+      expect(manager.get(s.id)!.status).toBe('running');
+    } finally { vi.useRealTimers(); }
+  });
 });

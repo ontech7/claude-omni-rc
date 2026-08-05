@@ -88,6 +88,10 @@ export class SessionManager {
   reapIdle(): void {
     const now = Date.now();
     for (const s of this.state.sessions) {
+      // headless: il busy-guard del driver protegge la concorrenza e un turno può
+      // restare in tool-execution/think > idleGraceMs senza touch → mai reaping,
+      // altrimenti /status mentirebbe e il cap maxHeadlessSessions (spec §8) perderebbe.
+      if (s.kind === 'headless') continue;
       if (s.status === 'running' && now - new Date(s.lastActivity).getTime() >= this.deps.idleGraceMs) {
         s.status = 'idle';
         this.emitUpdated(s.id);

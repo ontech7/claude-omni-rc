@@ -66,13 +66,28 @@ export class JsonlMirror {
   private offsets: Record<string, number>;
   private partials: Record<string, string> = {};
   private timer?: NodeJS.Timeout;
+  private persistTimer?: NodeJS.Timeout;
 
   constructor(private deps: MirrorDeps) {
     this.offsets = { ...deps.manager.getState().mirrorOffsets };
   }
 
   start(): void { this.poll(); this.timer = setInterval(() => this.poll(), this.deps.config.pollIntervalMs); }
-  stop(): void { if (this.timer) clearInterval(this.timer); }
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    if (this.persistTimer) clearTimeout(this.persistTimer);
+  }
+
+  // constraint 16: gli offset vanno persistiti per la ripartenza (crash → launchd).
+  // Debounce ~2s: persist dell'intero state.json a ogni lettura, ma al massimo
+  // ogni 2 secondi, così un crash riattacca il tail vicino alla coda vera.
+  private schedulePersist(): void {
+    if (this.persistTimer) clearTimeout(this.persistTimer);
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = undefined;
+      this.deps.manager.persist();
+    }, 2000);
+  }
 
   poll(): void {
     if (!this.deps.manager.isArmed()) return;
@@ -101,6 +116,7 @@ export class JsonlMirror {
   private pollFile(key: string, absPath: string): void {
     const chunk = this.readNewChunk(key, absPath);
     if (!chunk) return;
+    this.schedulePersist();
     const encoded = key.split('/')[0];
     // matching per uguaglianza encoded (esatto per qualsiasi path)
     const session = this.deps.manager.list().find(s => encodeProjectPath(s.projectDir) === encoded);
