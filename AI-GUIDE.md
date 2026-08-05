@@ -45,16 +45,18 @@ npm install
 | allow via a code instead | set `PAIRING_CODE` in `.env`; they send `/start <code>` once |
 | arm / disarm remote control | from Telegram: `/rc on` / `/rc off` (or `ARMED_ON_START=true` in `.env`) |
 | create a headless session | from Telegram: `/new <prompt>` |
-| continue an ongoing session from the phone | make sure it runs inside tmux (`tmux new -s claude:<project>`); it then auto-appears in `/sessions` and accepts injected text |
-| auto-attach every session on start | `./install.sh` already adds the `SessionStart` hook (calls `scripts/attach.sh`); verify it in `~/.claude/settings.json` |
+| continue an ongoing session from the phone | make sure it runs inside tmux (`tmux new -s claude:<project>`); it auto-appears in `/sessions` and streams as a chat |
+| see what the model is writing | select the session with `/sessions`: its messages stream as a chat automatically |
+| answer a multiple-choice question | the question arrives as a `❓` message with the options; reply with the option number (or its text) |
+| auto-attach every session on start | `./install.sh` already adds the `SessionStart` + `PermissionRequest` hooks (see `~/.claude/settings.json`) |
 | attach a terminal (tmux) session | from Telegram: `/attach <project>` (session must be named `claude:<project>`) |
 | stop a session / a running turn | from Telegram: `/stop` |
 | approve / reject a permission | tap `✓ Approve` / `✗ Reject` on the bot message (timeout → deny) |
-| see the active session's screen | from Telegram: `/view` |
+| see the active session's raw screen | from Telegram: `/view` |
 | send a file | the bot saves it to `~/.ollama-rc/inbox/` and forwards the path |
 | check what sessions exist | from Telegram: `/sessions` or `/status` |
 | run it without launchd | `npm run dev` in the repo (foreground) |
-| uninstall ollama-rc | `./install.sh --uninstall` (asks about the Ollama model, then removes launchd, the hook, and on confirmation the state dir; `.env` is kept) |
+| uninstall ollama-rc | `./install.sh --uninstall` (asks about the Ollama model, then removes launchd, the hooks, and on confirmation the state dir; `.env` is kept) |
 
 ## Command reference (bot)
 
