@@ -70,6 +70,10 @@ bot, pair with `/start <code>` (if you chose a pairing code), then `/rc on`.
 
 Prefer to see what's happening? [Manual install](#manual-install) below.
 
+To remove everything: `./install.sh --uninstall` — it asks before removing the
+Ollama model, then removes the launchd agent, the SessionStart hook and (on
+confirmation) the state dir and `.env`.
+
 ## Prerequisites
 
 | Tool | Why | Required |

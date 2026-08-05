@@ -39,17 +39,30 @@ err()  { printf '%b\n' "${c_red}==>${c_reset} $*" >&2; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# ask_yes_no "question" → 0=yes, 1=no (non-interactive → always no)
+ask_yes_no() {
+  [ "$INTERACTIVE" -eq 0 ] && return 1
+  printf '%b' "${c_bold}$1${c_reset} [y/N]: "
+  local ans
+  read -r ans
+  case "${ans:-N}" in y|Y|yes|Yes) return 0 ;; *) return 1 ;; esac
+}
+
 usage() {
   cat <<EOF
 ollama-rc installer
 
-Usage: ./install.sh [--help]
+Usage: ./install.sh [--help|--uninstall]
 
 Guided installer for the ollama-rc daemon + Telegram bot.
 It checks prerequisites, installs npm dependencies, helps you configure
 .env (bot token + authorization), pulls the Ollama models, registers the
 background daemon (launchd) and adds the Claude Code SessionStart hook so
 every session auto-attaches to remote control.
+
+Options:
+  --uninstall   remove the launchd agent, the SessionStart hook and (on
+                confirmation) the Ollama model, the state dir and .env
 
 Environment:
   STATE_DIR   where state and logs live (default: ~/.ollama-rc)
@@ -240,6 +253,55 @@ install_hook() {
   fi
 }
 
+uninstall() {
+  printf '%b\n' "${c_bold}Uninstalling ollama-rc…${c_reset}"
+
+  # 1. launchd agent
+  local plist="$HOME/Library/LaunchAgents/com.ontech7.ollama-rc.plist"
+  if [ -f "$plist" ]; then
+    launchctl unload "$plist" 2>/dev/null || true
+    rm -f "$plist"
+    ok "launchd agent removed."
+  else
+    warn "No launchd agent found — nothing to remove."
+  fi
+
+  # 2. SessionStart hook da ~/.claude/settings.json (preserva il resto)
+  if have node; then
+    node "$REPO_DIR/scripts/setup-hook.mjs" --remove "$HOME/.claude/settings.json" "$REPO_DIR/scripts/attach.sh"
+  else
+    warn "node not found — remove the SessionStart hook manually from ~/.claude/settings.json."
+  fi
+
+  # 3. modello Ollama (solo su conferma: può essere usato anche fuori da ollama-rc)
+  local model
+  model="$(get_env DEFAULT_MODEL 2>/dev/null)"
+  [ -n "$model" ] || model="$DEFAULT_MODEL_FALLBACK"
+  if have ollama && ask_yes_no "Remove the Ollama model '$model'?"; then
+    if ollama rm "$model" >/dev/null 2>&1; then
+      ok "Model '$model' removed."
+    else
+      warn "Failed to remove '$model' — try: ollama rm $model"
+    fi
+  else
+    warn "Keeping the Ollama model '$model'."
+  fi
+
+  # 4. stato e segreti (su conferma)
+  if ask_yes_no "Remove the state dir '$STATE_DIR' (state, logs, inbox)?"; then
+    rm -rf "$STATE_DIR"
+    ok "Removed $STATE_DIR."
+  else
+    warn "Keeping $STATE_DIR."
+  fi
+  if [ -f "$ENV_FILE" ] && ask_yes_no "Remove '$ENV_FILE' (your local secrets)?"; then
+    rm -f "$ENV_FILE"
+    ok "Removed $ENV_FILE."
+  fi
+
+  ok "ollama-rc uninstalled. The repo itself is not removed — delete it manually if you want."
+}
+
 print_summary() {
   cat <<EOF
 
@@ -267,6 +329,7 @@ EOF
 main() {
   case "${1:-}" in
     --help|-h) usage; exit 0 ;;
+    --uninstall|-u) uninstall; exit 0 ;;
     --) ;;
     "") ;;
     *) err "Unknown option: $1"; usage; exit 1 ;;
