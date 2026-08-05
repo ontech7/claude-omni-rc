@@ -56,7 +56,7 @@ describe('parseLine', () => {
 });
 
 describe('JsonlMirror', () => {
-  it('reads new lines from offset and emits events for a registered session', () => {
+  it('consumes pre-existing backlog silently, then streams new lines', () => {
     const { manager, mirror, projectsDir, dir, events } = makeMirror();
     const projDir = join(dir, 'proj');
     const encoded = encodeProjectPath(projDir);
@@ -67,12 +67,17 @@ describe('JsonlMirror', () => {
     mkdirSync(sessionDir, { recursive: true });
     const file = join(sessionDir, 'a.jsonl');
     writeFileSync(file, '{"type":"queue-operation"}\n' + JSON.stringify({ message: { type: 'message', role: 'assistant', content: [{ type: 'text', text: 'primo' }] } }) + '\n');
+    // prima osservazione: lo storico pre-esistente viene consumato in silenzio (niente flood)
     mirror.poll();
-    expect(events.filter(e => (e as any).text === 'primo')).toHaveLength(1);
+    expect(events.filter(e => (e as any).text === 'primo')).toHaveLength(0);
+    // le righe nuove streammano da qui in poi
+    appendFileSync(file, JSON.stringify({ message: { type: 'message', role: 'assistant', content: [{ type: 'text', text: 'secondo' }] } }) + '\n');
+    mirror.poll();
+    expect(events.filter(e => (e as any).text === 'secondo')).toHaveLength(1);
     expect(manager.get(s.id)!.status).toBe('running');
-    // seconda poll: nessun duplicato
+    // poll successiva: nessun duplicato
     mirror.poll();
-    expect(events.filter(e => (e as any).text === 'primo')).toHaveLength(1);
+    expect(events.filter(e => (e as any).text === 'secondo')).toHaveLength(1);
   });
   it('is a no-op when disarmed', () => {
     const { manager, mirror, projectsDir, dir, events } = makeMirror();
@@ -86,17 +91,36 @@ describe('JsonlMirror', () => {
     mirror.poll();
     expect(events).toHaveLength(0);
   });
-  it('auto-registers a terminal session and emits the discovered events', async () => {
-    const { manager, mirror, projectsDir, dir, events } = makeMirror(['claude:auto']);
+  it('auto-registers a terminal session from a tmux claude:* match without replaying backlog', async () => {
+    const { manager, mirror, projectsDir, events } = makeMirror(['claude:auto']);
     manager.setArmed(true);
     const encoded = encodeProjectPath('/work/auto');
     const sessionDir = join(projectsDir, encoded);
     mkdirSync(sessionDir, { recursive: true });
-    writeFileSync(join(sessionDir, 'a.jsonl'), JSON.stringify({ message: { type: 'message', role: 'assistant', content: [{ type: 'text', text: 'hi' }] } }) + '\n');
+    const file = join(sessionDir, 'a.jsonl');
+    writeFileSync(file, JSON.stringify({ message: { type: 'message', role: 'assistant', content: [{ type: 'text', text: 'old' }] } }) + '\n');
     mirror.poll();
     await vi.waitFor(() => expect(manager.findByTmuxTarget('claude:auto')).toBeDefined());
-    // il primo batch letto in questa poll viene emesso dopo la registrazione (non perso)
-    await vi.waitFor(() => expect(events.some(e => (e as any).text === 'hi')).toBe(true));
+    // lo storico pre-esistente non viene rimbalzato sul bot
+    expect(events.some(e => (e as any).text === 'old')).toBe(false);
+    // la nuova attività streamma
+    appendFileSync(file, JSON.stringify({ message: { type: 'message', role: 'assistant', content: [{ type: 'text', text: 'fresh' }] } }) + '\n');
+    mirror.poll();
+    await vi.waitFor(() => expect(events.some(e => (e as any).text === 'fresh')).toBe(true));
+  });
+  it('auto-registers an active session without a tmux target (read-only mirror)', async () => {
+    const { manager, mirror, projectsDir, dir } = makeMirror([]);
+    manager.setArmed(true);
+    const projDir = join(dir, 'ongoing');
+    const encoded = encodeProjectPath(projDir);
+    const sessionDir = join(projectsDir, encoded);
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(join(sessionDir, 'a.jsonl'), JSON.stringify({ message: { type: 'message', role: 'assistant', content: [{ type: 'text', text: 'x' }] } }) + '\n');
+    mirror.poll();
+    await vi.waitFor(() => expect(manager.list().some(s => s.kind === 'terminal')).toBe(true));
+    const s = manager.list()[0];
+    expect(s.tmuxTarget).toBeUndefined();
+    expect(s.title).toBe('ongoing');
   });
   it('does not lose a partial trailing line across polls', () => {
     const { manager, mirror, projectsDir, dir, events } = makeMirror();

@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+- **Session discovery** — the daemon now surfaces *every* session with recent
+  activity in `~/.claude/projects`, not only tmux `claude:*` ones, so
+  `/sessions` always reflects what's running. tmux `claude:*` sessions stay
+  fully controllable (mirror + inject); other sessions are read-only mirrors.
+  Pre-existing history is consumed silently on attach — no replay flood on the
+  bot, only activity from that point on.
+- **Bot in English** — all user-facing bot messages are now English (the bot
+  was previously Italian).
+- **Command menu** — the bot registers `/rc`, `/sessions`, `/new`, `/stop`,
+  `/status`, `/attach`, `/help` via `setMyCommands`, so Telegram suggests them
+  when you type `/`.
+- **Injection guard** — the bot explains that a non-tmux terminal session
+  can't receive injected text (with the `tmux new -s claude:<project>` hint).
+
 ## [0.1.0] - 2026-08-05
 
 Initial release — Phase 1 MVP: local daemon + Telegram bot that mimics Claude

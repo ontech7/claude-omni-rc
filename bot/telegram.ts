@@ -61,11 +61,11 @@ export function htmlEscape(s: string): string {
 
 export function permissionMessage(req: PermissionRequest): string {
   const input = htmlEscape(JSON.stringify(req.input, null, 2).slice(0, 1000));
-  return `🔧 Permesso richiesto — sessione <b>${htmlEscape(req.sessionId.slice(0, 8))}</b>\nTool: <code>${htmlEscape(req.toolName)}</code>\n<pre>${input}</pre>`;
+  return `🔧 Permission requested — session <b>${htmlEscape(req.sessionId.slice(0, 8))}</b>\nTool: <code>${htmlEscape(req.toolName)}</code>\n<pre>${input}</pre>`;
 }
 
 export function sessionListText(sessions: Session[], activeId?: string): string {
-  if (!sessions.length) return 'Nessuna sessione.';
+  if (!sessions.length) return 'No sessions.';
   return sessions
     .map(s => `${s.id === activeId ? '▸' : ' '} <b>${htmlEscape(s.id.slice(0, 8))}</b> [${s.kind}] ${htmlEscape(s.title)} — ${s.status}`)
     .join('\n');
@@ -81,7 +81,7 @@ export function attachmentPlan(
   kind: 'image' | 'document',
 ): { warning?: string } {
   if (kind === 'image' && !modelHasVision) {
-    return { warning: '⚠️ Modello senza vision: inoltro solo il riferimento al file.' };
+    return { warning: '⚠️ This model has no vision: forwarding only the file path reference.' };
   }
   return {};
 }
@@ -124,7 +124,17 @@ export class TelegramBot {
   }
 
   async start(): Promise<void> {
-    if (!this.deps.config.telegramBotToken) throw new Error('TELEGRAM_BOT_TOKEN mancante');
+    if (!this.deps.config.telegramBotToken) throw new Error('TELEGRAM_BOT_TOKEN missing');
+    // menu dei comandi che Telegram mostra quando l'utente digita "/"
+    await this.bot.api.setMyCommands([
+      { command: 'rc', description: 'Arm / disarm remote control' },
+      { command: 'sessions', description: 'List and switch sessions' },
+      { command: 'new', description: 'Start a headless session' },
+      { command: 'stop', description: 'Stop the active session' },
+      { command: 'status', description: 'Active session status' },
+      { command: 'attach', description: 'Attach a tmux terminal session' },
+      { command: 'help', description: 'Show all commands' },
+    ]).catch(() => {});
     await this.bot.start({ drop_pending_updates: true });
   }
   async stop(): Promise<void> { await this.bot.stop(); }
@@ -156,14 +166,14 @@ export class TelegramBot {
 
   private authorize(ctx: Context): boolean {
     if (this.isAuthorized(ctx)) { this.chatId = ctx.chat?.id ?? this.chatId; return true; }
-    void this.send(ctx, '⛔ Non autorizzato. Inviami <code>/start &lt;codice di pairing&gt;</code>.');
+    void this.send(ctx, '⛔ Not authorized. Send <code>/start &lt;pairing code&gt;</code>.');
     return false;
   }
 
   private register(): void {
     const bot = this.bot;
     bot.command('start', ctx => this.onStart(ctx));
-    bot.command('help', ctx => { if (this.authorize(ctx)) this.send(ctx, 'Comandi: /rc on|off|status · /sessions · /new &lt;testo&gt; · /stop · /status · /attach &lt;progetto&gt; · /help'); });
+    bot.command('help', ctx => { if (this.authorize(ctx)) this.send(ctx, 'Commands: /rc on|off|status · /sessions · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /help'); });
     bot.command('rc', ctx => this.onRc(ctx));
     bot.command('sessions', ctx => this.onSessions(ctx));
     bot.command('new', ctx => this.onNew(ctx));
@@ -182,7 +192,7 @@ export class TelegramBot {
     if (!userId) return;
     if (this.isAuthorized(ctx)) {
       this.chatId = ctx.chat?.id;
-      await this.send(ctx, `👋 Benvenuto! Stato: ${this.deps.manager.isArmed() ? '🔓 armed' : '🔒 disattivato'}. Usa /help.`);
+      await this.send(ctx, `👋 Welcome! State: ${this.deps.manager.isArmed() ? '🔓 armed' : '🔒 disarmed'}. Use /help.`);
       return;
     }
     const code = ctx.match?.toString().trim() ?? '';
@@ -190,9 +200,9 @@ export class TelegramBot {
       this.deps.manager.addAuthorizedUser(userId);
       this.deps.manager.persist();
       this.chatId = ctx.chat?.id;
-      await this.send(ctx, '✅ Pairing riuscito. Usa /help.');
+      await this.send(ctx, '✅ Pairing successful. Use /help.');
     } else {
-      await this.send(ctx, '⛔ Non autorizzato. Inviami <code>/start &lt;codice di pairing&gt;</code>.');
+      await this.send(ctx, '⛔ Not authorized. Send <code>/start &lt;pairing code&gt;</code>.');
     }
   }
 
@@ -201,7 +211,7 @@ export class TelegramBot {
     const arg = (ctx.match?.toString().trim() ?? '').toLowerCase();
     if (arg === 'on') {
       this.deps.manager.setArmed(true); this.deps.manager.persist();
-      await this.send(ctx, '🔓 Remote control ARMATO.');
+      await this.send(ctx, '🔓 Remote control ARMED.');
     } else if (arg === 'off') {
       this.deps.manager.setArmed(false);
       for (const s of this.deps.manager.list()) {
@@ -209,24 +219,31 @@ export class TelegramBot {
         this.deps.sdk.stop(s.id); // spegne anche i turni headless in corso
       }
       this.deps.manager.persist();
-      await this.send(ctx, '🔒 Remote control DISATTIVATO. Nessun mirror, iniezione o relay.');
+      await this.send(ctx, '🔒 Remote control DISARMED. No mirroring, injection or relay.');
     } else if (arg === 'status') {
-      await this.send(ctx, `Interruttore: ${this.deps.manager.isArmed() ? '🔓 armed' : '🔒 disattivato'}`);
+      await this.send(ctx, `Switch: ${this.deps.manager.isArmed() ? '🔓 armed' : '🔒 disarmed'}`);
     } else {
-      await this.send(ctx, 'Uso: /rc on | /rc off | /rc status');
+      await this.send(ctx, 'Usage: /rc on | /rc off | /rc status');
     }
   }
 
   private requireArmed(ctx: Context): boolean {
-    if (!this.deps.manager.isArmed()) { void this.send(ctx, '🔒 Remote control disattivato. Usa /rc on.'); return false; }
+    if (!this.deps.manager.isArmed()) { void this.send(ctx, '🔒 Remote control is off. Send /rc on.'); return false; }
     return true;
   }
 
   private async onSessions(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
+    const list = this.deps.manager.list();
+    if (!list.length) {
+      await ctx.reply(
+        'No sessions yet.\n\nRun Claude Code inside tmux and it will show up here automatically:\n<code>tmux new -s claude:&lt;project&gt;</code>\n\nOr start a headless session:\n<code>/new &lt;prompt&gt;</code>',
+        { parse_mode: 'HTML' });
+      return;
+    }
     const kb = new InlineKeyboard();
-    for (const s of this.deps.manager.list()) kb.text(s.id.slice(0, 6), `sess:select:${s.id}`);
-    await ctx.reply(sessionListText(this.deps.manager.list(), this.activeSessionId), {
+    for (const s of list) kb.text(s.id.slice(0, 6), `sess:select:${s.id}`);
+    await ctx.reply(sessionListText(list, this.activeSessionId), {
       parse_mode: 'HTML', reply_markup: kb,
     });
   }
@@ -234,16 +251,16 @@ export class TelegramBot {
   private async onNew(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
     const text = ctx.match?.toString().trim() ?? '';
-    if (!text) { await this.send(ctx, 'Uso: /new &lt;testo&gt;'); return; }
+    if (!text) { await this.send(ctx, 'Usage: /new &lt;text&gt;'); return; }
     const running = this.deps.manager.list().filter(s => s.kind === 'headless' && s.status === 'running').length;
-    if (running >= this.deps.config.maxHeadlessSessions) { await this.send(ctx, `Limite di ${this.deps.config.maxHeadlessSessions} sessioni headless attive raggiunto.`); return; }
+    if (running >= this.deps.config.maxHeadlessSessions) { await this.send(ctx, `Reached the limit of ${this.deps.config.maxHeadlessSessions} active headless sessions.`); return; }
     const projectDir = this.deps.config.workspaceDirs[0] ?? homedir();
     const session = this.deps.manager.createHeadless({
       title: text.slice(0, 40), projectDir, model: this.deps.config.defaultModel,
     });
     this.activeSessionId = session.id;
     this.deps.manager.persist();
-    await this.send(ctx, `🆕 Sessione <b>${htmlEscape(session.id.slice(0, 8))}</b> avviata.`);
+    await this.send(ctx, `🆕 Session <b>${htmlEscape(session.id.slice(0, 8))}</b> started.`);
     // NON await: grammy processa gli update in sequenza — aspettare un turno di minuti
     // bloccherebbe /stop, /rc off e i callback. Il driver emette gli eventi sul bus.
     void this.deps.sdk.runTurn(session.id, text);
@@ -255,27 +272,27 @@ export class TelegramBot {
       this.deps.permissionFlow.cancelAllForSession(this.activeSessionId);
       this.deps.sdk.stop(this.activeSessionId); // abort del turno in corso
     }
-    await this.send(ctx, '🛑 Fermata richiesta per la sessione attiva.');
+    await this.send(ctx, '🛑 Stop requested for the active session.');
   }
 
   private async onStatus(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
     const s = this.activeSessionId ? this.deps.manager.get(this.activeSessionId) : undefined;
     await this.send(ctx, s
-      ? `Sessione attiva: <b>${s.id.slice(0, 8)}</b> [${s.kind}] — ${s.status}`
-      : 'Nessuna sessione attiva. Crea con /new.');
+      ? `Active session: <b>${s.id.slice(0, 8)}</b> [${s.kind}] — ${s.status}`
+      : 'No active session. Create one with /new.');
   }
 
   private async onAttach(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
     const name = (ctx.match?.toString().trim() ?? '').toLowerCase();
-    if (!name) { await this.send(ctx, 'Uso: /attach &lt;progetto&gt;'); return; }
+    if (!name) { await this.send(ctx, 'Usage: /attach &lt;project&gt;'); return; }
     const projectDir = this.resolveProjectDir(name);
-    if (!projectDir) { await this.send(ctx, `Progetto "${htmlEscape(name)}" non trovato nei workspace.`); return; }
+    if (!projectDir) { await this.send(ctx, `Project "${htmlEscape(name)}" not found in the workspaces.`); return; }
     const session = this.deps.manager.registerTerminal({ title: name, projectDir, tmuxTarget: `claude:${name}` });
     this.activeSessionId = session.id;
     this.deps.manager.persist();
-    await this.send(ctx, `📎 Sessione terminale <b>${htmlEscape(session.id.slice(0, 8))}</b> collegata a <code>claude:${htmlEscape(name)}</code>.`);
+    await this.send(ctx, `📎 Terminal session <b>${htmlEscape(session.id.slice(0, 8))}</b> attached to <code>claude:${htmlEscape(name)}</code>.`);
   }
 
   private resolveProjectDir(name: string): string | undefined {
@@ -290,42 +307,46 @@ export class TelegramBot {
     if (!this.authorize(ctx)) return;
     // da disattivo nessuna approvazione/deny/switch (constraint 8): un permesso
     // in sospeso resta pending e scade → deny per timeout.
-    if (!this.deps.manager.isArmed()) { await ctx.answerCallbackQuery({ text: '🔒 Remote control disattivato' }); return; }
+    if (!this.deps.manager.isArmed()) { await ctx.answerCallbackQuery({ text: '🔒 Remote control is off' }); return; }
     const data = ctx.callbackQuery?.data ?? '';
     try {
       const { action, id } = parseCallbackData(data);
       if (action === 'approve') {
         const ok = this.deps.permissionFlow.approve(id);
-        await ctx.answerCallbackQuery({ text: ok ? '✓ Approvato' : 'Già risolto' });
+        await ctx.answerCallbackQuery({ text: ok ? '✓ Approved' : 'Already resolved' });
       } else if (action === 'deny') {
         const ok = this.deps.permissionFlow.deny(id);
-        await ctx.answerCallbackQuery({ text: ok ? '✗ Rifiutato' : 'Già risolto' });
+        await ctx.answerCallbackQuery({ text: ok ? '✗ Rejected' : 'Already resolved' });
       } else {
         const s = this.deps.manager.get(id);
         if (s) this.activeSessionId = s.id;
-        await ctx.answerCallbackQuery({ text: 'Sessione selezionata' });
+        await ctx.answerCallbackQuery({ text: 'Session selected' });
         await ctx.editMessageText(sessionListText(this.deps.manager.list(), this.activeSessionId), { parse_mode: 'HTML' });
       }
     } catch {
-      await ctx.answerCallbackQuery({ text: 'Dato non valido' });
+      await ctx.answerCallbackQuery({ text: 'Invalid data' });
     }
   }
 
   private async routeMessageToSession(ctx: Context, text: string): Promise<void> {
     const session = this.activeSessionId ? this.deps.manager.get(this.activeSessionId) : this.deps.manager.list()[0];
-    if (!session) { await this.send(ctx, 'Nessuna sessione. Crea con /new o /attach.'); return; }
+    if (!session) { await this.send(ctx, 'No session. Create one with /new or /attach.'); return; }
     if (session.kind === 'headless') {
       if (this.deps.sdk.isBusy(session.id)) {
-        await this.send(ctx, '⏳ Sessione occupata: aspetta che diventi idle prima di inoltrare.');
+        await this.send(ctx, '⏳ Session busy: wait for it to go idle before forwarding.');
         return;
       }
       void this.deps.sdk.runTurn(session.id, text); // non bloccante (vedi onNew)
     } else {
-      if (!this.deps.manager.isIdle(session.id)) {
-        await this.send(ctx, '⏳ Sessione occupata: aspetta che diventi idle prima di iniettare.');
+      if (!session.tmuxTarget) {
+        await this.send(ctx, 'This session is not running in tmux, so text can’t be injected into it. Restart it in tmux to continue from here:\n<code>tmux new -s claude:&lt;project&gt;</code>');
         return;
       }
-      await this.deps.tmux.injectText(session.tmuxTarget!, text);
+      if (!this.deps.manager.isIdle(session.id)) {
+        await this.send(ctx, '⏳ Session busy: wait for it to go idle before injecting.');
+        return;
+      }
+      await this.deps.tmux.injectText(session.tmuxTarget, text);
     }
   }
 
@@ -336,7 +357,7 @@ export class TelegramBot {
     // restringe; `?? ''` è sicuro perché il filtro message:text scatta solo su testi.
     const text = ctx.message.text ?? '';
     if (text.startsWith('/')) return; // gestiti dai comandi
-    if (!this.deps.manager.isArmed()) { await this.send(ctx, '🔒 Remote control disattivato. Usa /rc on.'); return; }
+    if (!this.deps.manager.isArmed()) { await this.send(ctx, '🔒 Remote control is off. Send /rc on.'); return; }
     await this.routeMessageToSession(ctx, text);
   }
 
@@ -352,32 +373,32 @@ export class TelegramBot {
   private async onPhoto(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
     const session = this.activeSessionId ? this.deps.manager.get(this.activeSessionId) : this.deps.manager.list()[0];
-    if (!session) { await this.send(ctx, 'Nessuna sessione. Crea con /new o /attach.'); return; }
+    if (!session) { await this.send(ctx, 'No session. Create one with /new or /attach.'); return; }
     const file = await ctx.getFile();
-    if (!file.file_path) { await this.send(ctx, 'File non scaricabile.'); return; }
+    if (!file.file_path) { await this.send(ctx, 'File not downloadable.'); return; }
     const buf = await this.downloadTelegramFile(file.file_path);
     const path = await this.deps.inbox.saveAttachment(buf, `image-${Date.now()}.jpg`);
     let hasVision = false;
     try { hasVision = await this.deps.ollama.hasVision(session.model ?? this.deps.config.defaultModel); } catch { /* assume no vision */ }
     const plan = attachmentPlan(hasVision, 'image');
     if (plan.warning) await this.send(ctx, plan.warning);
-    await this.routeMessageToSession(ctx, `[Immagine allegata: ${path}]`);
+    await this.routeMessageToSession(ctx, `[Image attached: ${path}]`);
   }
 
   private async onVoice(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
     if (!ctx.message?.voice) return;
     const file = await ctx.getFile();
-    if (!file.file_path) { await this.send(ctx, 'File non scaricabile.'); return; }
+    if (!file.file_path) { await this.send(ctx, 'File not downloadable.'); return; }
     const buf = await this.downloadTelegramFile(file.file_path);
     const path = await this.deps.inbox.saveAttachment(buf, `voice-${Date.now()}.ogg`);
-    await this.send(ctx, '🎙️ Trascrizione in corso…');
+    await this.send(ctx, '🎙️ Transcribing…');
     try {
       const text = await this.deps.inbox.voiceToText(path);
-      if (!text.trim()) { await this.send(ctx, 'Trascrizione vuota.'); return; }
+      if (!text.trim()) { await this.send(ctx, 'Empty transcription.'); return; }
       await this.routeMessageToSession(ctx, text);
     } catch (e) {
-      await this.send(ctx, `❌ Trascrizione fallita: ${htmlEscape(e instanceof Error ? e.message : String(e))}`);
+      await this.send(ctx, `❌ Transcription failed: ${htmlEscape(e instanceof Error ? e.message : String(e))}`);
     }
   }
 
@@ -386,11 +407,11 @@ export class TelegramBot {
     const doc = ctx.message?.document;
     if (!doc) return;
     const file = await ctx.getFile();
-    if (!file.file_path) { await this.send(ctx, 'File non scaricabile.'); return; }
+    if (!file.file_path) { await this.send(ctx, 'File not downloadable.'); return; }
     const buf = await this.downloadTelegramFile(file.file_path);
     const path = await this.deps.inbox.saveAttachment(buf, doc.file_name ?? `doc-${Date.now()}`);
-    await this.send(ctx, `📄 File salvato: <code>${htmlEscape(path)}</code>`);
-    await this.routeMessageToSession(ctx, `[File allegato: ${path}]`);
+    await this.send(ctx, `📄 File saved: <code>${htmlEscape(path)}</code>`);
+    await this.routeMessageToSession(ctx, `[File attached: ${path}]`);
   }
 
   private subscribeBus(): void {

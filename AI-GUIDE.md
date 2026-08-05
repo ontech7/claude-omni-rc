@@ -45,6 +45,7 @@ npm install
 | allow via a code instead | set `PAIRING_CODE` in `.env`; they send `/start <code>` once |
 | arm / disarm remote control | from Telegram: `/rc on` / `/rc off` (or `ARMED_ON_START=true` in `.env`) |
 | create a headless session | from Telegram: `/new <prompt>` |
+| continue an ongoing session from the phone | make sure it runs inside tmux (`tmux new -s claude:<project>`); it then auto-appears in `/sessions` and accepts injected text |
 | attach a terminal (tmux) session | from Telegram: `/attach <project>` (session must be named `claude:<project>`) |
 | stop a session / a running turn | from Telegram: `/stop` |
 | approve / reject a permission | tap `✓ Approve` / `✗ Reject` on the bot message (timeout → deny) |
@@ -67,7 +68,8 @@ npm install
 - `/help` — list commands.
 
 Plain messages go to the active session. Text is never accepted by a busy
-session ("Sessione occupata").
+session ("Session busy"). Terminal sessions can only receive text when they
+run inside tmux (`claude:<project>`).
 
 ## Configuration & data
 
@@ -88,7 +90,7 @@ session ("Sessione occupata").
 - `.env` contains `TELEGRAM_BOT_TOKEN` and one of `ALLOWED_USER_IDS` /
   `PAIRING_CODE`.
 - `ollama list` shows `deepseek-v4-flash:0731-cloud` and `whisper:large-v3`.
-- From Telegram: `/rc on` replies "🔓 Remote control ARMATO"; `/new hello`
+- From Telegram: `/rc on` replies "🔓 Remote control ARMED"; `/new hello`
   creates a session; a permission request shows `✓ Approve / ✗ Reject`.
 
 ## Links

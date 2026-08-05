@@ -138,6 +138,21 @@ tmux new -s claude:my-project    # then run `claude` inside
 The daemon discovers `claude:*` tmux sessions and mirrors them (read-only);
 with `/attach` you can also attach one explicitly.
 
+### How sessions get attached
+
+- **Inside tmux (fully controllable)** — start Claude Code in a tmux session
+  named `claude:<project>`: the daemon mirrors it (read-only tail of its
+  JSONL) *and* can inject your messages as text via tmux, so you can continue
+  it from Telegram exactly as if you were at the keyboard.
+- **Any active session (read-only)** — the daemon also surfaces every session
+  with recent activity in `~/.claude/projects`, even one that isn't in tmux,
+  so `/sessions` always reflects what's running. Text can't be injected into
+  a session that isn't in tmux: restart it inside `tmux new -s claude:<project>`
+  to continue it from the bot.
+
+History is never replayed: when a session attaches, Telegram only sees
+activity from that point on — no flood of the past transcript.
+
 | Command | What it does |
 |---------|--------------|
 | `/start <code>` | pair this Telegram account (first time) |
@@ -151,8 +166,9 @@ with `/attach` you can also attach one explicitly.
 
 Plain text messages go to the active session (default: the most recent one):
 headless sessions receive them as a new turn, terminal sessions receive them
-as injected text (only while idle). Up to `MAX_HEADLESS_SESSIONS` headless
-sessions run concurrently — the Ollama Cloud quota is finite.
+as injected text (only while idle, and only when running in tmux). Up to
+`MAX_HEADLESS_SESSIONS` headless sessions run concurrently — the Ollama Cloud
+quota is finite.
 
 ## Remote permissions
 
@@ -246,11 +262,11 @@ token and one authorization method.
 
 ## Troubleshooting
 
-**"Non autorizzato. Inviami /start <codice di pairing>."**
+**"Not authorized. Send /start <pairing code>."**
 You're not allowlisted and haven't paired. Send `/start <code>` with the
 `PAIRING_CODE` from `.env`, or add your id to `ALLOWED_USER_IDS`.
 
-**The bot says "Remote control disattivato. Usa /rc on."**
+**The bot says "Remote control is off. Send /rc on."**
 That's the armed switch doing its job — everything is gated on it. Send
 `/rc on` from Telegram (or restart the daemon with `ARMED_ON_START=true`).
 
@@ -266,9 +282,13 @@ Start Ollama (the app or `ollama serve`). The daemon needs it at
 Send `/stop` — it aborts the current turn via an `AbortController` and marks
 the session stopped.
 
-**"Sessione occupata" when sending a message.**
+**"Session busy" when sending a message.**
 The session is mid-turn. Wait for it to go idle; terminal sessions accept
 text only while idle (the daemon never injects blindly).
+
+**The bot says text "can't be injected" into a session.**
+That session isn't running inside tmux. Restart it with `tmux new -s
+claude:<project>` and it becomes continuable from Telegram.
 
 **Where is my data stored?**
 State (`armed`, sessions) in `~/.ollama-rc/state.json`, attachments in

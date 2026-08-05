@@ -24,6 +24,10 @@ export interface ParsedEvent {
   isError?: boolean;
 }
 
+// Un progetto con JSONL modificati negli ultimi N minuti conta come "sessione in
+// corso" e viene auto-registrato come mirror anche senza una sessione tmux claude:*.
+const AUTO_REGISTER_FRESH_MS = 15 * 60_000;
+
 // Claude Code: ogni '/' (incluso l'iniziale) diventa '-'.
 export function encodeProjectPath(projectDir: string): string {
   return projectDir.replace(/\//g, '-');
@@ -114,16 +118,42 @@ export class JsonlMirror {
   }
 
   private pollFile(key: string, absPath: string): void {
+    const encoded = key.split('/')[0];
+    // Prima osservazione di un file già esistente: consuma lo storico in silenzio
+    // (offset → EOF, nessun emit). Niente replay di sessioni passate sul bot — da
+    // Telegram si vede solo l'attività che arriva DOPO l'arm. Se il file è appena
+    // stato creato (size 0) si parte da zero e le righe successive streammano.
+    if (this.offsets[key] === undefined) {
+      let size: number;
+      try { size = statSync(absPath).size; } catch { return; }
+      // marca il file come osservato: da qui in poi è il path normale a gestire
+      // offset e righe parziali (senza questa marcatura, un file con solo una riga
+      // incompleta resterebbe in "prima osservazione" e la riga completata dopo
+      // verrebbe scartata come backlog)
+      this.offsets[key] = 0;
+      this.deps.manager.getState().mirrorOffsets[key] = 0;
+      if (size > 0) {
+        // File pre-esistente: consuma lo storico in silenzio fino all'ultima riga
+        // completa (readNewChunk gestisce anche una riga finale incompleta) senza
+        // emettere nulla — niente flood di sessioni passate sul bot. La dir va
+        // registrata comunque se è una sessione in corso, così /sessions la vede.
+        this.readNewChunk(key, absPath);
+        this.schedulePersist();
+        if (!this.deps.manager.list().some(s => encodeProjectPath(s.projectDir) === encoded)) {
+          this.autoRegister(encoded);
+        }
+      }
+      return;
+    }
     const chunk = this.readNewChunk(key, absPath);
     if (!chunk) return;
     this.schedulePersist();
-    const encoded = key.split('/')[0];
     // matching per uguaglianza encoded (esatto per qualsiasi path)
     const session = this.deps.manager.list().find(s => encodeProjectPath(s.projectDir) === encoded);
     if (session) {
       this.emitLines(session.id, chunk.text);
     } else {
-      this.autoRegisterAndEmit(encoded, chunk.text);
+      this.autoRegister(encoded);
     }
   }
 
@@ -178,24 +208,41 @@ export class JsonlMirror {
     }
   }
 
-  // Auto-registrazione (spec §4): se la dir encoded non ha una sessione, cerca un
-  // target tmux `claude:<name>` il cui name sia suffisso della dir encoded. Gli eventi
-  // letti in QUESTA poll vengono emessi subito dopo la registrazione (il primo batch
-  // non va perso). projectDir best-effort via decode: encode(decode(encoded))===encoded.
-  private autoRegisterAndEmit(encoded: string, text: string): void {
+  // Auto-registrazione (spec §4, estesa): se la dir encoded non ha una sessione,
+  // la registra come terminale quando (a) esiste una sessione tmux `claude:<name>`
+  // il cui name è suffisso della dir encoded (→ continuabile via injection), oppure
+  // (b) i JSONL sono stati modificati di recente (→ mirror read-only, senza target).
+  // Nessun backlog emesso: il replay dello storico è già stato consumato in silenzio
+  // dalla prima osservazione. projectDir best-effort via decode: encode(decode)===encoded.
+  private autoRegister(encoded: string): void {
+    const dir = join(this.deps.config.projectsDir, encoded);
+    let mtime = 0;
+    try {
+      for (const f of readdirSync(dir).filter(f => f.endsWith('.jsonl'))) {
+        const st = statSync(join(dir, f));
+        if (st.mtimeMs > mtime) mtime = st.mtimeMs;
+      }
+    } catch { return; }
+    const fresh = Date.now() - mtime < AUTO_REGISTER_FRESH_MS;
     void this.deps.tmux.listSessions().then(sessions => {
       const target = sessions.find(t => {
         const name = t.replace(/^claude:/, '');
         return encoded === name || encoded.endsWith(`-${name}`);
       });
-      if (!target) return;
-      const name = target.replace(/^claude:/, '');
-      const s = this.deps.manager.registerTerminal({
-        title: name,
-        projectDir: decodeProjectDir(encoded),
-        tmuxTarget: target,
+      if (!target && !fresh) return;
+      const projectDir = decodeProjectDir(encoded);
+      if (this.deps.manager.findByProjectDir(projectDir)) return; // già registrata
+      this.deps.manager.registerTerminal({
+        title: target ? target.replace(/^claude:/, '') : this.titleFromEncoded(encoded),
+        projectDir,
+        ...(target ? { tmuxTarget: target } : {}),
       });
-      this.emitLines(s.id, text);
     }).catch(() => {});
+  }
+
+  // Titolo best-effort dall'encoded: ultimo segmento dopo l'ultimo '-'.
+  private titleFromEncoded(encoded: string): string {
+    const seg = encoded.split('-').filter(Boolean);
+    return seg[seg.length - 1] || encoded;
   }
 }
