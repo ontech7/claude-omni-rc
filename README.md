@@ -123,6 +123,17 @@ terminal). The launchd logs go to `~/.ollama-rc/logs/daemon.log`.
 After code changes, restart the daemon to load the new code (no reinstall):
 `./scripts/restart.sh` (or `./scripts/restart.sh status` to check it).
 
+Start and stop the whole thing (daemon + headless sessions + hooks):
+
+```bash
+./scripts/start.sh   # checks everything is installed (runs ./install.sh if not), then starts the daemon
+./scripts/stop.sh    # stops the daemon, kills headless sessions, removes the Claude Code hooks
+```
+
+`stop.sh` also removes the SessionStart/PermissionRequest hooks from
+`~/.claude/settings.json`, so sessions stop auto-attaching until you run
+`./scripts/start.sh` again. Your own terminal (tmux) sessions are never touched.
+
 ## Telegram setup
 
 1. Open the chat with your bot.
