@@ -146,6 +146,10 @@ describe('TranscriptWatcher (Ollama-launched Claude models + binding)', () => {
     utimesSync(other, new Date(Date.now() + 10_000), new Date(Date.now() + 10_000));
     const wtFile = join(wtDir, 'abc.jsonl');
     writeFileSync(wtFile, JSON.stringify({ type: 'mode', sessionId: 'abc' }) + '\n');
+    // mtime futuro: il transcript del worktree è "attivo" (più recente della
+    // creazione della sessione) — altrimenti il guard createdAt lo scarterebbe
+    // e il test diventerebbe flaky (race sul millisecondo tra write e register).
+    utimesSync(wtFile, new Date(Date.now() + 10_000), new Date(Date.now() + 10_000));
 
     const s = manager.registerTerminal({ title: 'p', projectDir: '/Users/u/proj', tmuxTarget: 'claude:p' });
     manager.setTranscriptFile(s.id, other); // binding stale
