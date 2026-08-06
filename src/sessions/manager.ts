@@ -21,6 +21,12 @@ export class SessionManager {
 
   getState(): StateFile { return this.state; }
   persist(): void { this.deps.state.save(this.state); }
+  getActive(): string | undefined { return this.state.activeSessionId; }
+  setActive(id: string | undefined): void {
+    if (this.state.activeSessionId === id) return;
+    this.state.activeSessionId = id;
+    this.persist();
+  }
 
   list(): Session[] {
     return [...this.state.sessions].sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
@@ -67,6 +73,7 @@ export class SessionManager {
     const i = this.state.sessions.findIndex(s => s.id === id);
     if (i === -1) return false;
     this.state.sessions.splice(i, 1);
+    if (this.state.activeSessionId === id) this.state.activeSessionId = undefined;
     this.emitUpdated(id);
     return true;
   }

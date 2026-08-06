@@ -91,4 +91,22 @@ describe('SessionManager', () => {
     expect(std.permissionMode).toBe('standard');
     expect(manager.get(auto.id)!.permissionMode).toBe('auto');
   });
+  it('persists the active session id across reloads', () => {
+    const shared = mkdtempSync(join(tmpdir(), 'orc-mgr-'));
+    const { manager } = makeManager(false, 3000, shared);
+    manager.setActive('abc');
+    const { manager: m2 } = makeManager(false, 3000, shared);
+    expect(m2.getActive()).toBe('abc');
+  });
+  it('clears the active session id when that session is removed', () => {
+    const { manager } = makeManager();
+    const s = manager.createHeadless({ title: 't', projectDir: '/tmp/x' });
+    manager.setActive(s.id);
+    expect(manager.remove(s.id)).toBe(true);
+    expect(manager.getActive()).toBeUndefined();
+  });
+  it('returns undefined when no session is active', () => {
+    const { manager } = makeManager();
+    expect(manager.getActive()).toBeUndefined();
+  });
 });

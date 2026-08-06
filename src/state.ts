@@ -7,6 +7,7 @@ export interface StateFile {
   authorizedUserIds: number[];
   sessions: Session[];
   mirrorOffsets: Record<string, number>;
+  activeSessionId?: string; // sessione selezionata nel bot (persistita tra i riavvii)
 }
 
 export function emptyState(): StateFile {

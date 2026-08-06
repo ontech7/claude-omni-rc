@@ -43,4 +43,12 @@ describe('StateStore', () => {
     expect(state.sessions).toEqual([]);
     expect(state.mirrorOffsets).toEqual({});
   });
+  it('keeps an optional activeSessionId through a round-trip', () => {
+    const { store } = tmpState();
+    const { state } = store.load();
+    state.activeSessionId = 'abc';
+    store.save(state);
+    const again = store.load();
+    expect(again.state.activeSessionId).toBe('abc');
+  });
 });
