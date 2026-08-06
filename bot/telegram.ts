@@ -592,21 +592,23 @@ export class TelegramBot {
 
   private async onStop(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
-    const active = this.deps.manager.getActive(); const s = active ? this.deps.manager.get(active) : undefined;
+    const active = this.deps.manager.getActive();
+    const s = active ? this.deps.manager.get(active) : undefined;
     if (!s) { await this.send(ctx, 'No active session.'); return; }
+    const id8 = s.id.slice(0, 8);
     if (s.kind === 'headless') {
       this.deps.permissionFlow.cancelAllForSession(s.id);
-      this.deps.sdk.stop(s.id); // abort del turno in corso
-      await this.send(ctx, '🛑 Stop requested for the active session.');
+      const aborted = this.deps.sdk.stop(s.id); // abort del turno in corso
+      await this.send(ctx, stopReply({ kind: 'headless', id8, aborted, status: s.status }));
     } else if (s.tmuxTarget) {
       try {
         await this.deps.tmux.sendKeys(s.tmuxTarget, 'C-c');
-        await this.send(ctx, `🛑 Ctrl+C sent to <code>${htmlEscape(s.tmuxTarget)}</code> — generation interrupted.`);
+        await this.send(ctx, stopReply({ kind: 'terminal', id8, target: s.tmuxTarget }));
       } catch (e) {
         await this.send(ctx, `❌ ${htmlEscape(e instanceof Error ? e.message : String(e))}`);
       }
     } else {
-      await this.send(ctx, 'This terminal session has no tmux pane to interrupt.');
+      await this.send(ctx, stopReply({ kind: 'terminal', id8 }));
     }
   }
 
@@ -912,18 +914,19 @@ export class TelegramBot {
       if (!this.deps.manager.isArmed()) return;
       if (sessionId !== this.deps.manager.getActive()) return;
       this.toolBurst(sessionId).close();
-      // Fix 2: un bottone per opzione, la risposta "1"/"2"/"3" via testo resta
-      // valida come fallback.
+      // Fix 2: elenco numerato completo + bottoni con etichetta corta (mai troncati).
       const token = randomUUID();
       this.pendingPrompts.set(token, { sessionId, questions, text: promptMessage(questions) });
-      const kb = new InlineKeyboard();
-      questions.forEach((q, qi) => q.options.forEach((o, oi) => {
-        kb.text(htmlEscape(o.label.slice(0, 24)), `q:answer:${token}:${qi}:${oi}`).row();
-      }));
-      const hint = '\n\n<i>Tocca un\'opzione o rispondi con il numero.</i>';
-      if (this.chatId) {
-        void this.bot.api.sendMessage(this.chatId, promptMessage(questions) + hint, { parse_mode: 'HTML', reply_markup: kb }).catch(this.logCatch('prompt send'));
+      const { options, hint } = promptLayout(questions, token);
+      if (!this.chatId) return;
+      const text = promptMessage(questions) + hint;
+      if (!options.length) {
+        void this.bot.api.sendMessage(this.chatId, text, { parse_mode: 'HTML' }).catch(this.logCatch('prompt send'));
+        return;
       }
+      const kb = new InlineKeyboard();
+      for (const o of options) kb.text(o.label, o.callback).row();
+      void this.bot.api.sendMessage(this.chatId, text, { parse_mode: 'HTML', reply_markup: kb }).catch(this.logCatch('prompt send'));
     });
     bus.on('session.tool', e => {
       if (!this.deps.manager.isArmed()) return;
