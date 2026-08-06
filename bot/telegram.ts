@@ -436,6 +436,51 @@ export class ToolBurstAggregator {
   }
 }
 
+// Coda delle summary via LLM per le tool call di una sessione: le chiamate
+// partono in parallelo ma le righe vanno pushatte in ORDINE (la bubble non deve
+// mostrare le tool in ordine sbagliato). `add()` assegna un indice e restituisce
+// il callback da chiamare quando la summary è pronta; `reset()` a fine turno
+// scarta le summary pendenti (gen) e svuota il buffer.
+//
+// Due contatori distinti: `last` assegna gli indici (0, 1, 2…), `next` è il
+// prossimo indice da fluscare. Senza questa separazione `next` avanzava in
+// `add()` e `flush()` cercava `buffer.has(next)` — sempre l'indice successivo a
+// quello appena bufferizzato — e la coda non fluscava MAI (le tool call non
+// arrivavano su Telegram).
+export class SummarizeQueue {
+  private next = 0; // prossimo indice da fluscare
+  private last = 0; // prossimo indice da assegnare
+  private buffer = new Map<number, string>();
+  private gen = 0;
+
+  constructor(private onLine: (line: string) => void) {}
+
+  add(): (line: string) => void {
+    const index = this.last++;
+    const gen = this.gen;
+    return (line: string) => {
+      if (this.gen !== gen || !line) return; // turno finito: scarta
+      this.buffer.set(index, line);
+      this.flush();
+    };
+  }
+
+  reset(): void {
+    this.gen++;
+    this.buffer.clear();
+    this.next = this.last; // gli indici stantii non bloccano i nuovi
+  }
+
+  private flush(): void {
+    while (this.buffer.has(this.next)) {
+      const line = this.buffer.get(this.next)!;
+      this.buffer.delete(this.next);
+      this.next++;
+      this.onLine(line);
+    }
+  }
+}
+
 // ---------- bot ----------
 
 export interface BotDeps {
@@ -462,11 +507,11 @@ export class TelegramBot {
   private recentInjected = new Map<string, { text: string; at: number }[]>();
   // Fix 2: domande a scelta multipla in attesa, token → domanda (per i bottoni).
   private pendingPrompts = new Map<string, { sessionId: string; questions: PromptQuestion[]; text: string }>();
-  // Summary via LLM per le tool call: chiamate in parallelo, risultati bufferizzati
-  // e pushati in ordine (la bubble non deve mostrare le tool in ordine sbagliato).
-  // `gen` viene incrementato a fine turno (result/errore/domanda/permesso/testo
-  // lungo): le summary pendenti vengono scartate, non aprono bubble dopo la fine.
-  private summarizeQueues = new Map<string, { next: number; buffer: Map<number, string>; gen: number }>();
+  // Summary via LLM per le tool call: una coda per sessione che bufferizza i
+  // risultati (le chiamate partono in parallelo) e li pusha in ordine. `reset()`
+  // a fine turno (result/errore/domanda/permesso/testo lungo) scarta le summary
+  // pendenti: non aprono bubble dopo la fine.
+  private summarizeQueues = new Map<string, SummarizeQueue>();
   // Cache delle summary (tool + input → riga): le tool ripetute (stesso file,
   // stesso comando) non rifanno la chiamata a Ollama. Cap semplice: oltre 200
   // si svuota (una cache, non un archivio).
@@ -603,32 +648,18 @@ export class TelegramBot {
   // tool in ordine sbagliato). Se il turno è finito nel frattempo (gen cambiato),
   // la summary viene scartata.
   private summarizeToolLine(sessionId: string, model: string, toolName: string, input: Record<string, unknown>, languageHint?: string): void {
-    const q = this.summarizeQueues.get(sessionId) ?? { next: 0, buffer: new Map(), gen: 0 };
-    this.summarizeQueues.set(sessionId, q);
-    const index = q.next++;
-    const gen = q.gen;
-    void this.llmSummarize(model, toolName, input, languageHint).then(line => {
-      const cur = this.summarizeQueues.get(sessionId);
-      if (!cur || cur.gen !== gen || !line) return;
-      cur.buffer.set(index, line);
-      this.flushSummaries(sessionId, cur);
-    });
-  }
-
-  private flushSummaries(sessionId: string, q: { next: number; buffer: Map<number, string>; gen: number }): void {
-    while (q.buffer.has(q.next)) {
-      const line = q.buffer.get(q.next)!;
-      q.buffer.delete(q.next);
-      q.next++;
-      this.toolBurst(sessionId).push(htmlEscape(line));
+    let q = this.summarizeQueues.get(sessionId);
+    if (!q) {
+      q = new SummarizeQueue(line => this.toolBurst(sessionId).push(htmlEscape(line)));
+      this.summarizeQueues.set(sessionId, q);
     }
+    void this.llmSummarize(model, toolName, input, languageHint).then(q.add());
   }
 
   // Fine turno (o testo lungo): le summary pendenti di questa sessione vengono
   // scartate — non devono aprire bubble dopo la risposta/errore.
   private resetSummarize(sessionId: string): void {
-    const q = this.summarizeQueues.get(sessionId);
-    if (q) q.gen++;
+    this.summarizeQueues.get(sessionId)?.reset();
   }
 
   private isAuthorized(ctx: Context): boolean {

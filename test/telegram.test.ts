@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan } from '../bot/telegram.js';
+import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue } from '../bot/telegram.js';
 import type { ToolBurstSink } from '../bot/telegram.js';
 
 describe('parseCommand', () => {
@@ -230,6 +230,40 @@ describe('ToolBurstAggregator', () => {
     // t1 è stato inviato ma la bubble non si riapre; t2 apre una bubble nuova.
     expect(sends).toEqual(['t1', 't2']);
     expect(sink.edit).not.toHaveBeenCalled();
+  });
+});
+
+describe('SummarizeQueue', () => {
+  function makeQueue() {
+    const lines: string[] = [];
+    const q = new SummarizeQueue(line => lines.push(line));
+    return { q, lines };
+  }
+  it('flushes summaries in order even when they resolve out of order', () => {
+    const { q, lines } = makeQueue();
+    const a = q.add(); // indice 0
+    const b = q.add(); // indice 1
+    b('line2'); // risolve prima: deve aspettare l'indice 0
+    expect(lines).toEqual([]);
+    a('line1');
+    expect(lines).toEqual(['line1', 'line2']);
+  });
+  it('reset() discards summaries that resolve after a turn boundary', () => {
+    const { q, lines } = makeQueue();
+    const a = q.add();
+    q.reset();
+    a('line1');
+    expect(lines).toEqual([]);
+  });
+  it('reset() clears the buffer so stale entries do not block new ones', () => {
+    const { q, lines } = makeQueue();
+    const a = q.add(); // indice 0
+    const b = q.add(); // indice 1
+    b('line2'); // bufferizzata, in attesa dell'indice 0
+    q.reset(); // scarta l'indice 1 stantio
+    const c = q.add(); // indice 2
+    c('line3');
+    expect(lines).toEqual(['line3']);
   });
 });
 
