@@ -106,7 +106,7 @@ export function mdToHtml(text: string): string {
     .replace(/\*\*\*([^*]+)\*\*\*/g, '<b><i>$1</i></b>')
     .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
     .replace(/\*([^*]+)\*/g, '<i>$1</i>');
-  out = out.replace(/^#{1,6}\s+(.+)$/gm, '<b>$1</b>');
+  out = out.replace(/^#{1,6}\s+([^<]+)$/gm, '<b>$1</b>');
   out = out.replace(/^[-*]\s+(.+)$/gm, '• $1');
   out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>');
   out = out.replace(new RegExp(`${P}([0-9]+)${P}`, 'g'), (_m, i) => blocks[Number(i)]);
@@ -204,13 +204,13 @@ export function renderHistory(messages: RecentMessage[], title: string, maxChars
     const line = `${m.role === 'user' ? '🧑' : '🤖'} ${mdToHtml(m.text)}`;
     const sep = body.length ? 2 : 0;
     if (line.length + sep > remaining) {
-      body.push(truncateAtWord(line, remaining - sep));
+      body.push(truncateAtWord(line, Math.max(remaining - sep, 1)));
       break;
     }
     body.push(line);
     remaining -= line.length + sep;
   }
-  return `${header}\n\n${body.reverse().join('\n\n')}`;
+  return balanceHtml(`${header}\n\n${body.reverse().join('\n\n')}`);
 }
 
 // Tronca preferendo un confine di parola (se cade oltre metà del budget): mai

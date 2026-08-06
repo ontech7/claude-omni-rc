@@ -218,6 +218,10 @@ describe('mdToHtml v2 / balanceHtml', () => {
   it('converts headings outside code to bold', () => {
     expect(mdToHtml('# not a heading')).toBe('<b>not a heading</b>');
   });
+  it('does not double-wrap a heading that contains bold', () => {
+    expect(mdToHtml('# **title**')).toBe('# <b>title</b>');
+    expect(mdToHtml('# plain')).toBe('<b>plain</b>');
+  });
   it('leaves unclosed markers literal (no unbalanced HTML)', () => {
     expect(mdToHtml('**unclosed')).toBe('**unclosed');
   });
@@ -270,6 +274,13 @@ describe('renderHistory v2 / truncateAtWord', () => {
   it('truncates at a late word boundary with an explicit marker', () => {
     expect(truncateAtWord('aaaa bbb ccc', 10)).toBe('aaaa bbb… (truncated)');
     expect(truncateAtWord('short', 100)).toBe('short');
+  });
+  it('produces balanced HTML when a truncated message opens a tag', () => {
+    const html = renderHistory([{ role: 'assistant', text: '**' + 'a'.repeat(200) + '**' }], 'proj', 100);
+    expect(html).toContain('… (truncated)');
+    const opens = (html.match(/<b>/g) ?? []).length;
+    const closes = (html.match(/<\/b>/g) ?? []).length;
+    expect(opens).toBe(closes);
   });
 });
 
