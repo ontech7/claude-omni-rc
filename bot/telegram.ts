@@ -361,7 +361,6 @@ export class TelegramBot {
   private bot: Bot;
   private throttler = new EditThrottler(1000);
   private chatId?: number;
-  private activeSessionId?: string;
   private lastMsg = new Map<string, { messageId: number; text: string; at: number; role: 'user' | 'assistant' }>();
   private toolBursts = new Map<string, ToolBurstAggregator>();
   // Fix 1: testi iniettati dal bot per sessione (per sopprimere l'echo del transcript).
@@ -555,7 +554,7 @@ export class TelegramBot {
     }
     const kb = new InlineKeyboard();
     for (const s of list) kb.text(s.id.slice(0, 6), `sess:select:${s.id}`).text('🗑', `sess:del:${s.id}`).row();
-    await ctx.reply(sessionListText(list, this.activeSessionId), {
+    await ctx.reply(sessionListText(list, this.deps.manager.getActive()), {
       parse_mode: 'HTML', reply_markup: kb,
     });
   }
@@ -583,8 +582,7 @@ export class TelegramBot {
       title: text.slice(0, 40), projectDir, model: this.deps.config.defaultModel,
       permissionMode: mode,
     });
-    this.activeSessionId = session.id;
-    this.deps.manager.persist();
+    this.deps.manager.setActive(session.id); // persiste anche la nuova sessione
     const modeLabel = mode === 'standard' ? ' (standard — approvals via buttons)' : ' (automode — no approvals)';
     await this.send(ctx, `🆕 Session <b>${htmlEscape(session.id.slice(0, 8))}</b> started${modeLabel}.`);
     // NON await: grammy processa gli update in sequenza — aspettare un turno di minuti
@@ -594,7 +592,7 @@ export class TelegramBot {
 
   private async onStop(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
-    const s = this.activeSessionId ? this.deps.manager.get(this.activeSessionId) : undefined;
+    const active = this.deps.manager.getActive(); const s = active ? this.deps.manager.get(active) : undefined;
     if (!s) { await this.send(ctx, 'No active session.'); return; }
     if (s.kind === 'headless') {
       this.deps.permissionFlow.cancelAllForSession(s.id);
@@ -614,7 +612,7 @@ export class TelegramBot {
 
   private async onStatus(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
-    const s = this.activeSessionId ? this.deps.manager.get(this.activeSessionId) : undefined;
+    const active = this.deps.manager.getActive(); const s = active ? this.deps.manager.get(active) : undefined;
     await this.send(ctx, s
       ? `Active session: <b>${s.id.slice(0, 8)}</b> [${s.kind}] — ${s.status}`
       : 'No active session. Create one with /new.');
@@ -627,8 +625,7 @@ export class TelegramBot {
     const projectDir = this.resolveProjectDir(name);
     if (!projectDir) { await this.send(ctx, `Project "${htmlEscape(name)}" not found in the workspaces.`); return; }
     const session = this.deps.manager.registerTerminal({ title: name, projectDir, tmuxTarget: `claude:${name}` });
-    this.activeSessionId = session.id;
-    this.deps.manager.persist();
+    this.deps.manager.setActive(session.id); // persiste anche la sessione terminale
     await this.send(ctx, `📎 Terminal session <b>${htmlEscape(session.id.slice(0, 8))}</b> attached to <code>claude:${htmlEscape(name)}</code>.`);
   }
 
@@ -642,7 +639,7 @@ export class TelegramBot {
 
   private async onHistory(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
-    const id = ctx.match?.toString().trim() || this.activeSessionId;
+    const id = ctx.match?.toString().trim() || this.deps.manager.getActive();
     if (!id) { await this.send(ctx, 'No active session. Select one with /sessions.'); return; }
     const hist = await this.readHistory(id);
     if (!hist) { await this.send(ctx, 'No transcript available for this session yet.'); return; }
@@ -663,7 +660,7 @@ export class TelegramBot {
 
   private async onDelete(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
-    const id = ctx.match?.toString().trim() || this.activeSessionId;
+    const id = ctx.match?.toString().trim() || this.deps.manager.getActive();
     if (!id) { await this.send(ctx, 'Usage: /delete [session id]'); return; }
     const s = this.deps.manager.get(id);
     if (!s) { await this.send(ctx, 'Session not found.'); return; }
@@ -750,9 +747,9 @@ export class TelegramBot {
         }
         case 'select': {
           const s = this.deps.manager.get(parsed.id);
-          if (s) this.activeSessionId = s.id;
+          if (s) this.deps.manager.setActive(s.id);
           await ctx.answerCallbackQuery({ text: 'Session selected' });
-          await ctx.editMessageText(sessionListText(this.deps.manager.list(), this.activeSessionId), { parse_mode: 'HTML' });
+          await ctx.editMessageText(sessionListText(this.deps.manager.list(), this.deps.manager.getActive()), { parse_mode: 'HTML' });
           // Fix 5: mostra la storia recente della sessione appena selezionata.
           const hist = await this.readHistory(parsed.id);
           if (hist && this.chatId) void this.bot.api.sendMessage(this.chatId, hist, { parse_mode: 'HTML' }).catch(this.logCatch('callback send'));
@@ -778,7 +775,6 @@ export class TelegramBot {
           const ok = this.deleteSession(parsed.id);
           await ctx.answerCallbackQuery({ text: ok ? '🗑 Deleted' : 'Already deleted' });
           await ctx.editMessageText(ok ? '🗑 Session deleted.' : 'Session already gone.', { parse_mode: 'HTML' }).catch(this.logCatch('callback send'));
-          if (this.activeSessionId === parsed.id) this.activeSessionId = undefined;
           break;
         }
         case 'del-no': {
@@ -793,7 +789,7 @@ export class TelegramBot {
   }
 
   private async routeMessageToSession(ctx: Context, text: string): Promise<void> {
-    const session = this.activeSessionId ? this.deps.manager.get(this.activeSessionId) : this.deps.manager.list()[0];
+    const session = this.deps.manager.getActive() ? this.deps.manager.get(this.deps.manager.getActive()!) : this.deps.manager.list()[0];
     if (!session) { await this.send(ctx, 'No session. Create one with /new or /attach.'); return; }
     if (session.kind === 'headless') {
       if (this.deps.sdk.isBusy(session.id)) {
@@ -852,7 +848,7 @@ export class TelegramBot {
 
   private async onPhoto(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
-    const session = this.activeSessionId ? this.deps.manager.get(this.activeSessionId) : this.deps.manager.list()[0];
+    const session = this.deps.manager.getActive() ? this.deps.manager.get(this.deps.manager.getActive()!) : this.deps.manager.list()[0];
     if (!session) { await this.send(ctx, 'No session. Create one with /new or /attach.'); return; }
     const file = await ctx.getFile();
     if (!file.file_path) { await this.send(ctx, 'File not downloadable.'); return; }
@@ -867,7 +863,7 @@ export class TelegramBot {
 
   private async onView(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
-    const s = this.activeSessionId ? this.deps.manager.get(this.activeSessionId) : undefined;
+    const s = this.deps.manager.getActive() ? this.deps.manager.get(this.deps.manager.getActive()!) : undefined;
     if (!s) {
       await this.send(ctx, 'No session selected. Pick one with /sessions.');
       return;
@@ -905,7 +901,7 @@ export class TelegramBot {
     // constraint 8: da disattivo nessun relay — ogni handler del bus è gated su armed.
     bus.on('session.text', e => {
       if (!this.deps.manager.isArmed()) return;
-      if (e.sessionId !== this.activeSessionId) return; // solo la sessione selezionata
+      if (e.sessionId !== this.deps.manager.getActive()) return; // solo la sessione selezionata
       this.toolBurst(e.sessionId).close(); // il testo chiude la raffica di tool
       // Fix 1: l'echo di un testo iniettato dal bot non viene reinoltrato.
       if (e.role === 'user' && this.isInjectedEcho(e.sessionId, e.text)) return;
@@ -914,7 +910,7 @@ export class TelegramBot {
     });
     bus.on('session.prompt', ({ sessionId, questions }) => {
       if (!this.deps.manager.isArmed()) return;
-      if (sessionId !== this.activeSessionId) return;
+      if (sessionId !== this.deps.manager.getActive()) return;
       this.toolBurst(sessionId).close();
       // Fix 2: un bottone per opzione, la risposta "1"/"2"/"3" via testo resta
       // valida come fallback.
@@ -931,7 +927,7 @@ export class TelegramBot {
     });
     bus.on('session.tool', e => {
       if (!this.deps.manager.isArmed()) return;
-      if (e.kind === 'tool_use' && e.sessionId === this.activeSessionId && e.input) {
+      if (e.kind === 'tool_use' && e.sessionId === this.deps.manager.getActive() && e.input) {
         const line = `🔧 <code>${htmlEscape(e.toolName)}</code> — <pre>${htmlEscape(JSON.stringify(e.input).slice(0, 300))}</pre>`;
         void this.toolBurst(e.sessionId).push(line);
       }
@@ -947,7 +943,7 @@ export class TelegramBot {
       }
     });
     bus.on('session.result', e => {
-      if (!this.deps.manager.isArmed() || e.sessionId !== this.activeSessionId) return;
+      if (!this.deps.manager.isArmed() || e.sessionId !== this.deps.manager.getActive()) return;
       this.toolBurst(e.sessionId).close(); // fine turno headless: chiude la raffica di tool
       // solo segnale di completamento: il testo della risposta è già arrivato
       // streammato (session.text → mdToHtml). Re-inviarlo qui (come faceva la
@@ -956,7 +952,7 @@ export class TelegramBot {
       this.notify('✅ Turn complete.');
     });
     bus.on('session.error', e => {
-      if (!this.deps.manager.isArmed() || e.sessionId !== this.activeSessionId) return;
+      if (!this.deps.manager.isArmed() || e.sessionId !== this.deps.manager.getActive()) return;
       this.toolBurst(e.sessionId).close();
       this.notify(`❌ <b>${htmlEscape(e.message.slice(0, 500))}</b>`);
     });
