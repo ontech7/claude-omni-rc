@@ -350,6 +350,34 @@ describe('TypingIndicator', () => {
       t.stop();
     } finally { vi.useRealTimers(); }
   });
+  it('auto-stops after the safety ceiling when the state gets wedged', async () => {
+    vi.useFakeTimers();
+    try {
+      const send = vi.fn(async () => {});
+      const t = new TypingIndicator(send, 4000, 12_000);
+      t.start();
+      await vi.advanceTimersByTimeAsync(20_000); // ben oltre il ceiling
+      const afterCeiling = send.mock.calls.length;
+      expect(afterCeiling).toBeGreaterThan(0); // ha inviato prima di fermarsi
+      await vi.advanceTimersByTimeAsync(60_000); // poi resta fermo per sempre
+      expect(send.mock.calls.length).toBe(afterCeiling);
+    } finally { vi.useRealTimers(); }
+  });
+  it('an active turn keeps re-arming the ceiling, so it does not auto-stop', async () => {
+    vi.useFakeTimers();
+    try {
+      const send = vi.fn(async () => {});
+      const t = new TypingIndicator(send, 4000, 10_000);
+      t.start();
+      await vi.advanceTimersByTimeAsync(9000);
+      t.start(); // nuovo tool_use → re-arm
+      await vi.advanceTimersByTimeAsync(9000);
+      t.start();
+      await vi.advanceTimersByTimeAsync(9000);
+      expect(send).toHaveBeenCalledTimes(7); // 1 + (27s / 4s) → sempre attivo, mai auto-stoppato
+      t.stop();
+    } finally { vi.useRealTimers(); }
+  });
   it('stop without start is a no-op', () => {
     const t = new TypingIndicator(async () => {});
     expect(() => t.stop()).not.toThrow();

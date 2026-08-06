@@ -28,6 +28,8 @@ const toolLine = JSON.stringify({
   type: 'assistant', message: { id: 'msg_2', content: [{ type: 'tool_use', id: 'call_1', name: 'Bash', input: { command: 'ls' } }], stop_reason: 'tool_use' },
 });
 const userLine = (text: string) => JSON.stringify({ type: 'user', message: { role: 'user', content: text } });
+// linee "user" scritte dal CLI per comandi locali / compattazione — NON prompt
+const metaLine = (fields: Record<string, unknown>, text: string) => JSON.stringify({ type: 'user', message: { role: 'user', content: text }, ...fields });
 const resultLine = JSON.stringify({
   type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'ok' }] },
 });
@@ -121,6 +123,28 @@ describe('TranscriptParser', () => {
     expect(a.some(e => e.type === 'error')).toBe(false);
     expect(b.some(e => e.type === 'error')).toBe(false);
   });
+  it('ignores local slash commands (/compact) — no event, state untouched', () => {
+    const p = new TranscriptParser();
+    p.consumeLine(endTurn); // turno finito → awaiting
+    expect(p.state).toBe('awaiting');
+    expect(p.consumeLine(userLine('/compact'))).toEqual([]);
+    expect(p.state).toBe('awaiting'); // niente end_turn segue: lo stato non deve restare "working"
+  });
+  it('ignores compaction bookkeeping lines (summary, meta, command echoes)', () => {
+    const p = new TranscriptParser();
+    p.consumeLine(endTurn);
+    expect(p.consumeLine(metaLine({ isCompactSummary: true }, 'This session is being continued from a previous conversation…'))).toEqual([]);
+    expect(p.consumeLine(metaLine({ isMeta: true }, '<local-command-caveat>Caveat: …</local-command-caveat>'))).toEqual([]);
+    expect(p.consumeLine(userLine('<command-name>/compact</command-name>\n<command-message>compact</command-message>'))).toEqual([]);
+    expect(p.consumeLine(userLine('<local-command-stdout>Compacted</local-command-stdout>'))).toEqual([]);
+    expect(p.state).toBe('awaiting');
+  });
+  it('a real user prompt after meta lines still goes through', () => {
+    const p = new TranscriptParser();
+    p.consumeLine(metaLine({ isCompactSummary: true }, 'summary'));
+    expect(p.consumeLine(userLine('fix the bug'))).toEqual([{ type: 'text', role: 'user', text: 'fix the bug' }]);
+    expect(p.state).toBe('working');
+  });
 });
 
 describe('parseAskUserQuestions', () => {
@@ -189,6 +213,20 @@ describe('peekTranscriptState / transcriptModel', () => {
     writeFileSync(file, userLine('a') + '\n' + maxTokensLine + '\n');
     expect(peekTranscriptState(file)).toBe('awaiting');
   });
+  it('peeks the previous real state (not "working") when the last line is a compact summary', () => {
+    const dir = tmpDir();
+    const file = join(dir, 's.jsonl');
+    writeFileSync(file, userLine('a') + '\n' + endTurn + '\n' + metaLine({ isCompactSummary: true }, 'summary…') + '\n');
+    // la riga meta è ignorata e lo stato precedente (end_turn → awaiting) vince:
+    // non deve riaccendere "sta scrivendo…"
+    expect(peekTranscriptState(file)).toBe('awaiting');
+  });
+  it('peeks the previous real state (not "working") when the last line is a slash command', () => {
+    const dir = tmpDir();
+    const file = join(dir, 's.jsonl');
+    writeFileSync(file, endTurn + '\n' + userLine('/compact') + '\n');
+    expect(peekTranscriptState(file)).toBe('awaiting');
+  });
   it('reads the model from the first assistant message', () => {
     const dir = tmpDir();
     const file = join(dir, 's.jsonl');
@@ -223,6 +261,19 @@ describe('readRecentMessages / resolveSessionTranscript', () => {
     const file = join(dir, 's.jsonl');
     writeFileSync(file, [userLine('a'), userLine('b'), userLine('c')].join('\n') + '\n');
     expect(readRecentMessages(file, 2)).toEqual([{ role: 'user', text: 'b' }, { role: 'user', text: 'c' }]);
+  });
+  it('skips slash commands and compaction noise in history', () => {
+    const dir = tmpDir();
+    const file = join(dir, 's.jsonl');
+    writeFileSync(file, [
+      endTurn,
+      userLine('/compact'),
+      metaLine({ isCompactSummary: true }, 'huge summary'),
+      metaLine({ isMeta: true }, '<local-command-caveat>…'),
+      userLine('<local-command-stdout>Compacted</local-command-stdout>'),
+      userLine('real question'),
+    ].join('\n') + '\n');
+    expect(readRecentMessages(file, 10)).toEqual([{ role: 'assistant', text: 'done' }, { role: 'user', text: 'real question' }]);
   });
   it('returns [] for missing/empty files', () => {
     expect(readRecentMessages(join(tmpDir(), 'nope.jsonl'))).toEqual([]);

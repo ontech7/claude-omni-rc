@@ -305,18 +305,27 @@ export function narrationPlan(role: 'user' | 'assistant', text: string, burstOpe
 // quindi va rinnovata. start() invia subito e poi a intervalli; stop() ferma.
 export class TypingIndicator {
   private timer?: NodeJS.Timeout;
+  private cutoff?: NodeJS.Timeout;
 
-  constructor(private send: () => Promise<unknown>, private intervalMs = 4000) {}
+  constructor(private send: () => Promise<unknown>, private intervalMs = 4000, private maxMs = 15 * 60_000) {}
 
   start(): void {
-    if (this.timer) return; // idempotente
-    void this.send().catch(() => {});
-    this.timer = setInterval(() => void this.send().catch(() => {}), this.intervalMs);
-    this.timer.unref?.();
+    if (!this.timer) {
+      void this.send().catch(() => {});
+      this.timer = setInterval(() => void this.send().catch(() => {}), this.intervalMs);
+      this.timer.unref?.();
+    }
+    // Safety ceiling, re-armed on every start: a long but active turn (continuous
+    // tool_use events) keeps resetting it, so only a wedged state with no further
+    // events reaches the limit and "sta scrivendo…" auto-stops instead of hanging.
+    if (this.cutoff) clearTimeout(this.cutoff);
+    this.cutoff = setTimeout(() => this.stop(), this.maxMs);
+    this.cutoff.unref?.();
   }
 
   stop(): void {
     if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
+    if (this.cutoff) { clearTimeout(this.cutoff); this.cutoff = undefined; }
   }
 }
 

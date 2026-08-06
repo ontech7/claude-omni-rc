@@ -101,7 +101,7 @@ export function readRecentMessages(file: string, max = 10): RecentMessage[] {
     const out: RecentMessage[] = [];
     for (const raw of readFileSync(file, 'utf8').split('\n')) {
       if (!raw.trim()) continue;
-      let d: { type?: string; message?: { content?: unknown } };
+      let d: { type?: string; isMeta?: boolean; isCompactSummary?: boolean; message?: { content?: unknown } };
       try { d = JSON.parse(raw); } catch { continue; }
       if (d.type === 'assistant') {
         const blocks = Array.isArray(d.message?.content) ? d.message.content : [];
@@ -113,6 +113,8 @@ export function readRecentMessages(file: string, max = 10): RecentMessage[] {
           }
         }
       } else if (d.type === 'user') {
+        // same guard as the live stream: skip slash commands / compaction noise
+        if (isMetaUserLine(d)) continue;
         const c = d.message?.content;
         if (typeof c === 'string' && c.trim()) out.push({ role: 'user', text: c });
       }
@@ -182,18 +184,42 @@ export function peekTranscriptState(file: string): TranscriptState {
   return 'unknown';
 }
 
+interface UserLineShape {
+  type?: string;
+  isMeta?: boolean;
+  isCompactSummary?: boolean;
+  message?: { content?: unknown };
+}
+
+// User lines that are NOT a real prompt: Claude Code writes them for local slash
+// commands (/compact, /clear, …) and for compaction bookkeeping. They must not be
+// forwarded as chat text and must not flip the state to "working" — a slash
+// command never produces an assistant end_turn, so a "working" state would leave
+// the "typing…" indicator (and the session status) stuck on forever.
+export function isMetaUserLine(d: UserLineShape): boolean {
+  if (d.isCompactSummary === true || d.isMeta === true) return true;
+  const content = d.message?.content;
+  if (typeof content === 'string') {
+    if (content.startsWith('<command-name>') || content.startsWith('<local-command-caveat>') || content.startsWith('<local-command-stdout>')) return true;
+    if (content.startsWith('/')) return true; // slash command: the CLI intercepts it before the model
+  }
+  return false;
+}
+
 // Stato "in attesa dell'umano" derivato dall'ultima riga del file: un turno
 // finisce con un assistant stop_reason "end_turn"/"max_tokens" o con un system
 // turn_duration.
 export function stateFromLine(raw: string): TranscriptState {
-  let d: { type?: string; subtype?: string; message?: { stop_reason?: string | null } };
+  let d: UserLineShape & { subtype?: string; message?: { stop_reason?: string | null; content?: unknown } };
   try { d = JSON.parse(raw); } catch { return 'unknown'; }
   if (d.type === 'assistant') {
     const stop = d.message?.stop_reason;
     return stop === 'end_turn' || stop === 'max_tokens' ? 'awaiting' : 'working';
   }
   if (d.type === 'system' && d.subtype === 'turn_duration') return 'awaiting';
-  if (d.type === 'user') return 'working';
+  // meta/command lines (isMeta, isCompactSummary, slash commands) say nothing
+  // about whether the model is working → keep the previous status.
+  if (d.type === 'user') return isMetaUserLine(d) ? 'unknown' : 'working';
   return 'unknown';
 }
 
@@ -211,7 +237,7 @@ export class TranscriptParser {
   state: TranscriptState = 'unknown';
 
   consumeLine(raw: string): TranscriptEvent[] {
-    let d: { type?: string; subtype?: string; message?: { id?: string; stop_reason?: string | null; content?: JsonBlock[] | string } };
+    let d: { type?: string; subtype?: string; isMeta?: boolean; isCompactSummary?: boolean; message?: { id?: string; stop_reason?: string | null; content?: JsonBlock[] | string } };
     try { d = JSON.parse(raw); } catch { return []; }
     const events: TranscriptEvent[] = [];
     if (d.type === 'assistant') {
@@ -262,6 +288,9 @@ export class TranscriptParser {
     if (d.type === 'user') {
       const content = d.message?.content;
       if (typeof content === 'string') {
+        // local slash commands (/compact) and compaction bookkeeping are not real
+        // prompts: no forward, and no "working" state (nothing would ever reset it).
+        if (isMetaUserLine(d)) return events;
         this.state = 'working';
         events.push({ type: 'text', role: 'user', text: content });
         return events;
