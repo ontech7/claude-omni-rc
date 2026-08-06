@@ -161,6 +161,12 @@ omni-rc -l                                  # list claude:* sessions
 `omni-rc --help` lists every option. If the session already exists, `omni-rc`
 just reattaches.)
 
+`omni-rc` picks the provider for you, the same way headless sessions do:
+without `-m` it uses `DEFAULT_MODEL` from `.env` (Ollama by default), a model
+that starts with `claude-` (or the `opus`/`sonnet`/`haiku`/`fable` aliases)
+runs on Anthropic, and an explicit `ANTHROPIC_BASE_URL` in `.env` overrides
+both and wins for every model.
+
 The daemon tracks `claude:*` tmux sessions (and any session attached via the
 `SessionStart` hook or `/attach`); with `/attach` you can also add one
 explicitly.
