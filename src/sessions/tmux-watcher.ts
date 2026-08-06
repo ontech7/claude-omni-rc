@@ -5,7 +5,7 @@ import type { TmuxClient } from './tmux-inject.js';
 export interface WatcherDeps {
   config: Config;
   manager: SessionManager;
-  tmux: Pick<TmuxClient, 'listSessions' | 'serverRunning' | 'paneCwd' | 'paneCommand'>;
+  tmux: Pick<TmuxClient, 'listSessions' | 'serverRunning' | 'paneCwd' | 'paneCommand' | 'claudeCwd'>;
 }
 
 // Grace prima di rimuovere una sessione terminale il cui target tmux è sparito:
@@ -63,21 +63,36 @@ export class TmuxWatcher {
       } catch { /* pane illeggibile → registra comunque (fallback) */ }
       let projectDir = `~/${name}`;
       try {
-        projectDir = (await this.deps.tmux.paneCwd(target)) || projectDir;
+        // Il cwd del PROCESSO claude è la verità per il transcript (la sessione
+        // può essersi spostata in un git worktree mentre il pane resta dov'era);
+        // il cwd del pane è il fallback se claude non è ancora rintracciabile.
+        projectDir = (await this.deps.tmux.claudeCwd(target)) ?? ((await this.deps.tmux.paneCwd(target)) || projectDir);
       } catch { /* tmux in mezzo a un restart: fallback al project dir di default */ }
       this.deps.manager.registerTerminal({ title: name, projectDir, tmuxTarget: target });
       this.deps.manager.persist();
     }
-    // refresh: il cwd reale del pane può cambiare (il CLI sposta la sessione in
-    // un git worktree). Senza aggiornare projectDir, il transcript verrebbe
-    // risolto nella dir sbagliata e la chat resterebbe muta.
+    // refresh: il cwd del PROCESSO claude può cambiare (il CLI sposta la sessione
+    // in un git worktree) mentre il pane resta dov'era. Senza aggiornare
+    // projectDir, il transcript verrebbe risolto nella dir sbagliata e la chat
+    // resterebbe muta.
     for (const s of this.deps.manager.list()) {
       if (s.kind !== 'terminal' || !s.tmuxTarget || !sessions.includes(s.tmuxTarget)) continue;
       try {
-        const cwd = await this.deps.tmux.paneCwd(s.tmuxTarget);
-        if (cwd && cwd !== s.projectDir) {
-          this.deps.manager.setProjectDir(s.id, cwd);
-          this.deps.manager.persist();
+        const claudeCwd = await this.deps.tmux.claudeCwd(s.tmuxTarget);
+        if (claudeCwd) {
+          if (claudeCwd !== s.projectDir) {
+            this.deps.manager.setProjectDir(s.id, claudeCwd);
+            this.deps.manager.persist();
+          }
+        } else if (!s.projectDir.includes('.claude/worktrees')) {
+          // claude non rintracciabile (es. appena uscito): il cwd del pane è il
+          // fallback, ma non riportare una sessione GIÀ in un worktree alla dir
+          // principale (niente flapping).
+          const cwd = await this.deps.tmux.paneCwd(s.tmuxTarget);
+          if (cwd && cwd !== s.projectDir) {
+            this.deps.manager.setProjectDir(s.id, cwd);
+            this.deps.manager.persist();
+          }
         }
       } catch { /* pane illeggibile in questo poll → si riprova al prossimo */ }
     }

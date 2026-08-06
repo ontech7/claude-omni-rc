@@ -3,16 +3,20 @@ import { spawn } from 'node:child_process';
 
 export interface ExecResult { code: number; stdout: string; stderr: string; }
 export type ExecFn = (args: string[], opts?: { input?: string }) => Promise<ExecResult>;
+export type ShExecFn = (cmd: string, args: string[], opts?: { input?: string }) => Promise<ExecResult>;
 
-export function createExec(opts: { timeoutMs?: number } = {}): ExecFn {
+// Esegue un comando di sistema (ps, lsof, …) con lo stesso contratto di ExecFn
+// (codice d'uscita + stdout/stderr + timeout). Serve a ispezionare i processi,
+// che il solo client tmux non può fare.
+export function createShExec(opts: { timeoutMs?: number } = {}): ShExecFn {
   const timeoutMs = opts.timeoutMs ?? 10_000;
-  return (args, o) => new Promise((resolve, reject) => {
-    const child = spawn('tmux', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  return (cmd, args, o) => new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
-    // timeout di sicurezza: un comando tmux appeso non deve stallare un handler.
+    // timeout di sicurezza: un comando appeso non deve stallare un handler.
     const timer = setTimeout(() => {
-      reject(new Error(`tmux command timed out after ${timeoutMs}ms`));
+      reject(new Error(`${cmd} command timed out after ${timeoutMs}ms`));
       child.kill();
     }, timeoutMs);
     child.stdout.on('data', d => { stdout += d; });
@@ -24,8 +28,16 @@ export function createExec(opts: { timeoutMs?: number } = {}): ExecFn {
   });
 }
 
+export function createExec(opts: { timeoutMs?: number } = {}): ExecFn {
+  const sh = createShExec(opts);
+  return (args, o) => sh('tmux', args, o);
+}
+
 export class TmuxClient {
-  constructor(private exec: ExecFn = createExec()) {}
+  constructor(
+    private exec: ExecFn = createExec(),
+    private sh: ShExecFn = createShExec(),
+  ) {}
 
   async listSessions(): Promise<string[]> {
     const r = await this.exec(['list-sessions', '-F', '#{session_name}']);
@@ -86,6 +98,63 @@ export class TmuxClient {
     const r = await this.exec(['display-message', '-p', '-t', t, '#{pane_current_command}']);
     if (r.code !== 0) throw new Error(`tmux display-message failed: ${r.stderr}`);
     return r.stdout.trim();
+  }
+
+  // Cwd REALE del processo claude nel pane. Quando il CLI sposta la sessione in
+  // un git worktree (`cd .claude/worktrees/<nome>`), il cwd del PANE resta
+  // quello di partenza: `pane_current_path` non basta a risolvere il transcript,
+  // che finisce nella dir worktree-encoded di ~/.claude/projects. Il processo
+  // claude (figlio di `ollama launch claude`) invece ha il cwd vero.
+  //
+  // Dal pane_pid (la radice del pane) scende nell'albero dei processi fino al
+  // primo il cui eseguibile è `claude` e ne legge il cwd con lsof. undefined se
+  // il processo non c'è o non è leggibile → il chiamante ripiega sul cwd del pane.
+  async claudeCwd(target: string): Promise<string | undefined> {
+    try {
+      const t = await this.resolveTarget(target);
+      const pidRes = await this.exec(['display-message', '-p', '-t', t, '#{pane_pid}']);
+      if (pidRes.code !== 0) return undefined;
+      const root = pidRes.stdout.trim();
+      if (!/^\d+$/.test(root)) return undefined;
+
+      const ps = await this.sh('ps', ['-o', 'pid=,ppid=,comm=']);
+      if (ps.code !== 0) return undefined;
+      const children = new Map<string, string[]>(); // ppid → [figli]
+      const comms = new Map<string, string>();      // pid → eseguibile
+      for (const line of ps.stdout.split('\n')) {
+        const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/);
+        if (!m) continue;
+        const [, pid, ppid, comm] = m;
+        comms.set(pid, comm);
+        const kids = children.get(ppid) ?? [];
+        kids.push(pid);
+        children.set(ppid, kids);
+      }
+
+      // BFS dalla radice: il primo processo con eseguibile `claude` è quello che
+      // sta scrivendo il transcript di questa sessione.
+      const queue = [root];
+      const seen = new Set<string>();
+      while (queue.length) {
+        const pid = queue.shift()!;
+        if (seen.has(pid)) continue;
+        seen.add(pid);
+        const comm = comms.get(pid) ?? '';
+        if (comm.split('/').pop() === 'claude') {
+          const lsof = await this.sh('lsof', ['-a', '-p', pid, '-d', 'cwd', '-Fn']);
+          if (lsof.code !== 0) return undefined;
+          for (const line of lsof.stdout.split('\n')) {
+            const n = line.match(/^n(.*)$/);
+            if (n) return n[1];
+          }
+          return undefined;
+        }
+        queue.push(...(children.get(pid) ?? []));
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   // 1:1: incolla il testo (bracketed paste, niente interpretazione shell) e preme

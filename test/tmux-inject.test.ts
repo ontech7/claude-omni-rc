@@ -91,6 +91,46 @@ describe('TmuxClient', () => {
   });
 });
 
+describe('TmuxClient.claudeCwd', () => {
+  it('finds the cwd of the claude process running in the pane (worktree)', async () => {
+    const exec: any = async (args: string[]) => {
+      if (args[0] === 'list-sessions') return { code: 0, stdout: '$0 claude:proj\n', stderr: '' };
+      if (args[0] === 'display-message') return { code: 0, stdout: '100\n', stderr: '' };
+      throw new Error('unexpected tmux call: ' + args.join(' '));
+    };
+    const sh: any = async (cmd: string, args: string[]) => {
+      if (cmd === 'ps') return { code: 0, stdout: '100 1 -zsh\n200 100 ollama\n300 200 /Users/u/.local/bin/claude\n', stderr: '' };
+      if (cmd === 'lsof') return { code: 0, stdout: 'p300\nfcwd\nn/Users/u/proj/.claude/worktrees/fix\n', stderr: '' };
+      throw new Error('unexpected sh call: ' + cmd);
+    };
+    const client = new TmuxClient(exec, sh);
+    await expect(client.claudeCwd('claude:proj')).resolves.toBe('/Users/u/proj/.claude/worktrees/fix');
+  });
+  it('returns undefined when no claude process runs in the pane', async () => {
+    const exec: any = async (args: string[]) => {
+      if (args[0] === 'list-sessions') return { code: 0, stdout: '$0 claude:proj\n', stderr: '' };
+      if (args[0] === 'display-message') return { code: 0, stdout: '100\n', stderr: '' };
+      throw new Error('unexpected');
+    };
+    const sh: any = async (cmd: string) => {
+      if (cmd === 'ps') return { code: 0, stdout: '100 1 -zsh\n200 100 ollama\n', stderr: '' };
+      throw new Error('unexpected sh call: ' + cmd);
+    };
+    const client = new TmuxClient(exec, sh);
+    await expect(client.claudeCwd('claude:proj')).resolves.toBeUndefined();
+  });
+  it('returns undefined when ps/lsof fail', async () => {
+    const exec: any = async (args: string[]) => {
+      if (args[0] === 'list-sessions') return { code: 0, stdout: '$0 claude:proj\n', stderr: '' };
+      if (args[0] === 'display-message') return { code: 0, stdout: '100\n', stderr: '' };
+      throw new Error('unexpected');
+    };
+    const sh: any = async () => ({ code: 1, stdout: '', stderr: 'boom' });
+    const client = new TmuxClient(exec, sh);
+    await expect(client.claudeCwd('claude:proj')).resolves.toBeUndefined();
+  });
+});
+
 function fakeChild(): any {
   const child = new EventEmitter() as any;
   child.stdout = new EventEmitter() as any;

@@ -19,6 +19,7 @@ function makeWatcher(tmuxSessions: string[] = [], serverUp = true) {
     listSessions: vi.fn(async () => tmuxSessions),
     paneCwd: vi.fn(async (t: string) => `/home/user/${t.replace('claude:', '')}`),
     paneCommand: vi.fn(async () => 'ollama'), // default: claude attivo nel pane
+    claudeCwd: vi.fn(async (_t: string): Promise<string | undefined> => undefined), // default: nessun processo claude distinguibile
   };
   const watcher = new TmuxWatcher({ config, manager, tmux: tmux as any });
   return { manager, watcher, tmux };
@@ -59,6 +60,7 @@ describe('TmuxWatcher', () => {
       serverRunning: vi.fn(async () => true),
       listSessions: vi.fn(async () => sessions),
       paneCwd: vi.fn(async () => '/home/user/proj1'),
+      claudeCwd: vi.fn(async () => undefined),
     };
     const watcher = new TmuxWatcher({ config, manager, tmux: tmux as any });
     manager.setArmed(true);
@@ -93,6 +95,7 @@ describe('TmuxWatcher', () => {
       listSessions: vi.fn(async () => ['claude:proj1']),
       paneCwd: vi.fn(async () => '/home/user/proj1'),
       paneCommand: vi.fn(async () => 'zsh'), // pane tornato alla shell
+      claudeCwd: vi.fn(async () => undefined),
     };
     const watcher = new TmuxWatcher({ config, manager, tmux: tmux as any });
     manager.setArmed(true);
@@ -123,6 +126,7 @@ describe('TmuxWatcher', () => {
       listSessions: vi.fn(async () => ['claude:proj1']),
       paneCwd: vi.fn(async () => cwd),
       paneCommand: vi.fn(async () => 'ollama'),
+      claudeCwd: vi.fn(async () => undefined),
     };
     const watcher = new TmuxWatcher({ config, manager, tmux: tmux as any });
     manager.setArmed(true);
@@ -133,6 +137,16 @@ describe('TmuxWatcher', () => {
     cwd = '/home/user/proj1/.claude/worktrees/fix';
     await (watcher as any).poll();
     expect(manager.get(s.id)?.projectDir).toBe('/home/user/proj1/.claude/worktrees/fix');
+  });
+  it('uses the claude process cwd (worktree) as projectDir, not the pane cwd', async () => {
+    const { manager, watcher, tmux } = makeWatcher(['claude:proj1']);
+    manager.setArmed(true);
+    // il CLI è dentro un git worktree: il processo claude ha il cwd nel worktree,
+    // il pane resta nella dir principale — projectDir deve seguire il PROCESSO.
+    tmux.claudeCwd.mockResolvedValue('/home/user/proj1/.claude/worktrees/fix');
+    await (watcher as any).poll();
+    const s1 = manager.findByTmuxTarget('claude:proj1');
+    expect(s1?.projectDir).toBe('/home/user/proj1/.claude/worktrees/fix');
   });
   it('does not remove when the pane command cannot be read', async () => {
     const bus = new Bus();
@@ -145,6 +159,7 @@ describe('TmuxWatcher', () => {
       listSessions: vi.fn(async () => ['claude:proj1']),
       paneCwd: vi.fn(async () => '/home/user/proj1'),
       paneCommand: vi.fn(async () => { throw new Error('tmux error'); }),
+      claudeCwd: vi.fn(async () => undefined),
     };
     const watcher = new TmuxWatcher({ config, manager, tmux: tmux as any });
     manager.setArmed(true);

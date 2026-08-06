@@ -31,10 +31,7 @@ export function createDaemon(
   const sdk = new SdkDriver({ bus, manager, config, permissionFlow, ollama });
   const tmux = new TmuxClient();
   const watcher = new TmuxWatcher({ config, manager, tmux });
-  const transcriptWatcher = new TranscriptWatcher({
-    config, manager, bus,
-    ollamaModels: async () => { try { return await ollama.listModels(); } catch { return new Set(); } },
-  });
+  const transcriptWatcher = new TranscriptWatcher({ config, manager, bus });
   const inbox = new Inbox({ dir: config.inboxDir });
   const bot = overrides.bot ?? new TelegramBot({ config, bus, manager, permissionFlow, sdk, tmux, inbox, ollama });
 
@@ -44,6 +41,10 @@ export function createDaemon(
 
   return {
     async start() {
+      // Prima sincronizzazione dei terminali PRIMA che il transcript-watcher
+      // parta: projectDir viene risolto dal cwd del processo claude (worktree
+      // incluso), così i transcript non vengono adottati nella dir precedente.
+      await watcher.poll();
       watcher.start(); // gated su armed
       transcriptWatcher.start();
       await bot.start();

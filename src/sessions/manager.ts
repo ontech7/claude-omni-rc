@@ -84,7 +84,7 @@ export class SessionManager {
     if (s.claudeSessionId !== claudeSessionId) { s.claudeSessionId = claudeSessionId; this.emitUpdated(id); }
   }
 
-  setTranscriptFile(id: string, transcriptFile: string): void {
+  setTranscriptFile(id: string, transcriptFile: string | undefined): void {
     const s = this.get(id);
     if (!s) return;
     if (s.transcriptFile !== transcriptFile) { s.transcriptFile = transcriptFile; this.emitUpdated(id); }
