@@ -242,6 +242,25 @@ export function stopReply(o: {
     : 'This terminal session has no tmux pane to interrupt.';
 }
 
+// Indicatore "sta scrivendo…" di Telegram: la bolla del chat action dura ~5s,
+// quindi va rinnovata. start() invia subito e poi a intervalli; stop() ferma.
+export class TypingIndicator {
+  private timer?: NodeJS.Timeout;
+
+  constructor(private send: () => Promise<unknown>, private intervalMs = 4000) {}
+
+  start(): void {
+    if (this.timer) return; // idempotente
+    void this.send().catch(() => {});
+    this.timer = setInterval(() => void this.send().catch(() => {}), this.intervalMs);
+    this.timer.unref?.();
+  }
+
+  stop(): void {
+    if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
+  }
+}
+
 export function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
   if (diff < 60_000) return 'just now';
@@ -367,6 +386,11 @@ export class TelegramBot {
   private recentInjected = new Map<string, { text: string; at: number }[]>();
   // Fix 2: domande a scelta multipla in attesa, token → domanda (per i bottoni).
   private pendingPrompts = new Map<string, { sessionId: string; questions: PromptQuestion[]; text: string }>();
+  // Indicatore "sta scrivendo…" per la sessione attiva (chat action, non un messaggio).
+  private typing = new TypingIndicator(() => {
+    if (!this.chatId) return Promise.resolve();
+    return this.bot.api.sendChatAction(this.chatId, 'typing');
+  });
 
   constructor(private deps: BotDeps) {
     // timeout di sicurezza su ogni chiamata API Telegram (le getUpdates long-poll
@@ -750,6 +774,7 @@ export class TelegramBot {
         case 'select': {
           const s = this.deps.manager.get(parsed.id);
           if (s) this.deps.manager.setActive(s.id);
+          this.syncTyping(); // la sessione appena selezionata può essere già in running
           await ctx.answerCallbackQuery({ text: 'Session selected' });
           await ctx.editMessageText(sessionListText(this.deps.manager.list(), this.deps.manager.getActive()), { parse_mode: 'HTML' });
           // Fix 5: mostra la storia recente della sessione appena selezionata.
@@ -898,12 +923,26 @@ export class TelegramBot {
     await this.routeMessageToSession(ctx, `[File attached: ${path}]`);
   }
 
+  // Allinea l'indicatore "sta scrivendo…" allo stato della sessione attiva.
+  private syncTyping(): void {
+    const active = this.deps.manager.getActive();
+    const s = active ? this.deps.manager.get(active) : undefined;
+    if (s?.status === 'running') this.typing.start();
+    else this.typing.stop();
+  }
+
   private subscribeBus(): void {
     const bus = this.deps.bus;
     // constraint 8: da disattivo nessun relay — ogni handler del bus è gated su armed.
+    bus.on('session.updated', ({ sessionId }) => {
+      if (!this.deps.manager.isArmed()) return;
+      if (sessionId !== this.deps.manager.getActive()) return;
+      this.syncTyping();
+    });
     bus.on('session.text', e => {
       if (!this.deps.manager.isArmed()) return;
       if (e.sessionId !== this.deps.manager.getActive()) return; // solo la sessione selezionata
+      if (e.role === 'assistant') this.typing.stop(); // il testo è già l'indicatore
       this.toolBurst(e.sessionId).close(); // il testo chiude la raffica di tool
       // Fix 1: l'echo di un testo iniettato dal bot non viene reinoltrato.
       if (e.role === 'user' && this.isInjectedEcho(e.sessionId, e.text)) return;
@@ -931,6 +970,7 @@ export class TelegramBot {
     bus.on('session.tool', e => {
       if (!this.deps.manager.isArmed()) return;
       if (e.kind === 'tool_use' && e.sessionId === this.deps.manager.getActive() && e.input) {
+        this.typing.start(); // il modello sta lavorando di nuovo
         const line = `🔧 <code>${htmlEscape(e.toolName)}</code> — <pre>${htmlEscape(JSON.stringify(e.input).slice(0, 300))}</pre>`;
         void this.toolBurst(e.sessionId).push(line);
       }
@@ -947,6 +987,7 @@ export class TelegramBot {
     });
     bus.on('session.result', e => {
       if (!this.deps.manager.isArmed() || e.sessionId !== this.deps.manager.getActive()) return;
+      this.typing.stop(); // fine turno: niente più "sta scrivendo"
       this.toolBurst(e.sessionId).close(); // fine turno headless: chiude la raffica di tool
       // solo segnale di completamento: il testo della risposta è già arrivato
       // streammato (session.text → mdToHtml). Re-inviarlo qui (come faceva la
@@ -956,6 +997,7 @@ export class TelegramBot {
     });
     bus.on('session.error', e => {
       if (!this.deps.manager.isArmed() || e.sessionId !== this.deps.manager.getActive()) return;
+      this.typing.stop(); // errore: niente più "sta scrivendo"
       this.toolBurst(e.sessionId).close();
       this.notify(`❌ <b>${htmlEscape(e.message.slice(0, 500))}</b>`);
     });

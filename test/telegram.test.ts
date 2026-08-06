@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply } from '../bot/telegram.js';
+import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator } from '../bot/telegram.js';
 import type { ToolBurstSink } from '../bot/telegram.js';
 
 describe('parseCommand', () => {
@@ -292,5 +292,39 @@ describe('stopReply', () => {
   it('reports the target for terminal sessions and the no-pane case', () => {
     expect(stopReply({ kind: 'terminal', id8: 'abc', target: 'claude:proj' })).toContain('Ctrl+C');
     expect(stopReply({ kind: 'terminal', id8: 'abc' })).toContain('no tmux');
+  });
+});
+
+describe('TypingIndicator', () => {
+  it('sends immediately and repeats on the interval until stopped', async () => {
+    vi.useFakeTimers();
+    try {
+      const send = vi.fn(async () => {});
+      const t = new TypingIndicator(send, 4000);
+      t.start();
+      expect(send).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(send).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(send).toHaveBeenCalledTimes(3);
+      t.stop();
+      await vi.advanceTimersByTimeAsync(8000);
+      expect(send).toHaveBeenCalledTimes(3); // fermo dopo stop
+    } finally { vi.useRealTimers(); }
+  });
+  it('start is idempotent', async () => {
+    vi.useFakeTimers();
+    try {
+      const send = vi.fn(async () => {});
+      const t = new TypingIndicator(send, 4000);
+      t.start();
+      t.start();
+      expect(send).toHaveBeenCalledTimes(1);
+      t.stop();
+    } finally { vi.useRealTimers(); }
+  });
+  it('stop without start is a no-op', () => {
+    const t = new TypingIndicator(async () => {});
+    expect(() => t.stop()).not.toThrow();
   });
 });
