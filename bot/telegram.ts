@@ -528,7 +528,7 @@ export class TelegramBot {
     this.bot = new Bot(deps.config.telegramBotToken, { client: { timeoutSeconds: 35 } });
     // senza bot.catch, grammy STOPPA il bot al primo errore di middleware non
     // gestito → il daemon moriva (spec §3.1). Ora logghiamo e si va avanti.
-    this.bot.catch(err => { console.error('ollama-rc bot error:', (err as { error?: unknown })?.error ?? err); });
+    this.bot.catch(err => { console.error('claude-omni-rc bot error:', (err as { error?: unknown })?.error ?? err); });
     this.register();
     this.subscribeBus();
   }
@@ -607,7 +607,7 @@ export class TelegramBot {
           const ok = await this.throttler.throttled(() =>
             this.bot.api.editMessageText(chatId, messageId, text, { parse_mode: 'HTML' })
               .then(() => true)
-              .catch(err => { console.error('ollama-rc tool edit failed:', err); return false; }));
+              .catch(err => { console.error('claude-omni-rc tool edit failed:', err); return false; }));
           return ok ?? false;
         },
         send: async text => {
@@ -677,7 +677,7 @@ export class TelegramBot {
     const bot = this.bot;
     bot.command('start', ctx => this.safe(ctx, 'start', () => this.onStart(ctx)));
     bot.command('help', ctx => this.safe(ctx, 'help', async () => {
-      if (this.authorize(ctx)) await this.send(ctx, 'Commands: /rc on|off|status · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /help');
+      if (this.authorize(ctx)) await this.send(ctx, 'Commands: /rc [on|off|status] (no arg toggles) · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /help');
     }));
     bot.command('rc', ctx => this.safe(ctx, 'rc', () => this.onRc(ctx)));
     bot.command('sessions', ctx => this.safe(ctx, 'sessions', () => this.onSessions(ctx)));
@@ -713,24 +713,36 @@ export class TelegramBot {
     }
   }
 
+  private async arm(ctx: Context): Promise<void> {
+    this.deps.manager.setArmed(true); this.deps.manager.persist();
+    await this.send(ctx, '🔓 Remote control ARMED.');
+  }
+
+  private async disarm(ctx: Context): Promise<void> {
+    this.deps.manager.setArmed(false);
+    for (const s of this.deps.manager.list()) {
+      this.deps.permissionFlow.cancelAllForSession(s.id);
+      this.deps.sdk.stop(s.id); // spegne anche i turni headless in corso
+    }
+    this.deps.manager.persist();
+    await this.send(ctx, '🔒 Remote control DISARMED. No mirroring, injection or relay.');
+  }
+
   private async onRc(ctx: Context): Promise<void> {
     if (!this.authorize(ctx)) return;
     const arg = (ctx.match?.toString().trim() ?? '').toLowerCase();
     if (arg === 'on') {
-      this.deps.manager.setArmed(true); this.deps.manager.persist();
-      await this.send(ctx, '🔓 Remote control ARMED.');
+      await this.arm(ctx);
     } else if (arg === 'off') {
-      this.deps.manager.setArmed(false);
-      for (const s of this.deps.manager.list()) {
-        this.deps.permissionFlow.cancelAllForSession(s.id);
-        this.deps.sdk.stop(s.id); // spegne anche i turni headless in corso
-      }
-      this.deps.manager.persist();
-      await this.send(ctx, '🔒 Remote control DISARMED. No mirroring, injection or relay.');
+      await this.disarm(ctx);
     } else if (arg === 'status') {
       await this.send(ctx, `Switch: ${this.deps.manager.isArmed() ? '🔓 armed' : '🔒 disarmed'}`);
+    } else if (arg === '') {
+      // no argument → toggle the armed switch
+      if (this.deps.manager.isArmed()) await this.disarm(ctx);
+      else await this.arm(ctx);
     } else {
-      await this.send(ctx, 'Usage: /rc on | /rc off | /rc status');
+      await this.send(ctx, 'Usage: /rc [on|off|status] — no argument toggles.');
     }
   }
 

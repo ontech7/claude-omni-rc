@@ -63,7 +63,7 @@ export function createDaemon(
 const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
   // rete di sicurezza: anche un fire-and-forget sfuggito non deve uccidere il daemon.
-  process.on('unhandledRejection', err => { console.error('ollama-rc unhandledRejection:', err); });
+  process.on('unhandledRejection', err => { console.error('claude-omni-rc unhandledRejection:', err); });
   const daemon = createDaemon(loadConfig());
   const shutdown = (): void => {
     void daemon.stop().then(() => process.exit(0)).catch(() => process.exit(1));

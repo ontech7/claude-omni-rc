@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// Adds or removes the ollama-rc hooks in a Claude Code settings.json,
+// Adds or removes the claude-omni-rc hooks in a Claude Code settings.json,
 // preserving everything else. Idempotent.
 //
 // It manages:
 //   - the SessionStart hook (auto-attach), a hook command entry
 //   - the PermissionRequest hook (remote approve/reject), a hook command entry
-//     that delegates CLI permission decisions to the ollama-rc daemon
+//     that delegates CLI permission decisions to the claude-omni-rc daemon
 //
 // Usage:
 //   node setup-hook.mjs <settings.json> <attach-script> <permission-hook>          # add
@@ -58,9 +58,9 @@ if (removeMode) {
   if (settings.hooks && Object.keys(settings.hooks).length === 0) delete settings.hooks;
   if (changed) {
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
-    console.log(`ollama-rc hooks removed from ${settingsPath}.`);
+    console.log(`claude-omni-rc hooks removed from ${settingsPath}.`);
   } else {
-    console.log('ollama-rc hooks not present — nothing to remove.');
+    console.log('claude-omni-rc hooks not present — nothing to remove.');
   }
   process.exit(0);
 }
@@ -79,7 +79,7 @@ for (const [key, script] of [['SessionStart', attachScript], ['PermissionRequest
 }
 if (changed) {
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
-  console.log(`ollama-rc hooks added to ${settingsPath}.`);
+  console.log(`claude-omni-rc hooks added to ${settingsPath}.`);
 } else {
-  console.log('ollama-rc hooks already present.');
+  console.log('claude-omni-rc hooks already present.');
 }

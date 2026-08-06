@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# ollama-rc attach — registers the current Claude Code session with the daemon.
+# claude-omni-rc attach — registers the current Claude Code session with the daemon.
 #
 # Called by the Claude Code SessionStart hook (installed by ./install.sh), so
 # every session auto-attaches to remote control — the closest equivalent to
@@ -13,6 +13,11 @@
 #
 # Only Ollama sessions are registered: without ANTHROPIC_BASE_URL (or with
 # Anthropic's) the session isn't served by our daemon and isn't relevant.
+#
+# When the session is NOT inside tmux but the daemon is running, the hook emits
+# a systemMessage (JSON on stdout) reminding the user to start it with
+# `omni-rc <name>` instead — a session outside tmux can be mirrored read-only
+# from Telegram but can't receive input or be captured with /view.
 #
 set -uo pipefail
 
@@ -31,7 +36,14 @@ fi
 
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
-curl -fsS --max-time 5 -X POST "$BASE/api/attach" \
+if curl -fsS --max-time 5 -X POST "$BASE/api/attach" \
   -H 'content-type: application/json' \
-  -d "{\"projectDir\":\"$(json_escape "$PROJECT_DIR")\",\"tmuxTarget\":\"$(json_escape "$TMUX_TARGET")\",\"title\":\"$(json_escape "$(basename "$PROJECT_DIR" 2>/dev/null || echo ollama-rc)")\"}" \
-  >/dev/null 2>&1 || true
+  -d "{\"projectDir\":\"$(json_escape "$PROJECT_DIR")\",\"tmuxTarget\":\"$(json_escape "$TMUX_TARGET")\",\"title\":\"$(json_escape "$(basename "$PROJECT_DIR" 2>/dev/null || echo claude-omni-rc)")\"}" \
+  >/dev/null 2>&1; then
+  # daemon is up: if this session isn't inside tmux, remind the user that
+  # remote control can inject input and capture the screen only from tmux.
+  if [ -z "$TMUX_TARGET" ]; then
+    NAME="$(basename "$PROJECT_DIR" 2>/dev/null || echo session)"
+    printf '{"systemMessage":"⚠️ omni-rc: this session is not inside tmux. If you plan to use remote control from your phone, restart it with: omni-rc %s"}\n' "$(json_escape "$NAME")"
+  fi
+fi

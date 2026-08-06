@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# ollama-rc stop — shuts everything down: launchd daemon, headless sessions and hooks.
+# claude-omni-rc stop — shuts everything down: launchd daemon, headless sessions and hooks.
 #
 # Stops what ./install.sh started:
 #   1. the launchd daemon (bootout → KeepAlive won't restart it)
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-LABEL="com.ontech7.ollama-rc"
+LABEL="com.ontech7.claude-omni-rc"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 SETTINGS="$HOME/.claude/settings.json"
@@ -108,4 +108,4 @@ else
   echo "node not found — remove the hooks manually from $SETTINGS." >&2
 fi
 
-echo "ollama-rc stopped. To restart: ./scripts/start.sh"
+echo "claude-omni-rc stopped. To restart: ./scripts/start.sh"

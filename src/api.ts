@@ -83,7 +83,7 @@ export function startApi(port: number, deps: ApiDeps): ApiHandle {
     res.writeHead(404);
     res.end();
   });
-  server.on('error', e => { console.error('ollama-rc api:', (e as Error).message); });
+  server.on('error', e => { console.error('claude-omni-rc api:', (e as Error).message); });
   const ready = new Promise<void>(resolve => server.once('listening', resolve));
   server.listen(port, '127.0.0.1');
   return {

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# ollama-rc PermissionRequest hook — Claude Code invokes it right before
+# claude-omni-rc PermissionRequest hook — Claude Code invokes it right before
 # showing a permission prompt in interactive sessions. If the daemon is
 # reachable and armed, it forwards the request to Telegram (✓ Approve / ✗ Reject)
 # and returns the decision to the CLI; otherwise it emits no decision and

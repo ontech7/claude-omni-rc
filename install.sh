@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# ollama-rc — guided installer
+# claude-omni-rc — guided installer
 #
-#   git clone https://github.com/ontech7/ollama-rc
-#   cd ollama-rc
+#   git clone https://github.com/ontech7/claude-omni-rc
+#   cd claude-omni-rc
 #   ./install.sh
 #
 # Walks you through everything a non-expert needs to get the daemon running:
@@ -19,7 +19,7 @@ set -uo pipefail
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$REPO_DIR/.env"
 ENV_EXAMPLE="$REPO_DIR/.env.example"
-STATE_DIR="${STATE_DIR:-$HOME/.ollama-rc}"
+STATE_DIR="${STATE_DIR:-$HOME/.claude-omni-rc}"
 DEFAULT_OLLAMA_URL="http://127.0.0.1:11434"
 DEFAULT_MODEL_FALLBACK="deepseek-v4-flash:0731-cloud"
 
@@ -51,22 +51,24 @@ ask_yes_no() {
 
 usage() {
   cat <<EOF | printf '%b\n' "$(cat)"
-${c_bold}${c_cyan}ollama-rc installer${c_reset}
+${c_bold}${c_cyan}claude-omni-rc installer${c_reset}
 
 ${c_bold}Usage:${c_reset} ./install.sh [--help|--uninstall]
 
-${c_bold}Guided installer${c_reset} for the ollama-rc daemon + Telegram bot.
+${c_bold}Guided installer${c_reset} for the claude-omni-rc daemon + Telegram bot.
 It checks prerequisites, installs npm dependencies, helps you configure
 .env (bot token + authorization), pulls the Ollama models, registers the
-background daemon (launchd) and adds the Claude Code hooks (SessionStart
-auto-attach + PermissionRequest approve/reject from Telegram).
+background daemon (launchd), adds the Claude Code hooks (SessionStart
+auto-attach + PermissionRequest approve/reject from Telegram) and adds the
+${c_cyan}omni-rc${c_reset} shell function (start a session inside a claude:<name>
+tmux session).
 
 ${c_bold}Options:${c_reset}
   ${c_cyan}--uninstall${c_reset}   remove the launchd agent, the SessionStart hook and (on
                 confirmation) the Ollama model and the state dir (.env is kept)
 
 ${c_bold}Environment:${c_reset}
-  ${c_cyan}STATE_DIR${c_reset}   where state and logs live (default: ~/.ollama-rc)
+  ${c_cyan}STATE_DIR${c_reset}   where state and logs live (default: ~/.claude-omni-rc)
 EOF
 }
 
@@ -90,7 +92,7 @@ check_platform() {
     Darwin|Linux) ;;
     *)
       err "Unsupported platform: $(uname -s 2>/dev/null || echo unknown)"
-      err "ollama-rc targets macOS (launchd) and Linux."
+      err "claude-omni-rc targets macOS (launchd) and Linux."
       exit 1
       ;;
   esac
@@ -255,11 +257,53 @@ install_hook() {
   fi
 }
 
+# The `omni-rc` shell function: starts a Claude Code session inside a
+# `claude:<name>` tmux session, ready for remote control. Added to the user's
+# shell rc so it's available as a plain command. Idempotent; removed by
+# --uninstall.
+shell_rc_file() {
+  case "${SHELL:-}" in
+    *zsh) printf '%s\n' "$HOME/.zshrc" ;;
+    *)    printf '%s\n' "$HOME/.bashrc" ;;
+  esac
+}
+
+install_omni_rc_function() {
+  local rc marker_start marker_end
+  rc="$(shell_rc_file)"
+  marker_start="# >>> claude-omni-rc omni-rc launcher >>>"
+  marker_end="# <<< claude-omni-rc omni-rc launcher <<<"
+  [ -f "$rc" ] || touch "$rc"
+  if grep -qF "$marker_start" "$rc"; then
+    ok "omni-rc function already present in $rc."
+    return
+  fi
+  cat >> "$rc" <<EOF
+
+$marker_start
+# omni-rc <name> — start Claude Code inside a claude:<name> tmux session
+omni-rc() { "$REPO_DIR/scripts/omni-rc.sh" "\$@"; }
+$marker_end
+EOF
+  ok "Added the omni-rc function to $rc (open a new shell to use it)."
+}
+
+remove_omni_rc_function() {
+  local rc marker_start marker_end
+  rc="$(shell_rc_file)"
+  marker_start="# >>> claude-omni-rc omni-rc launcher >>>"
+  marker_end="# <<< claude-omni-rc omni-rc launcher <<<"
+  if [ -f "$rc" ] && grep -qF "$marker_start" "$rc"; then
+    sed -i.bak "/^$marker_start/,/^$marker_end/d" "$rc" && rm -f "$rc.bak"
+    ok "Removed the omni-rc function from $rc."
+  fi
+}
+
 uninstall() {
-  printf '%b\n' "${c_bold}Uninstalling ollama-rc…${c_reset}"
+  printf '%b\n' "${c_bold}Uninstalling claude-omni-rc…${c_reset}"
 
   # 1. launchd agent
-  local plist="$HOME/Library/LaunchAgents/com.ontech7.ollama-rc.plist"
+  local plist="$HOME/Library/LaunchAgents/com.ontech7.claude-omni-rc.plist"
   if [ -f "$plist" ]; then
     launchctl unload "$plist" 2>/dev/null || true
     rm -f "$plist"
@@ -273,10 +317,13 @@ uninstall() {
   if have node; then
     node "$REPO_DIR/scripts/setup-hook.mjs" --remove "$HOME/.claude/settings.json" "$REPO_DIR/scripts/attach.sh" "$REPO_DIR/scripts/permission-hook.sh"
   else
-    warn "node not found — remove the ollama-rc hooks manually from ~/.claude/settings.json."
+    warn "node not found — remove the claude-omni-rc hooks manually from ~/.claude/settings.json."
   fi
 
-  # 3. Ollama model (only on confirmation: it may be used outside ollama-rc too)
+  # 3. the omni-rc shell function from the shell rc
+  remove_omni_rc_function
+
+  # 4. Ollama model (only on confirmation: it may be used outside claude-omni-rc too)
   local model
   model="$(get_env DEFAULT_MODEL 2>/dev/null)"
   [ -n "$model" ] || model="$DEFAULT_MODEL_FALLBACK"
@@ -290,7 +337,7 @@ uninstall() {
     warn "Keeping the Ollama model '$model'."
   fi
 
-  # 4. state (on confirmation) — .env is left intact for a possible reinstall
+  # 5. state (on confirmation) — .env is left intact for a possible reinstall
   if ask_yes_no "Remove the state dir '$STATE_DIR' (state, logs, inbox)?"; then
     rm -rf "$STATE_DIR"
     ok "Removed $STATE_DIR."
@@ -298,13 +345,13 @@ uninstall() {
     warn "Keeping $STATE_DIR."
   fi
 
-  ok "ollama-rc uninstalled. .env and the repo itself are kept — re-run ./install.sh to set it up again."
+  ok "claude-omni-rc uninstalled. .env and the repo itself are kept — re-run ./install.sh to set it up again."
 }
 
 print_summary() {
   cat <<EOF | printf '%b\n' "$(cat)"
 
-${c_bold}${c_green}✓ ollama-rc is installed.${c_reset} ${c_bold}Next steps:${c_reset}
+${c_bold}${c_green}✓ claude-omni-rc is installed.${c_reset} ${c_bold}Next steps:${c_reset}
   1. Open the chat with your bot on Telegram.
      • If you set a pairing code, send:        ${c_cyan}/start <pairing code>${c_reset}
      • If you allowlisted your user id, any message works.
@@ -315,12 +362,17 @@ ${c_bold}${c_green}✓ ollama-rc is installed.${c_reset} ${c_bold}Next steps:${c
      ${c_cyan}/attach <project>${c_reset}             — attach a tmux terminal session
      ${c_cyan}/help${c_reset}                         — all commands
 
+  Start a session ready for remote control from the shell (new shell needed
+  after install):
+     ${c_cyan}omni-rc <name>${c_reset}                — e.g.  omni-rc myproject
+     ${c_cyan}omni-rc <name> -c <dir> -m <model>${c_reset} — enrich it (see omni-rc --help)
+
   The SessionStart hook auto-attaches every Claude Code session you start,
   including the one you're in right now — restart it (or run  claude  again)
   and it will show up in /sessions.
 
   ${c_yellow}Logs:${c_reset}   $STATE_DIR/logs/daemon.log
-  ${c_yellow}Docs:${c_reset}   https://github.com/ontech7/ollama-rc#readme
+  ${c_yellow}Docs:${c_reset}   https://github.com/ontech7/claude-omni-rc#readme
   ${c_red}Your $ENV_FILE holds secrets — keep it private, never commit it.${c_reset}
 EOF
 }
@@ -334,7 +386,7 @@ main() {
     *) err "Unknown option: $1"; usage; exit 1 ;;
   esac
 
-  printf '%b\n' "${c_bold}${c_cyan}ollama-rc${c_reset} ${c_bold}— remote control for Claude Code, via Telegram${c_reset}"
+  printf '%b\n' "${c_bold}${c_cyan}claude-omni-rc${c_reset} ${c_bold}— remote control for Claude Code, via Telegram${c_reset}"
   printf '%b\n' "${c_cyan}────────────────────────────────────────────────────────${c_reset}"
   check_platform
   check_node
@@ -347,6 +399,7 @@ main() {
   ensure_model "$default_model" "used for headless sessions"
   install_service
   install_hook
+  install_omni_rc_function
   print_summary
 }
 

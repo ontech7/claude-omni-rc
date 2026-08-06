@@ -5,6 +5,7 @@ import type { ToolBurstSink } from '../bot/telegram.js';
 describe('parseCommand', () => {
   it('classifies control commands', () => {
     expect(parseCommand('/rc on')).toEqual({ kind: 'control', command: 'rc', arg: 'on' });
+    expect(parseCommand('/rc')).toEqual({ kind: 'control', command: 'rc' }); // no arg → toggle
     expect(parseCommand('/help')).toEqual({ kind: 'control', command: 'help' });
   });
   it('classifies session commands', () => {

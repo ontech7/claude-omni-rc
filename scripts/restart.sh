@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# ollama-rc restart — restarts the launchd daemon to load new code.
+# claude-omni-rc restart — restarts the launchd daemon to load new code.
 #
 # After a code change, the running process still has the old version in memory
 # (tsx loads the source at startup): this script does a clean restart of the
@@ -16,10 +16,10 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-LABEL="com.ontech7.ollama-rc"
+LABEL="com.ontech7.claude-omni-rc"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
-STATE="${STATE_DIR:-$HOME/.ollama-rc}"
+STATE="${STATE_DIR:-$HOME/.claude-omni-rc}"
 
 # Is the service loaded? (launchctl print fails if it isn't)
 is_loaded() {

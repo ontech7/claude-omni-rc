@@ -1,7 +1,7 @@
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/wordmark-dark.svg">
-    <img src="assets/wordmark-light.svg" alt="ollama-rc" width="544">
+    <img src="assets/wordmark-light.svg" alt="claude-omni-rc" width="544">
   </picture>
 </div>
 
@@ -9,15 +9,17 @@
 A local daemon plus a Telegram bot that mimics Claude Code's
 <code>/remote-control</code> — keep talking to any running session from your
 phone, approve permissions, and pick up exactly where you left off — without
-any Anthropic infrastructure.</p>
+any Anthropic infrastructure. It works with <em>any</em> model that runs
+through the Claude Code CLI: Ollama-served models, other local or proxied
+LLMs, or Claude itself.</p>
 
 <p align="center">
-  <a href="https://github.com/ontech7/ollama-rc/actions/workflows/ci.yml"><img src="https://github.com/ontech7/ollama-rc/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/ontech7/claude-omni-rc/actions/workflows/ci.yml"><img src="https://github.com/ontech7/claude-omni-rc/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-22%2B-339933?logo=nodedotjs&logoColor=white" alt="Node 22+"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/ontech7/ollama-rc" alt="License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/ontech7/claude-omni-rc" alt="License"></a>
 </p>
 
-<p align="center"><sub><a href="https://ontech7.github.io/ollama-rc/">Landing page</a> · <a href="AI-GUIDE.md">AI-GUIDE.md</a> — AI agents, start at <a href="AI-GUIDE.md">AI-GUIDE.md</a></sub></p>
+<p align="center"><sub><a href="https://ontech7.github.io/claude-omni-rc/">Landing page</a> · <a href="AI-GUIDE.md">AI-GUIDE.md</a> — AI agents, start at <a href="AI-GUIDE.md">AI-GUIDE.md</a></sub></p>
 
 ---
 
@@ -35,7 +37,7 @@ Tool: Bash
 ```
 
 Headline use case: you leave a long task running (a build, a migration, a
-multi-hour review), arm ollama-rc, walk out the door — and keep steering that
+multi-hour review), arm claude-omni-rc, walk out the door — and keep steering that
 same session, plus any other session you have running, from your phone.
 Starting brand-new conversations is a bonus, not the point.
 
@@ -49,7 +51,7 @@ through Anthropic's servers.
 
 If you drive Claude Code with an Ollama-served model — `ANTHROPIC_BASE_URL`
 pointing at Ollama, a placeholder `ollama` token, models like
-`deepseek-v4-flash:0731-cloud` — you get none of that. `ollama-rc` is a
+`deepseek-v4-flash:0731-cloud` — you get none of that. `claude-omni-rc` is a
 **local** replacement: a daemon on your machine plus a Telegram bot
 (long-polling, outbound-only, no open ports), gated by an explicit
 `armed` switch. It is unofficial and not affiliated with Anthropic or Ollama.
@@ -57,8 +59,8 @@ pointing at Ollama, a placeholder `ollama` token, models like
 ## Quick install
 
 ```bash
-git clone https://github.com/ontech7/ollama-rc
-cd ollama-rc
+git clone https://github.com/ontech7/claude-omni-rc
+cd claude-omni-rc
 ./install.sh
 ```
 
@@ -118,7 +120,7 @@ npm install
 ```
 
 For a first test in the foreground instead: `npm run dev` (logs to the
-terminal). The launchd logs go to `~/.ollama-rc/logs/daemon.log`.
+terminal). The launchd logs go to `~/.claude-omni-rc/logs/daemon.log`.
 
 After code changes, restart the daemon to load the new code (no reinstall):
 `./scripts/restart.sh` (or `./scripts/restart.sh status` to check it).
@@ -145,11 +147,19 @@ Start and stop the whole thing (daemon + headless sessions + hooks):
 
 ## Usage
 
-Run your interactive Claude Code sessions the usual way, inside tmux:
+Run your interactive Claude Code sessions the usual way, inside tmux. The
+installer adds an `omni-rc` shell function that does it for you:
 
 ```bash
-tmux new -s claude:my-project    # then run `claude` inside
+omni-rc my-project                          # tmux session claude:my-project + claude
+omni-rc my-project -c ~/code/my-project -m deepseek-v4-flash:0731-cloud
+omni-rc my-project -p "review the current diff"
+omni-rc -l                                  # list claude:* sessions
 ```
+
+(Equivalent to `tmux new -s claude:my-project` and running `claude` inside;
+`omni-rc --help` lists every option. If the session already exists, `omni-rc`
+just reattaches.)
 
 The daemon tracks `claude:*` tmux sessions (and any session attached via the
 `SessionStart` hook or `/attach`); with `/attach` you can also add one
@@ -159,7 +169,7 @@ explicitly.
 
 Only **your sessions** are tracked — nothing scans `~/.claude/projects` on its
 own. A session appears via the `claude:*` tmux discovery, the `SessionStart`
-hook, or `/attach`; sessions running outside of ollama-rc (e.g. plain
+hook, or `/attach`; sessions running outside of claude-omni-rc (e.g. plain
 Anthropic-hosted Claude Code) never show up.
 
 - **Chat, not screen** — for each tracked session the daemon reads the
@@ -186,6 +196,24 @@ Anthropic-hosted Claude Code) never show up.
 - `/view` still grabs the full current screen of the active session whenever
   you want the raw terminal.
 
+#### "I started claude without tmux — can I move it under tmux?"
+
+No — a running process can't be adopted by tmux. There is no seamless way to
+move an already-started Claude Code session into a tmux pane (`reptyr` exists
+on Linux but is fragile and doesn't work on macOS). What you get instead:
+
+- **Read-only mirroring still works.** A session started outside tmux is
+  registered by the `SessionStart` hook and its transcript is streamed to
+  Telegram as a chat — you can follow it from your phone.
+- **What you lose without tmux:** sending input to the session (it's
+  read-only) and `/view` (there's no pane to capture). Headless `/new`
+  sessions are unaffected.
+- **The fix is to start under tmux from the beginning:** `omni-rc <name>`
+  (or `tmux new -s claude:<name>`). If you're already in a session and know
+  you'll want remote control, restart it with `omni-rc <name>` — the
+  `SessionStart` hook now reminds you with a warning when you start a session
+  outside tmux.
+
 ### Auto-attach and remote permissions via hooks
 
 `./install.sh` also adds two Claude Code **hooks** that make a running session
@@ -208,14 +236,14 @@ To add them manually, merge into `~/.claude/settings.json`:
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "/abs/path/to/ollama-rc/scripts/attach.sh", "timeout": 10 }
+          { "type": "command", "command": "/abs/path/to/claude-omni-rc/scripts/attach.sh", "timeout": 10 }
         ]
       }
     ],
     "PermissionRequest": [
       {
         "hooks": [
-          { "type": "command", "command": "/abs/path/to/ollama-rc/scripts/permission-hook.sh", "timeout": 600 }
+          { "type": "command", "command": "/abs/path/to/claude-omni-rc/scripts/permission-hook.sh", "timeout": 600 }
         ]
       }
     ]
@@ -231,7 +259,7 @@ in-terminal prompt, so a regular session is never blocked.
 | Command | What it does |
 |---------|--------------|
 | `/start <code>` | pair this Telegram account (first time) |
-| `/rc on` / `/rc off` / `/rc status` | global armed switch |
+| `/rc` (no arg) / `/rc on` / `/rc off` / `/rc status` | global armed switch — no argument toggles it |
 | `/sessions` | list sessions, switch the active one |
 | `/view` | show the active session's current screen |
 | `/new <text>` | create a headless session and send it your prompt (automode; add `--standard` for approve/reject prompts) |
@@ -275,11 +303,11 @@ An unanswered request times out after `PERMISSION_TIMEOUT_SECONDS` (default
   The hook forwards the request to the bot, waits for your verdict, and returns
   it to Claude Code. When the daemon is down or remote control is disarmed the
   hook returns no decision and Claude Code shows its normal in-terminal prompt
-  — ollama-rc never blocks or auto-denies a regular session.
+  — claude-omni-rc never blocks or auto-denies a regular session.
 
 ## Media
 
-- **Files** — saved to `~/.ollama-rc/inbox/` and forwarded to the session as
+- **Files** — saved to `~/.claude-omni-rc/inbox/` and forwarded to the session as
   a file-path reference, which the model can read via its extra directories.
 - **Photos** — saved to the inbox the same way and forwarded as a path
   reference only. The default model is text-only, so it cannot *see* the
@@ -289,12 +317,12 @@ An unanswered request times out after `PERMISSION_TIMEOUT_SECONDS` (default
 ## Architecture
 
 ```
-ollama-rc/
+claude-omni-rc/
 ├── src/
 │   ├── daemon.ts            entry: config, wiring, shutdown, restart
 │   ├── config.ts            .env → typed config
 │   ├── bus.ts               typed pub/sub event bus
-│   ├── state.ts             persistent registry (~/.ollama-rc/state.json)
+│   ├── state.ts             persistent registry (~/.claude-omni-rc/state.json)
 │   ├── sessions/
 │   │   ├── manager.ts       session registry + armed switch + idle reaping
 │   │   ├── sdk-driver.ts    headless sessions (Claude Agent SDK query+resume)
@@ -322,7 +350,7 @@ Data flow: `Telegram ↔ bot ↔ bus ↔ sessions (SDK / tmux) ↔ Ollama`.
   `PermissionRequest` hook. Streaming only runs while armed and follows the
   session selected in `/sessions`.
 - **State** — the `armed` switch and the session registry — lives in
-  `~/.ollama-rc/state.json`.
+  `~/.claude-omni-rc/state.json`.
 - **Concurrency** — at most `MAX_HEADLESS_SESSIONS` headless turns at once.
 
 ## Configuration
@@ -340,7 +368,7 @@ token and one authorization method.
 | `MAX_HEADLESS_SESSIONS` | `2` | concurrent headless sessions |
 | `PERMISSION_TIMEOUT_SECONDS` | `120` | unanswered permission → deny |
 | `WORKSPACE_DIRS` | — | `:`-separated project roots for `/attach` |
-| `STATE_DIR` | `~/.ollama-rc` | where state, logs and the inbox live |
+| `STATE_DIR` | `~/.claude-omni-rc` | where state, logs and the inbox live |
 | `INBOX_DIR` | `<STATE_DIR>/inbox` | incoming attachments |
 | `PROJECTS_DIR` | `~/.claude/projects` | where Claude Code stores session transcripts |
 | `API_PORT` | `4123` | loopback port for the local API (SessionStart hook, permission hook) |
@@ -348,7 +376,7 @@ token and one authorization method.
 | `IDLE_GRACE_MS` | `3000` | how long a session must be quiet to count as idle |
 | `POLL_INTERVAL_MS` | `500` | tmux discovery polling interval |
 
-> Note: `~/.ollama-rc/logs/daemon.log` is a plain file without automatic
+> Note: `~/.claude-omni-rc/logs/daemon.log` is a plain file without automatic
 > rotation — rotation is left to the OS (`newsyslog`) or to you.
 
 ## Troubleshooting
@@ -362,7 +390,7 @@ That's the armed switch doing its job — everything is gated on it. Send
 `/rc on` from Telegram (or restart the daemon with `ARMED_ON_START=true`).
 
 **The daemon doesn't seem to be running.**
-Check `~/.ollama-rc/logs/daemon.log` (and `daemon.err.log`), then re-run
+Check `~/.claude-omni-rc/logs/daemon.log` (and `daemon.err.log`), then re-run
 `./scripts/install-launchd.sh` or `npm run dev` to see errors in the terminal.
 
 **Ollama is not reachable.**
@@ -396,8 +424,8 @@ Check `~/.claude/settings.json` contains the SessionStart hook (re-run
 by something else.
 
 **Where is my data stored?**
-State (`armed`, sessions) in `~/.ollama-rc/state.json`, attachments in
-`~/.ollama-rc/inbox/`, logs in `~/.ollama-rc/logs/`. Override with
+State (`armed`, sessions) in `~/.claude-omni-rc/state.json`, attachments in
+`~/.claude-omni-rc/inbox/`, logs in `~/.claude-omni-rc/logs/`. Override with
 `STATE_DIR`.
 
 ## Disclaimer

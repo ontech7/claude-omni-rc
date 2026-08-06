@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **Renamed to `claude-omni-rc`** — the project is now positioned as remote
+  control for *any* model that runs through the Claude Code CLI (Ollama-served
+  models, other local or proxied LLMs, or Claude itself), not just Ollama.
+  State dir default is now `~/.claude-omni-rc`, the launchd label is
+  `com.ontech7.claude-omni-rc`, and the new `omni-rc` command starts a Claude
+  Code session inside a `claude:<name>` tmux session ready for remote control.
+  `/rc` with no argument now toggles the armed switch.
 - **Stability hardening** —
   - **The daemon can no longer crash** — a global `bot.catch` (grammy no longer
     stops on a middleware error), a `safe()` wrapper on every handler, `track()`
@@ -90,7 +97,7 @@ Code's `/remote-control` for Ollama-served models, without Anthropic
 infrastructure.
 
 - **Daemon** (Node 22 + tsx) with a typed internal event bus and a persistent
-  registry (`~/.ollama-rc/state.json`) holding the global `armed` switch and
+  registry (`~/.claude-omni-rc/state.json`) holding the global `armed` switch and
   the session list.
 - **Headless sessions** driven via the Claude Agent SDK (`query` + `resume`,
   `canUseTool`), pinned at `0.3.221`; session ids persist across restarts.
@@ -100,11 +107,11 @@ infrastructure.
 - **Remote permissions** — SDK `canUseTool` requests surface in Telegram as
   `✓ Approve` / `✗ Reject` buttons; unanswered requests time out into a deny
   (`PERMISSION_TIMEOUT_SECONDS`).
-- **Media** — files saved to `~/.ollama-rc/inbox/` and forwarded as a path
+- **Media** — files saved to `~/.claude-omni-rc/inbox/` and forwarded as a path
   reference the model can read via its extra directories.
 - **Security** — default-deny pairing (`ALLOWED_USER_IDS` or `PAIRING_CODE`);
   while disarmed the bot answers only `/rc`, `/help`, `/start`.
-- **launchd agent** (`com.ontech7.ollama-rc`) with install script and template.
+- **launchd agent** (`com.ontech7.claude-omni-rc`) with install script and template.
 - **Guided installer** (`./install.sh`) that walks a non-expert through
   prerequisites, bot token, authorization, models and the daemon registration.
 - **Docs & landing** — English README, `AI-GUIDE.md` (AI-agent setup matrix),

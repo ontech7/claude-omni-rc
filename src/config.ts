@@ -33,7 +33,7 @@ function parseNum(env: NodeJS.ProcessEnv, key: string, fallback: number): number
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const stateDir = expandHome(env.STATE_DIR ?? '~/.ollama-rc');
+  const stateDir = expandHome(env.STATE_DIR ?? '~/.claude-omni-rc');
   return {
     telegramBotToken: env.TELEGRAM_BOT_TOKEN ?? '',
     allowedUserIds: (env.ALLOWED_USER_IDS ?? '')

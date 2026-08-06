@@ -3,7 +3,7 @@ node_modules/
 
 # Secrets & local state
 .env
-.ollama-rc/
+.claude-omni-rc/
 
 # Logs
 logs/

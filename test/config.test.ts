@@ -11,8 +11,8 @@ describe('loadConfig', () => {
     expect(c.maxHeadlessSessions).toBe(2);
     expect(c.permissionTimeoutSeconds).toBe(120);
     expect(c.armedOnStart).toBe(false);
-    expect(c.stateDir).toBe(`${process.env.HOME}/.ollama-rc`);
-    expect(c.inboxDir).toBe(`${process.env.HOME}/.ollama-rc/inbox`);
+    expect(c.stateDir).toBe(`${process.env.HOME}/.claude-omni-rc`);
+    expect(c.inboxDir).toBe(`${process.env.HOME}/.claude-omni-rc/inbox`);
   });
   it('parses overrides', () => {
     const c = loadConfig({

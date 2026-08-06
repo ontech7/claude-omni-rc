@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# ollama-rc start — checks that everything is installed and starts the daemon.
+# claude-omni-rc start — checks that everything is installed and starts the daemon.
 #
 # If something is missing (node, dependencies, .env, launchd service, Claude
 # Code hooks) it calls ./install.sh; otherwise it starts the daemon directly.
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-LABEL="com.ontech7.ollama-rc"
+LABEL="com.ontech7.claude-omni-rc"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 ENV_FILE="$REPO/.env"
@@ -116,7 +116,7 @@ check_model() {
   fi
 }
 
-echo "Checking ollama-rc installation…"
+echo "Checking claude-omni-rc installation…"
 check_node || missing=1
 check_deps || missing=1
 check_env || missing=1
@@ -153,9 +153,9 @@ for ((i = 0; i < 10; i++)); do
 done
 echo
 if [ "$ok" -eq 1 ]; then
-  echo "● ollama-rc active at http://127.0.0.1:${API_PORT}"
+  echo "● claude-omni-rc active at http://127.0.0.1:${API_PORT}"
 else
-  echo "⚠  The daemon is not responding yet. Last lines of ~/.ollama-rc/logs/daemon.err.log:" >&2
-  tail -5 "$HOME/.ollama-rc/logs/daemon.err.log" 2>/dev/null || true
+  echo "⚠  The daemon is not responding yet. Last lines of ~/.claude-omni-rc/logs/daemon.err.log:" >&2
+  tail -5 "$HOME/.claude-omni-rc/logs/daemon.err.log" 2>/dev/null || true
   exit 1
 fi
