@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, matchesInjected, renderHistory, balanceHtml } from '../bot/telegram.js';
+import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml } from '../bot/telegram.js';
 import type { ToolBurstSink } from '../bot/telegram.js';
 
 describe('parseCommand', () => {
@@ -230,5 +230,31 @@ describe('mdToHtml v2 / balanceHtml', () => {
     expect(balanceHtml('<b><i>x</b>')).toBe('<b><i>x</i></b>');
     expect(balanceHtml('x</i>y')).toBe('xy');
     expect(balanceHtml('<b>ok</b>')).toBe('<b>ok</b>');
+  });
+});
+
+describe('promptMessage v2 / promptLayout', () => {
+  it('lists every option with its number and description, HTML-escaped', () => {
+    const qs = [{ header: 'Lens', question: 'Pick <one>?', options: [{ label: 'a', description: 'desc <x>' }, { label: 'b' }] }];
+    const out = promptMessage(qs);
+    expect(out).toContain('Pick &lt;one&gt;?');
+    expect(out).toContain('1. a');
+    expect(out).toContain('— <i>desc &lt;x&gt;</i>');
+    expect(out).toContain('2. b');
+  });
+  it('builds buttons under the cap with short labels and number-reply hint', () => {
+    const qs = [{ question: 'q', options: [{ label: 'long label that exceeds forty chars for sure ok' }, { label: 'b' }] }];
+    const { options, hint } = promptLayout(qs, 'tok1');
+    expect(options).toHaveLength(2);
+    expect(options[0].label).toBe('long label that exceeds forty chars for…');
+    expect(options[0].callback).toBe('q:answer:tok1:0:0');
+    expect(options[1].callback).toBe('q:answer:tok1:0:1');
+    expect(hint).toContain('number');
+  });
+  it('falls back to a numbered list only above the button cap', () => {
+    const options = Array.from({ length: 13 }, (_, i) => ({ label: `opt ${i}` }));
+    const { options: btns, hint } = promptLayout([{ question: 'q', options }], 'tok1');
+    expect(btns).toEqual([]);
+    expect(hint).toContain('number');
   });
 });

@@ -150,14 +150,39 @@ export function permissionMessage(req: PermissionRequest): string {
   return `🔧 Permission requested — session <b>${htmlEscape(req.sessionId.slice(0, 8))}</b>\nTool: <code>${htmlEscape(req.toolName)}</code>\n<pre>${input}</pre>`;
 }
 
-// Intestazione della domanda a scelta multipla (le opzioni diventano bottoni).
+// Intestazione della domanda a scelta multipla: elenco numerato completo delle
+// opzioni (mai troncato) — il reply col numero resta sempre valido.
 export function promptMessage(questions: PromptQuestion[]): string {
   return questions
     .map(q => {
       const title = q.header ? `${q.header}: ${q.question}` : q.question;
-      return `❓ <b>${htmlEscape(title)}</b>`;
+      const opts = q.options
+        .map((o, i) => `  ${i + 1}. ${htmlEscape(o.label)}${o.description ? ` — <i>${htmlEscape(o.description)}</i>` : ''}`)
+        .join('\n');
+      return `❓ <b>${htmlEscape(title)}</b>\n${opts}`;
     })
     .join('\n\n');
+}
+
+export interface PromptOption { label: string; callback: string }
+
+// Layout dei bottoni per le domande: etichetta corta come scorciatoia sopra
+// l'elenco numerato completo. Sopra il cap di opzioni niente bottoni: il reply
+// col numero resta il fallback. I label dei bottoni sono testo semplice (il
+// parse_mode HTML non si applica ai bottoni inline di Telegram).
+export function promptLayout(questions: PromptQuestion[], token: string, maxButtons = 12): { options: PromptOption[]; hint: string } {
+  const all = questions.flatMap((q, qi) =>
+    q.options.map((o, oi) => ({
+      label: o.label.length > 40 ? `${o.label.slice(0, 40).trimEnd()}…` : o.label,
+      callback: `q:answer:${token}:${qi}:${oi}`,
+    })));
+  const useButtons = all.length > 0 && all.length <= maxButtons;
+  return {
+    options: useButtons ? all : [],
+    hint: useButtons
+      ? '\n\n<i>Tap an option or reply with its number.</i>'
+      : '\n\n<i>Reply with the number of an option.</i>',
+  };
 }
 
 // Matcher per il Fix 1: sopprime l'echo di un testo che il bot ha appena
