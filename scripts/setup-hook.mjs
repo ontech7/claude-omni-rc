@@ -33,8 +33,8 @@ try {
   process.exit(1);
 }
 
-// Timeout generoso: l'hook di permesso resta bloccato ad attendere la
-// decisione da Telegram (fino a PERMISSION_TIMEOUT_SECONDS + margine).
+// Generous timeout: the permission hook stays blocked waiting for the
+// decision from Telegram (up to PERMISSION_TIMEOUT_SECONDS + margin).
 const PERMISSION_HOOK_TIMEOUT = 600;
 
 function hasCommand(groups, script) {

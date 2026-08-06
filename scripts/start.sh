@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# ollama-rc start — controlla che tutto sia installato e avvia il daemon.
+# ollama-rc start — checks that everything is installed and starts the daemon.
 #
-# Se manca qualcosa (node, dipendenze, .env, servizio launchd, hook Claude
-# Code) richiama ./install.sh; altrimenti avvia direttamente il daemon.
+# If something is missing (node, dependencies, .env, launchd service, Claude
+# Code hooks) it calls ./install.sh; otherwise it starts the daemon directly.
 #
-# Uso:
+# Usage:
 #   scripts/start.sh
 #
 set -euo pipefail
@@ -20,9 +20,9 @@ API_PORT="${API_PORT:-4123}"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# Trova node anche quando non è su PATH (es. nvm non caricato in shell
-# non-interattive) e lo mette su PATH per tutto lo script (serve anche a
-# ./install.sh quando viene richiamato qui sotto).
+# Finds node even when it's not on PATH (e.g. nvm not loaded in non-interactive
+# shells) and puts it on PATH for the whole script (also needed by
+# ./install.sh when it's called below).
 find_node() {
   local n
   n="$(command -v node 2>/dev/null || true)"
@@ -49,74 +49,74 @@ fi
 case "$(uname -s 2>/dev/null || echo unknown)" in
   Darwin) ;;
   Linux)
-    echo "Su Linux non c'è launchd: avvia il daemon in foreground con:"
+    echo "No launchd on Linux: start the daemon in the foreground with:"
     echo "    cd $REPO && npm run dev"
     exit 0
     ;;
   *)
-    echo "Piattaforma non supportata: $(uname -s 2>/dev/null || echo unknown)" >&2
+    echo "Unsupported platform: $(uname -s 2>/dev/null || echo unknown)" >&2
     exit 1
     ;;
 esac
 
-# --- 1. controllo "installato tutto" ---
+# --- 1. "everything installed" check ---
 missing=0
 note() { printf '  %s %s\n' "$1" "$2"; }
 
 check_node() {
-  if ! have node; then note '✗' 'Node.js non trovato'; return 1; fi
+  if ! have node; then note '✗' 'Node.js not found'; return 1; fi
   local major
   major="$(node -v 2>/dev/null | sed 's/^v//; s/\..*$//')"
   if [ "${major:-0}" -lt 22 ]; then
-    note '✗' "Node 22+ richiesto (hai $(node -v 2>/dev/null))"
+    note '✗' "Node 22+ required (you have $(node -v 2>/dev/null))"
     return 1
   fi
   note '✓' "Node $(node -v 2>/dev/null)"
 }
 
 check_deps() {
-  if [ -d "$REPO/node_modules" ]; then note '✓' 'Dipendenze npm (node_modules)'; else note '✗' 'Dipendenze npm mancanti'; return 1; fi
+  if [ -d "$REPO/node_modules" ]; then note '✓' 'npm dependencies (node_modules)'; else note '✗' 'npm dependencies missing'; return 1; fi
 }
 
 check_env() {
-  if [ ! -f "$ENV_FILE" ]; then note '✗' '.env mancante'; return 1; fi
+  if [ ! -f "$ENV_FILE" ]; then note '✗' '.env missing'; return 1; fi
   if grep -q '^TELEGRAM_BOT_TOKEN=.' "$ENV_FILE" && { grep -q '^ALLOWED_USER_IDS=.' "$ENV_FILE" || grep -q '^PAIRING_CODE=.' "$ENV_FILE"; }; then
-    note '✓' '.env configurato (token + autorizzazione)'
+    note '✓' '.env configured (token + authorization)'
   else
-    note '✗' '.env non configurato (manca TELEGRAM_BOT_TOKEN o autorizzazione)'
+    note '✗' '.env not configured (missing TELEGRAM_BOT_TOKEN or authorization)'
     return 1
   fi
 }
 
 check_service() {
-  if [ -f "$PLIST" ]; then note '✓' 'Servizio launchd installato'; else note '✗' 'Servizio launchd mancante'; return 1; fi
+  if [ -f "$PLIST" ]; then note '✓' 'launchd service installed'; else note '✗' 'launchd service missing'; return 1; fi
 }
 
 check_hooks() {
   if [ -f "$SETTINGS" ] && grep -qF "$REPO/scripts/attach.sh" "$SETTINGS" && grep -qF "$REPO/scripts/permission-hook.sh" "$SETTINGS"; then
-    note '✓' 'Hook Claude Code installati'
+    note '✓' 'Claude Code hooks installed'
   else
-    note '✗' 'Hook Claude Code mancanti'
+    note '✗' 'Claude Code hooks missing'
     return 1
   fi
 }
 
 check_model() {
   if ! have ollama; then
-    note '⚠' 'Ollama non installato — il daemon parte ma le sessioni headless falliranno'
+    note '⚠' 'Ollama not installed — the daemon starts but headless sessions will fail'
     return 0
   fi
   local model
   model="$(grep '^DEFAULT_MODEL=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
   [ -n "$model" ] || model='deepseek-v4-flash:0731-cloud'
   if ollama list 2>/dev/null | awk '{print $1}' | grep -qx "$model"; then
-    note '✓' "Modello Ollama $model presente"
+    note '✓' "Ollama model $model present"
   else
-    note '⚠' "Modello $model mancante — esegui: ollama pull $model"
+    note '⚠' "Model $model missing — run: ollama pull $model"
   fi
 }
 
-echo "Controllo installazione ollama-rc…"
+echo "Checking ollama-rc installation…"
 check_node || missing=1
 check_deps || missing=1
 check_env || missing=1
@@ -126,25 +126,25 @@ check_model
 
 if [ "$missing" -eq 1 ]; then
   echo
-  echo "==> Configurazione incompleta: eseguo ./install.sh"
+  echo "==> Incomplete configuration: running ./install.sh"
   "$REPO/install.sh"
 fi
 
-# --- 2. avvio del daemon ---
+# --- 2. start the daemon ---
 is_loaded() { launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; }
 
 if is_loaded; then
-  echo "● $LABEL già attivo."
+  echo "● $LABEL already active."
 elif [ -f "$PLIST" ]; then
-  echo "Avvio $LABEL…"
+  echo "Starting $LABEL…"
   launchctl load "$PLIST"
 else
-  echo "Plist non trovata ($PLIST) — esegui ./install.sh" >&2
+  echo "Plist not found ($PLIST) — run ./install.sh" >&2
   exit 1
 fi
 
 # --- 3. readiness check ---
-printf 'Attendo che il daemon risponda'
+printf 'Waiting for the daemon to respond'
 ok=0
 for ((i = 0; i < 10; i++)); do
   if curl -fsS --max-time 1 "http://127.0.0.1:${API_PORT}/api/sessions" >/dev/null 2>&1; then ok=1; break; fi
@@ -153,9 +153,9 @@ for ((i = 0; i < 10; i++)); do
 done
 echo
 if [ "$ok" -eq 1 ]; then
-  echo "● ollama-rc attivo su http://127.0.0.1:${API_PORT}"
+  echo "● ollama-rc active at http://127.0.0.1:${API_PORT}"
 else
-  echo "⚠  Il daemon non risponde ancora. Ultime righe di ~/.ollama-rc/logs/daemon.err.log:" >&2
+  echo "⚠  The daemon is not responding yet. Last lines of ~/.ollama-rc/logs/daemon.err.log:" >&2
   tail -5 "$HOME/.ollama-rc/logs/daemon.err.log" 2>/dev/null || true
   exit 1
 fi

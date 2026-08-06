@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 #
-# ollama-rc stop — spegne tutto: daemon launchd, sessioni headless e hook.
+# ollama-rc stop — shuts everything down: launchd daemon, headless sessions and hooks.
 #
-# Ferma ciò che ./install.sh ha messo in moto:
-#   1. il daemon launchd (bootout → KeepAlive non lo riavvia)
-#   2. le sessioni claude headless spawnate dal daemon (process group + orfani)
-#   3. gli hook Claude Code (SessionStart + PermissionRequest) da settings.json
+# Stops what ./install.sh started:
+#   1. the launchd daemon (bootout → KeepAlive won't restart it)
+#   2. the headless claude sessions spawned by the daemon (process group + orphans)
+#   3. the Claude Code hooks (SessionStart + PermissionRequest) from settings.json
 #
-# Le sessioni terminali dell'utente (tmux) NON vengono toccate.
+# The user's terminal sessions (tmux) are NOT touched.
 #
-# Uso:
+# Usage:
 #   scripts/stop.sh
 #
 set -euo pipefail
@@ -22,8 +22,8 @@ SETTINGS="$HOME/.claude/settings.json"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# Trova node anche quando non è su PATH (es. nvm non caricato in shell
-# non-interattive) e lo mette su PATH per tutto lo script.
+# Finds node even when it's not on PATH (e.g. nvm not loaded in non-interactive
+# shells) and puts it on PATH for the whole script.
 find_node() {
   local n
   n="$(command -v node 2>/dev/null || true)"
@@ -50,62 +50,62 @@ fi
 case "$(uname -s 2>/dev/null || echo unknown)" in
   Darwin) ;;
   Linux)
-    echo "Su Linux non c'è launchd: niente da fermare."
-    echo "Se il daemon gira in foreground, fermalo con Ctrl+C nel suo terminale."
+    echo "No launchd on Linux: nothing to stop."
+    echo "If the daemon runs in the foreground, stop it with Ctrl+C in its terminal."
     exit 0
     ;;
   *)
-    echo "Piattaforma non supportata: $(uname -s 2>/dev/null || echo unknown)" >&2
+    echo "Unsupported platform: $(uname -s 2>/dev/null || echo unknown)" >&2
     exit 1
     ;;
 esac
 
-# --- 1. daemon launchd ---
+# --- 1. launchd daemon ---
 DAEMON_PID=""
 if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
   DAEMON_PID="$(launchctl print "$DOMAIN/$LABEL" | awk -F'= ' '/pid =/{print $2; exit}')"
-  echo "Fermo il daemon $LABEL (pid ${DAEMON_PID:-?})…"
+  echo "Stopping daemon $LABEL (pid ${DAEMON_PID:-?})…"
   launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null || true
-  echo "  ✓ daemon fermato."
+  echo "  ✓ daemon stopped."
 else
-  echo "Daemon $LABEL non caricato — niente da fermare."
+  echo "Daemon $LABEL not loaded — nothing to stop."
 fi
 
-# --- 2. sessioni headless ---
-# Il daemon è il leader del suo process group: i figli headless (claude spawnato
-# dall'SDK) condividono quel PGID, le sessioni terminali dell'utente no.
-# Nota: pgrep/pkill non vedono l'albero di un job launchd (audit session
-# separato su macOS) — si usa kill per PID/gruppo, che funziona.
+# --- 2. headless sessions ---
+# The daemon is the leader of its process group: the headless children (claude
+# spawned by the SDK) share that PGID, the user's terminal sessions don't.
+# Note: pgrep/pkill can't see a launchd job's tree (separate audit session on
+# macOS) — kill by PID/group is used instead, which works.
 if [ -n "$DAEMON_PID" ]; then
-  echo "Fermo le sessioni headless (process group $DAEMON_PID)…"
+  echo "Stopping headless sessions (process group $DAEMON_PID)…"
   kill -TERM -"$DAEMON_PID" 2>/dev/null || true
   for ((i = 0; i < 20; i++)); do
     kill -0 -"$DAEMON_PID" 2>/dev/null || break
     sleep 0.5
   done
   kill -KILL -"$DAEMON_PID" 2>/dev/null || true
-  echo "  ✓ process group terminato."
+  echo "  ✓ process group terminated."
 fi
 
-# Rete di sicurezza: orfani di un daemon crashato in precedenza. ps vede anche
-# i processi in audit session separati (pgrep/pkill no). La firma
-# --output-format stream-json è unica delle sessioni headless (SDK): le
-# sessioni terminali non la hanno. Il [c] evita che lo script matchi se stesso.
+# Safety net: orphans of a previously crashed daemon. ps also sees processes in
+# separate audit sessions (pgrep/pkill don't). The --output-format stream-json
+# signature is unique to headless (SDK) sessions: terminal sessions don't have
+# it. The [c] prevents the script from matching itself.
 ORPHANS="$(ps -axo pid=,command= | awk '/[c]laude.*--output-format stream-json/ {print $1}')"
 if [ -n "$ORPHANS" ]; then
-  echo "Rimuovo sessioni headless orfane: $ORPHANS"
+  echo "Removing orphaned headless sessions: $ORPHANS"
   kill -TERM $ORPHANS 2>/dev/null || true
   sleep 2
   kill -KILL $ORPHANS 2>/dev/null || true
-  echo "  ✓ orfani terminati."
+  echo "  ✓ orphans terminated."
 fi
 
-# --- 3. hook Claude Code ---
+# --- 3. Claude Code hooks ---
 if have node; then
-  echo "Rimuovo gli hook Claude Code da $SETTINGS…"
+  echo "Removing Claude Code hooks from $SETTINGS…"
   node "$REPO/scripts/setup-hook.mjs" --remove "$SETTINGS" "$REPO/scripts/attach.sh" "$REPO/scripts/permission-hook.sh"
 else
-  echo "node non trovato — rimuovi gli hook manualmente da $SETTINGS." >&2
+  echo "node not found — remove the hooks manually from $SETTINGS." >&2
 fi
 
-echo "ollama-rc fermato. Per riavviare: ./scripts/start.sh"
+echo "ollama-rc stopped. To restart: ./scripts/start.sh"

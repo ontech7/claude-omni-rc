@@ -24,16 +24,17 @@ DEFAULT_OLLAMA_URL="http://127.0.0.1:11434"
 DEFAULT_MODEL_FALLBACK="deepseek-v4-flash:0731-cloud"
 
 if [ -t 1 ]; then
-  c_reset='\033[0m'; c_bold='\033[1m'; c_green='\033[32m'
+  c_reset='\033[0m'; c_bold='\033[1m'; c_dim='\033[2m'; c_green='\033[32m'
   c_yellow='\033[33m'; c_red='\033[31m'; c_cyan='\033[36m'
 else
-  c_reset=''; c_bold=''; c_green=''; c_yellow=''; c_red=''; c_cyan=''
+  c_reset=''; c_bold=''; c_dim=''; c_green=''; c_yellow=''; c_red=''; c_cyan=''
 fi
 
 info() { printf '%b\n' "${c_cyan}==>${c_reset} $*"; }
 ok()   { printf '%b\n' "${c_green}==>${c_reset} $*"; }
 warn() { printf '%b\n' "${c_yellow}==>${c_reset} $*"; }
 err()  { printf '%b\n' "${c_red}==>${c_reset} $*" >&2; }
+hint() { printf '%b\n' "${c_dim}$*${c_reset}"; }
 
 [ -t 0 ] && INTERACTIVE=1 || INTERACTIVE=0
 
@@ -49,23 +50,23 @@ ask_yes_no() {
 }
 
 usage() {
-  cat <<EOF
-ollama-rc installer
+  cat <<EOF | printf '%b\n' "$(cat)"
+${c_bold}${c_cyan}ollama-rc installer${c_reset}
 
-Usage: ./install.sh [--help|--uninstall]
+${c_bold}Usage:${c_reset} ./install.sh [--help|--uninstall]
 
-Guided installer for the ollama-rc daemon + Telegram bot.
+${c_bold}Guided installer${c_reset} for the ollama-rc daemon + Telegram bot.
 It checks prerequisites, installs npm dependencies, helps you configure
 .env (bot token + authorization), pulls the Ollama models, registers the
 background daemon (launchd) and adds the Claude Code hooks (SessionStart
 auto-attach + PermissionRequest approve/reject from Telegram).
 
-Options:
-  --uninstall   remove the launchd agent, the SessionStart hook and (on
+${c_bold}Options:${c_reset}
+  ${c_cyan}--uninstall${c_reset}   remove the launchd agent, the SessionStart hook and (on
                 confirmation) the Ollama model and the state dir (.env is kept)
 
-Environment:
-  STATE_DIR   where state and logs live (default: ~/.ollama-rc)
+${c_bold}Environment:${c_reset}
+  ${c_cyan}STATE_DIR${c_reset}   where state and logs live (default: ~/.ollama-rc)
 EOF
 }
 
@@ -98,9 +99,9 @@ check_platform() {
 check_node() {
   if ! have node; then
     err "Node.js is required but not installed."
-    echo "  macOS:  brew install node"
-    echo "  Linux:  install the LTS from https://nodejs.org"
-    echo "  Then run this installer again."
+    hint "  macOS:  brew install node"
+    hint "  Linux:  install the LTS from https://nodejs.org"
+    hint "  Then run this installer again."
     exit 1
   fi
   local major
@@ -115,7 +116,7 @@ check_node() {
 check_optional_tools() {
   if ! have tmux; then
     warn "tmux is not installed. Terminal sessions (mirror + /attach) will be unavailable."
-    echo "  Install it with:  brew install tmux   (or:  apt install tmux)"
+    hint "  Install it with:  brew install tmux   (or:  apt install tmux)"
   else
     ok "tmux found."
   fi
@@ -125,7 +126,7 @@ check_ollama() {
   local base="${OLLAMA_BASE_URL:-$DEFAULT_OLLAMA_URL}"
   if ! have ollama; then
     warn "Ollama is not installed. It must be running for anything to work."
-    echo "  Install it from https://ollama.com/download and start it."
+    hint "  Install it from https://ollama.com/download and start it."
     return
   fi
   if curl -fsS "$base/api/version" >/dev/null 2>&1; then
@@ -235,15 +236,15 @@ install_service() {
       ;;
     Linux)
       info "On Linux there is no launchd; run the daemon in the foreground for now:"
-      echo "    cd $REPO_DIR && npm run dev"
+      hint "    cd $REPO_DIR && npm run dev"
       ;;
   esac
 }
 
-# Claude Code hook: la sessione che parte si auto-aggancia al remote control
-# (SessionStart, analogo del /remote-control nativo) e le richieste di permesso
-# vengono delegate al daemon (permissionPromptTool → bot Telegram). Il merge
-# preserva tutto ciò che è già in ~/.claude/settings.json ed è idempotente.
+# Claude Code hook: the session that starts auto-attaches to remote control
+# (SessionStart, the equivalent of the native /remote-control) and permission
+# requests are delegated to the daemon (permissionPromptTool → Telegram bot).
+# The merge preserves everything already in ~/.claude/settings.json and is idempotent.
 install_hook() {
   if ! have node; then return; fi
   info "Adding the Claude Code hooks (SessionStart auto-attach + PermissionRequest approve/reject)…"
@@ -267,15 +268,15 @@ uninstall() {
     warn "No launchd agent found — nothing to remove."
   fi
 
-  # 2. hook (SessionStart + PermissionRequest) da ~/.claude/settings.json
-  #    (preserva il resto)
+  # 2. hook (SessionStart + PermissionRequest) from ~/.claude/settings.json
+  #    (preserves everything else)
   if have node; then
     node "$REPO_DIR/scripts/setup-hook.mjs" --remove "$HOME/.claude/settings.json" "$REPO_DIR/scripts/attach.sh" "$REPO_DIR/scripts/permission-hook.sh"
   else
     warn "node not found — remove the ollama-rc hooks manually from ~/.claude/settings.json."
   fi
 
-  # 3. modello Ollama (solo su conferma: può essere usato anche fuori da ollama-rc)
+  # 3. Ollama model (only on confirmation: it may be used outside ollama-rc too)
   local model
   model="$(get_env DEFAULT_MODEL 2>/dev/null)"
   [ -n "$model" ] || model="$DEFAULT_MODEL_FALLBACK"
@@ -289,7 +290,7 @@ uninstall() {
     warn "Keeping the Ollama model '$model'."
   fi
 
-  # 3. stato (su conferma) — .env è lasciato intatto per un eventuale reinstall
+  # 4. state (on confirmation) — .env is left intact for a possible reinstall
   if ask_yes_no "Remove the state dir '$STATE_DIR' (state, logs, inbox)?"; then
     rm -rf "$STATE_DIR"
     ok "Removed $STATE_DIR."
@@ -301,26 +302,26 @@ uninstall() {
 }
 
 print_summary() {
-  cat <<EOF
+  cat <<EOF | printf '%b\n' "$(cat)"
 
-${c_bold}ollama-rc is installed. Next steps:${c_reset}
+${c_bold}${c_green}✓ ollama-rc is installed.${c_reset} ${c_bold}Next steps:${c_reset}
   1. Open the chat with your bot on Telegram.
-     • If you set a pairing code, send:        /start <pairing code>
+     • If you set a pairing code, send:        ${c_cyan}/start <pairing code>${c_reset}
      • If you allowlisted your user id, any message works.
-  2. Arm remote control:                       /rc on
+  2. Arm remote control:                       ${c_cyan}/rc on${c_reset}
   3. Try it:
-     /new write a haiku            — headless session
-     /sessions                     — list and switch sessions
-     /attach <project>             — attach a tmux terminal session
-     /help                         — all commands
+     ${c_cyan}/new write a haiku${c_reset}            — headless session
+     ${c_cyan}/sessions${c_reset}                     — list and switch sessions
+     ${c_cyan}/attach <project>${c_reset}             — attach a tmux terminal session
+     ${c_cyan}/help${c_reset}                         — all commands
 
   The SessionStart hook auto-attaches every Claude Code session you start,
   including the one you're in right now — restart it (or run  claude  again)
   and it will show up in /sessions.
 
-  Logs:   $STATE_DIR/logs/daemon.log
-  Docs:   https://github.com/ontech7/ollama-rc#readme
-  Your $ENV_FILE holds secrets — keep it private, never commit it.
+  ${c_yellow}Logs:${c_reset}   $STATE_DIR/logs/daemon.log
+  ${c_yellow}Docs:${c_reset}   https://github.com/ontech7/ollama-rc#readme
+  ${c_red}Your $ENV_FILE holds secrets — keep it private, never commit it.${c_reset}
 EOF
 }
 
@@ -333,7 +334,8 @@ main() {
     *) err "Unknown option: $1"; usage; exit 1 ;;
   esac
 
-  printf '%b\n' "${c_bold}ollama-rc — remote control for Claude Code, via Telegram${c_reset}"
+  printf '%b\n' "${c_bold}${c_cyan}ollama-rc${c_reset} ${c_bold}— remote control for Claude Code, via Telegram${c_reset}"
+  printf '%b\n' "${c_cyan}────────────────────────────────────────────────────────${c_reset}"
   check_platform
   check_node
   check_optional_tools

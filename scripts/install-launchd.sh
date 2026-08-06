@@ -2,12 +2,12 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-# `|| true`: sotto set -euo pipefail, command -v che fallisce TERMINEREBBE lo script
-# prima della guardia -z — il || true rende raggiungibile il messaggio di errore.
+# `|| true`: under set -euo pipefail, a failing command -v would TERMINATE the
+# script before the -z guard — the || true keeps the error message reachable.
 NODE="$(command -v node || true)"
 TSX="$(command -v tsx || true)"
-# tsx è una devDependency locale (node_modules/.bin) — spesso non è su PATH:
-# fallback al bin locale dopo `npm install` (vedi README).
+# tsx is a local devDependency (node_modules/.bin) — often not on PATH:
+# fall back to the local bin after `npm install` (see README).
 if [ -z "$TSX" ] && [ -x "$REPO/node_modules/.bin/tsx" ]; then
   TSX="$REPO/node_modules/.bin/tsx"
 fi
@@ -16,7 +16,7 @@ PLIST="$HOME/Library/LaunchAgents/com.ontech7.ollama-rc.plist"
 LABEL="com.ontech7.ollama-rc"
 
 if [ -z "$NODE" ] || [ -z "$TSX" ]; then
-  echo "node o tsx non trovati in PATH" >&2
+  echo "node or tsx not found in PATH" >&2
   exit 1
 fi
 
@@ -31,5 +31,5 @@ sed -e "s|__NODE__|$NODE|g" \
 
 launchctl unload "$PLIST" 2>/dev/null || true
 launchctl load "$PLIST"
-echo "Daemon ollama-rc installato (label $LABEL)."
-echo "Log: $STATE/logs/daemon.log"
+echo "ollama-rc daemon installed (label $LABEL)."
+echo "Logs: $STATE/logs/daemon.log"
