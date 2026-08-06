@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool } from '../bot/telegram.js';
+import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, toolEmoji, narrationPlan } from '../bot/telegram.js';
 import type { ToolBurstSink } from '../bot/telegram.js';
 
 describe('parseCommand', () => {
@@ -204,6 +204,33 @@ describe('ToolBurstAggregator', () => {
     await agg.push('t2'); // send ok → bubble nuova
     expect(sends).toEqual(['ok']);
   });
+  it('a stale burst (past the time window) opens a new bubble', async () => {
+    vi.useFakeTimers();
+    try {
+      const { agg, sink, sends } = makeAgg();
+      await agg.push('t1'); // send
+      await vi.advanceTimersByTimeAsync(6000); // oltre la finestra di 5s
+      await agg.push('t2'); // deve aprire una bubble nuova, non editare t1
+      expect(sends).toEqual(['t1', 't2']);
+      expect(sink.edit).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+  it('close() during a pending send does not reopen the burst', async () => {
+    const sends: string[] = [];
+    let nextId = 1;
+    const sink: ToolBurstSink = {
+      edit: vi.fn(async () => true),
+      send: vi.fn(async (text: string) => { sends.push(text); return nextId++; }),
+    };
+    const agg = new ToolBurstAggregator(sink, 3800);
+    const p1 = agg.push('t1'); // send1 parte (promise in volo)
+    agg.close(); // chiude mentre send1 è in volo
+    const p2 = agg.push('t2');
+    await Promise.all([p1, p2]);
+    // t1 è stato inviato ma la bubble non si riapre; t2 apre una bubble nuova.
+    expect(sends).toEqual(['t1', 't2']);
+    expect(sink.edit).not.toHaveBeenCalled();
+  });
 });
 
 describe('mdToHtml v2 / balanceHtml', () => {
@@ -344,6 +371,33 @@ describe('summarizeTool', () => {
   it('truncates long values with an explicit marker', () => {
     const long = 'x'.repeat(200);
     expect(summarizeTool('Bash', { command: long })).toBe(`⚙️ ${'x'.repeat(80)}…`);
+  });
+});
+
+describe('toolEmoji', () => {
+  it('maps known tools to their icon', () => {
+    expect(toolEmoji('Bash')).toBe('⚙️');
+    expect(toolEmoji('Read')).toBe('📖');
+    expect(toolEmoji('Write')).toBe('✍️');
+    expect(toolEmoji('Edit')).toBe('✏️');
+    expect(toolEmoji('Grep')).toBe('🔍');
+    expect(toolEmoji('WebFetch')).toBe('🌐');
+    expect(toolEmoji('TaskCreate')).toBe('📋');
+  });
+  it('falls back to a generic icon for unknown tools', () => {
+    expect(toolEmoji('SomeTool')).toBe('🔧');
+  });
+});
+
+describe('narrationPlan', () => {
+  it('merges short assistant narration into an open burst', () => {
+    expect(narrationPlan('assistant', 'Ora leggo X', true)).toBe('merge');
+    expect(narrationPlan('assistant', 'x'.repeat(149), true)).toBe('merge');
+  });
+  it('keeps long text, user text, and closed bursts separate', () => {
+    expect(narrationPlan('assistant', 'x'.repeat(150), true)).toBe('separate');
+    expect(narrationPlan('assistant', 'Ora leggo X', false)).toBe('separate');
+    expect(narrationPlan('user', 'Ora leggo X', true)).toBe('separate');
   });
 });
 

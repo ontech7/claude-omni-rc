@@ -242,8 +242,24 @@ export function stopReply(o: {
     : 'This terminal session has no tmux pane to interrupt.';
 }
 
+// Icona per tipo di tool: il prefisso visivo delle notifiche tool (comando,
+// lettura, scrittura, ecc.). Usata sia dal fallback `summarizeTool` sia dalle
+// summary via LLM (il testo lo genera il modello, l'emoji resta deterministica).
+export function toolEmoji(toolName: string): string {
+  const name = toolName.toLowerCase();
+  if (name === 'bash') return '⚙️';
+  if (name === 'read' || name === 'readfile') return '📖';
+  if (name === 'write' || name === 'writefile') return '✍️';
+  if (name === 'edit') return '✏️';
+  if (name === 'glob' || name === 'grep') return '🔍';
+  if (name === 'webfetch' || name === 'websearch') return '🌐';
+  if (name === 'taskcreate' || name === 'taskupdate') return '📋';
+  return '🔧';
+}
+
 // Riassunto leggibile di una tool call (niente JSON grezzo): mappa i tool noti
 // a un'icona + il campo chiave dell'input; fallback al nome + primo valore.
+// È il fallback quando la summary via LLM non è disponibile (Ollama lento/giù).
 export function summarizeTool(toolName: string, input: Record<string, unknown>): string {
   const s = (v: unknown): string => (typeof v === 'string' ? v : '');
   const first = (): string => {
@@ -262,16 +278,27 @@ export function summarizeTool(toolName: string, input: Record<string, unknown>):
   const trunc = (v: string, max = 80): string => (v.length > max ? `${v.slice(0, max).trimEnd()}…` : v);
 
   const name = toolName.toLowerCase();
-  if (name === 'bash') return `⚙️ ${trunc(pick('command'))}`;
-  if (name === 'read' || name === 'readfile') return `📖 ${trunc(pick('file_path', 'path'))}`;
-  if (name === 'write' || name === 'writefile') return `✍️ ${trunc(pick('file_path', 'path'))}`;
-  if (name === 'edit') return `✏️ ${trunc(pick('file_path', 'path'))}`;
-  if (name === 'glob' || name === 'grep') return `🔍 ${trunc(pick('pattern', 'query'))}`;
-  if (name === 'webfetch') return `🌐 ${trunc(pick('url'))}`;
-  if (name === 'websearch') return `🌐 ${trunc(pick('query'))}`;
-  if (name === 'taskcreate' || name === 'taskupdate') return `📋 ${trunc(pick('subject'))}`;
+  const emoji = toolEmoji(toolName);
+  if (name === 'bash') return `${emoji} ${trunc(pick('command'))}`;
+  if (name === 'read' || name === 'readfile') return `${emoji} ${trunc(pick('file_path', 'path'))}`;
+  if (name === 'write' || name === 'writefile') return `${emoji} ${trunc(pick('file_path', 'path'))}`;
+  if (name === 'edit') return `${emoji} ${trunc(pick('file_path', 'path'))}`;
+  if (name === 'glob' || name === 'grep') return `${emoji} ${trunc(pick('pattern', 'query'))}`;
+  if (name === 'webfetch') return `${emoji} ${trunc(pick('url'))}`;
+  if (name === 'websearch') return `${emoji} ${trunc(pick('query'))}`;
+  if (name === 'taskcreate' || name === 'taskupdate') return `${emoji} ${trunc(pick('subject'))}`;
   const v = first();
-  return v ? `🔧 ${toolName} — ${trunc(v)}` : `🔧 ${toolName}`;
+  return v ? `${emoji} ${toolName} — ${trunc(v)}` : `${emoji} ${toolName}`;
+}
+
+// Testo breve del modello mentre una bubble tool è aperta → si fonde nella
+// bubble (niente messaggio extra); testo lungo (una risposta vera) o nessuna
+// bubble aperta → messaggio separato. Soglia: la narrazione tra le tool call è
+// di 1-2 frasi, le risposte vere sono più lunghe.
+export const NARRATION_MAX = 150;
+export function narrationPlan(role: 'user' | 'assistant', text: string, burstOpen: boolean): 'merge' | 'separate' {
+  if (role === 'assistant' && burstOpen && text.length < NARRATION_MAX) return 'merge';
+  return 'separate';
 }
 
 // Indicatore "sta scrivendo…" di Telegram: la bolla del chat action dura ~5s,
@@ -357,28 +384,45 @@ export class ToolBurstAggregator {
   private open?: { messageId: number; text: string; at: number };
   private lastWasTool = false;
   private chain: Promise<void> = Promise.resolve();
+  // Contatore di generazione: `close()` lo incrementa. Una pushNow in volo
+  // (await sul sink) cattura la generazione all'inizio e la ri-verifica dopo
+  // l'await: se close() è scattato nel frattempo, non riapre la bubble chiusa.
+  private generation = 0;
 
-  constructor(private sink: ToolBurstSink, private maxLen = 3800) {}
+  constructor(private sink: ToolBurstSink, private maxLen = 3800, private windowMs = 5000) {}
 
   // Serializza le push: il bus emette in modo sincrono e due tool_use nello stesso
   // tick leggerebbero open/lastWasTool prima di ogni await — la catena rende le
-  // mutazioni atomiche rispetto alle push concorrenti.
+  // mutazioni atomiche rispetto alle push concorrenti. La generazione viene
+  // catturata QUI (non in pushNow): se close() scatta tra push() e l'avvio di
+  // pushNow(), la push sa di appartenere alla generazione precedente e non
+  // riapre la bubble chiusa.
   push(line: string): Promise<void> {
-    this.chain = this.chain.then(() => this.pushNow(line)).catch(() => { /* la catena sopravvive a un errore inatteso del sink */ });
+    const gen = this.generation;
+    this.chain = this.chain.then(() => this.pushNow(line, gen)).catch(() => { /* la catena sopravvive a un errore inatteso del sink */ });
     return this.chain;
   }
 
-  private async pushNow(line: string): Promise<void> {
+  // La bubble è aperta e fresca (dentro la finestra): la narrazione breve del
+  // modello può fondersi dentro, invece di chiudere la raffica.
+  isOpen(): boolean {
+    return !!this.open && Date.now() - this.open.at < this.windowMs;
+  }
+
+  private async pushNow(line: string, gen: number): Promise<void> {
     const open = this.open;
-    if (this.lastWasTool && open) {
+    const fresh = open && Date.now() - open.at < this.windowMs;
+    if (this.lastWasTool && fresh) {
       const next = `${open.text}\n${line}`;
       if (next.length <= this.maxLen && await this.sink.edit(open.messageId, next)) {
+        if (gen !== this.generation) return; // chiusa nel frattempo: non toccare
         open.text = next;
         open.at = Date.now();
         return;
       }
     }
     const id = await this.sink.send(line);
+    if (gen !== this.generation) return; // chiusa nel frattempo: non riaprire
     if (id !== undefined) {
       this.open = { messageId: id, text: line, at: Date.now() };
       this.lastWasTool = true;
@@ -390,6 +434,7 @@ export class ToolBurstAggregator {
   }
 
   close(): void {
+    this.generation++;
     this.open = undefined;
     this.lastWasTool = false;
   }
@@ -413,11 +458,23 @@ export class TelegramBot {
   private throttler = new EditThrottler(1000);
   private chatId?: number;
   private lastMsg = new Map<string, { messageId: number; text: string; at: number; role: 'user' | 'assistant' }>();
+  // Ultimo testo utente per sessione: hint di lingua per le summary via LLM
+  // (il messaggio utente non finisce in lastMsg — l'echo del transcript è filtrato).
+  private lastUserText = new Map<string, string>();
   private toolBursts = new Map<string, ToolBurstAggregator>();
   // Fix 1: testi iniettati dal bot per sessione (per sopprimere l'echo del transcript).
   private recentInjected = new Map<string, { text: string; at: number }[]>();
   // Fix 2: domande a scelta multipla in attesa, token → domanda (per i bottoni).
   private pendingPrompts = new Map<string, { sessionId: string; questions: PromptQuestion[]; text: string }>();
+  // Summary via LLM per le tool call: chiamate in parallelo, risultati bufferizzati
+  // e pushati in ordine (la bubble non deve mostrare le tool in ordine sbagliato).
+  // `gen` viene incrementato a fine turno (result/errore/domanda/permesso/testo
+  // lungo): le summary pendenti vengono scartate, non aprono bubble dopo la fine.
+  private summarizeQueues = new Map<string, { next: number; buffer: Map<number, string>; gen: number }>();
+  // Cache delle summary (tool + input → riga): le tool ripetute (stesso file,
+  // stesso comando) non rifanno la chiamata a Ollama. Cap semplice: oltre 200
+  // si svuota (una cache, non un archivio).
+  private summaryCache = new Map<string, string>();
   // Indicatore "sta scrivendo…" per la sessione attiva (chat action, non un messaggio).
   private typing = new TypingIndicator(() => {
     if (!this.chatId) return Promise.resolve();
@@ -524,6 +581,57 @@ export class TelegramBot {
       this.toolBursts.set(sessionId, agg);
     }
     return agg;
+  }
+
+  // Summary via LLM di una tool call, con emoji dal tipo di tool. Fallback a
+  // `summarizeTool` se Ollama non risponde (timeout 5s) o restituisce vuoto.
+  private async llmSummarize(model: string, toolName: string, input: Record<string, unknown>, languageHint?: string): Promise<string> {
+    const key = `${toolName}:${JSON.stringify(input).slice(0, 200)}`;
+    const hit = this.summaryCache.get(key);
+    if (hit) return hit;
+    let line: string;
+    try {
+      const llm = await this.deps.ollama.summarize(model, toolName, input, languageHint);
+      line = `${toolEmoji(toolName)} ${llm}`;
+    } catch {
+      line = summarizeTool(toolName, input);
+    }
+    if (this.summaryCache.size >= 200) this.summaryCache.clear();
+    this.summaryCache.set(key, line);
+    return line;
+  }
+
+  // Lancia la summary per una tool call: chiamate in parallelo, risultati
+  // bufferizzati per indice e pushati in ordine (la bubble non deve mostrare le
+  // tool in ordine sbagliato). Se il turno è finito nel frattempo (gen cambiato),
+  // la summary viene scartata.
+  private summarizeToolLine(sessionId: string, model: string, toolName: string, input: Record<string, unknown>, languageHint?: string): void {
+    const q = this.summarizeQueues.get(sessionId) ?? { next: 0, buffer: new Map(), gen: 0 };
+    this.summarizeQueues.set(sessionId, q);
+    const index = q.next++;
+    const gen = q.gen;
+    void this.llmSummarize(model, toolName, input, languageHint).then(line => {
+      const cur = this.summarizeQueues.get(sessionId);
+      if (!cur || cur.gen !== gen || !line) return;
+      cur.buffer.set(index, line);
+      this.flushSummaries(sessionId, cur);
+    });
+  }
+
+  private flushSummaries(sessionId: string, q: { next: number; buffer: Map<number, string>; gen: number }): void {
+    while (q.buffer.has(q.next)) {
+      const line = q.buffer.get(q.next)!;
+      q.buffer.delete(q.next);
+      q.next++;
+      this.toolBurst(sessionId).push(htmlEscape(line));
+    }
+  }
+
+  // Fine turno (o testo lungo): le summary pendenti di questa sessione vengono
+  // scartate — non devono aprire bubble dopo la risposta/errore.
+  private resetSummarize(sessionId: string): void {
+    const q = this.summarizeQueues.get(sessionId);
+    if (q) q.gen++;
   }
 
   private isAuthorized(ctx: Context): boolean {
@@ -894,6 +1002,10 @@ export class TelegramBot {
     // restringe; `?? ''` è sicuro perché il filtro message:text scatta solo su testi.
     const text = ctx.message.text ?? '';
     if (!this.deps.manager.isArmed()) { await this.send(ctx, '🔒 Remote control is off. Send /rc on.'); return; }
+    // hint di lingua per le summary via LLM: l'ultimo testo utente della sessione.
+    const active = this.deps.manager.getActive();
+    const session = active ? this.deps.manager.get(active) : this.deps.manager.list()[0];
+    if (session) this.lastUserText.set(session.id, text);
     // I comandi del bot sono già gestiti da grammy (bot.command). Quelli che
     // arrivano qui (slash command di Claude: /clear, /compact, /exit,
     // /frontend-release, …) vengono inoltrati alla sessione attiva, slash incluso.
@@ -979,9 +1091,22 @@ export class TelegramBot {
       if (!this.deps.manager.isArmed()) return;
       if (e.sessionId !== this.deps.manager.getActive()) return; // solo la sessione selezionata
       if (e.role === 'assistant') this.typing.stop(); // il testo è già l'indicatore
-      this.toolBurst(e.sessionId).close(); // il testo chiude la raffica di tool
       // Fix 1: l'echo di un testo iniettato dal bot non viene reinoltrato.
-      if (e.role === 'user' && this.isInjectedEcho(e.sessionId, e.text)) return;
+      if (e.role === 'user' && this.isInjectedEcho(e.sessionId, e.text)) {
+        this.toolBurst(e.sessionId).close();
+        this.resetSummarize(e.sessionId);
+        return;
+      }
+      const burst = this.toolBurst(e.sessionId);
+      if (narrationPlan(e.role, e.text, burst.isOpen()) === 'merge') {
+        // narrazione breve del modello mentre la bubble tool è aperta: si fonde
+        // dentro (niente messaggio extra) — il grouping non si rompe più a ogni
+        // "Ora leggo X…" tra una tool call e l'altra.
+        void burst.push(mdToHtml(e.text));
+        return;
+      }
+      burst.close();
+      this.resetSummarize(e.sessionId);
       // sia le headless che i transcript delle terminali arrivano come markdown.
       void this.forwardText(e.sessionId, mdToHtml(e.text), e.role);
     });
@@ -989,6 +1114,7 @@ export class TelegramBot {
       if (!this.deps.manager.isArmed()) return;
       if (sessionId !== this.deps.manager.getActive()) return;
       this.toolBurst(sessionId).close();
+      this.resetSummarize(sessionId);
       // Fix 2: elenco numerato completo + bottoni con etichetta corta (mai troncati).
       const token = randomUUID();
       this.pendingPrompts.set(token, { sessionId, questions, text: promptMessage(questions) });
@@ -1007,14 +1133,18 @@ export class TelegramBot {
       if (!this.deps.manager.isArmed()) return;
       if (e.kind === 'tool_use' && e.sessionId === this.deps.manager.getActive() && e.input) {
         this.typing.start(); // il modello sta lavorando di nuovo
-        // riassunto leggibile della tool call (niente JSON grezzo).
-        const line = htmlEscape(summarizeTool(e.toolName, e.input));
-        void this.toolBurst(e.sessionId).push(line);
+        // riassunto leggibile via LLM nella lingua della conversazione (niente
+        // JSON grezzo); fallback a summarizeTool se Ollama non risponde.
+        const session = this.deps.manager.get(e.sessionId);
+        const model = session?.model ?? this.deps.config.defaultModel;
+        const hint = this.lastUserText.get(e.sessionId);
+        this.summarizeToolLine(e.sessionId, model, e.toolName, e.input, hint);
       }
     });
     bus.on('session.permission', ({ permission }) => {
       if (!this.deps.manager.isArmed()) return;
       this.toolBurst(permission.sessionId).close();
+      this.resetSummarize(permission.sessionId);
       const kb = new InlineKeyboard()
         .text('✓ Approve', `perm:approve:${permission.id}`)
         .text('✗ Reject', `perm:deny:${permission.id}`);
@@ -1026,6 +1156,7 @@ export class TelegramBot {
       if (!this.deps.manager.isArmed() || e.sessionId !== this.deps.manager.getActive()) return;
       this.typing.stop(); // fine turno: niente più "sta scrivendo"
       this.toolBurst(e.sessionId).close(); // fine turno headless: chiude la raffica di tool
+      this.resetSummarize(e.sessionId); // scarta le summary pendenti
       // solo segnale di completamento: il testo della risposta è già arrivato
       // streammato (session.text → mdToHtml). Re-inviarlo qui (come faceva la
       // vecchia notifica `✅ <result>`) duplicava l'ultimo messaggio, e senza
@@ -1036,6 +1167,7 @@ export class TelegramBot {
       if (!this.deps.manager.isArmed() || e.sessionId !== this.deps.manager.getActive()) return;
       this.typing.stop(); // errore: niente più "sta scrivendo"
       this.toolBurst(e.sessionId).close();
+      this.resetSummarize(e.sessionId);
       this.notify(`❌ <b>${htmlEscape(e.message.slice(0, 500))}</b>`);
     });
   }
