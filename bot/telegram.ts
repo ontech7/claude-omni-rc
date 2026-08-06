@@ -370,7 +370,12 @@ export class TelegramBot {
   private pendingPrompts = new Map<string, { sessionId: string; questions: PromptQuestion[]; text: string }>();
 
   constructor(private deps: BotDeps) {
-    this.bot = new Bot(deps.config.telegramBotToken);
+    // timeout di sicurezza su ogni chiamata API Telegram (le getUpdates long-poll
+    // usano 30s server-side: 35s non le taglia, ma ogni altra chiamata è limitata).
+    this.bot = new Bot(deps.config.telegramBotToken, { client: { timeoutSeconds: 35 } });
+    // senza bot.catch, grammy STOPPA il bot al primo errore di middleware non
+    // gestito → il daemon moriva (spec §3.1). Ora logghiamo e si va avanti.
+    this.bot.catch(err => { console.error('ollama-rc bot error:', (err as { error?: unknown })?.error ?? err); });
     this.register();
     this.subscribeBus();
   }
@@ -388,7 +393,7 @@ export class TelegramBot {
       { command: 'history', description: 'Show the last messages of a session' },
       { command: 'delete', description: 'Delete a session' },
       { command: 'help', description: 'Show all commands' },
-    ]).catch(() => {});
+    ]).catch(this.logCatch('setMyCommands'));
     await this.bot.start({ drop_pending_updates: true });
   }
   async stop(): Promise<void> {
@@ -399,7 +404,26 @@ export class TelegramBot {
     return ctx.reply(text, { parse_mode: 'HTML' });
   }
   private notify(text: string): void {
-    if (this.chatId) void this.bot.api.sendMessage(this.chatId, text, { parse_mode: 'HTML' }).catch(() => {});
+    if (this.chatId) void this.bot.api.sendMessage(this.chatId, text, { parse_mode: 'HTML' }).catch(this.logCatch('notify'));
+  }
+
+  // Contiene ogni errore degli handler: log + reply amichevole, mai un throw che
+  // risale al middleware di grammy (che senza bot.catch fermerebbe la coda).
+  private safe(ctx: Context, label: string, fn: () => Promise<unknown>): Promise<unknown> {
+    return Promise.resolve().then(fn).catch(err => {
+      console.error(`handler ${label} failed:`, err);
+      return this.send(ctx, '❌ Something went wrong. Check the daemon log.').catch(() => undefined);
+    });
+  }
+
+  // Aggiunge il log a un'operazione fire-and-forget: niente unhandled rejection
+  // (in Node 22 una promise rifiutata non gestita uccide il processo).
+  private track(p: Promise<unknown>, label: string): void {
+    void p.catch(err => console.error(`background ${label} failed:`, err));
+  }
+
+  private logCatch(label: string): (err: unknown) => void {
+    return err => console.error(label, err);
   }
   private async forwardText(sessionId: string, text: string, role: 'user' | 'assistant'): Promise<void> {
     const chatId = this.chatId;
@@ -450,27 +474,29 @@ export class TelegramBot {
 
   private authorize(ctx: Context): boolean {
     if (this.isAuthorized(ctx)) { this.chatId = ctx.chat?.id ?? this.chatId; return true; }
-    void this.send(ctx, '⛔ Not authorized. Send <code>/start &lt;pairing code&gt;</code>.');
+    this.track(this.send(ctx, '⛔ Not authorized. Send <code>/start &lt;pairing code&gt;</code>.'), 'authorize reply');
     return false;
   }
 
   private register(): void {
     const bot = this.bot;
-    bot.command('start', ctx => this.onStart(ctx));
-    bot.command('help', ctx => { if (this.authorize(ctx)) this.send(ctx, 'Commands: /rc on|off|status · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /help'); });
-    bot.command('rc', ctx => this.onRc(ctx));
-    bot.command('sessions', ctx => this.onSessions(ctx));
-    bot.command('view', ctx => this.onView(ctx));
-    bot.command('new', ctx => this.onNew(ctx));
-    bot.command('stop', ctx => this.onStop(ctx));
-    bot.command('status', ctx => this.onStatus(ctx));
-    bot.command('attach', ctx => this.onAttach(ctx));
-    bot.command('history', ctx => this.onHistory(ctx));
-    bot.command('delete', ctx => this.onDelete(ctx));
-    bot.on('callback_query:data', ctx => this.onCallback(ctx));
-    bot.on('message:text', ctx => this.onMessage(ctx));
-    bot.on('message:photo', ctx => this.onPhoto(ctx));
-    bot.on('message:document', ctx => this.onDocument(ctx));
+    bot.command('start', ctx => this.safe(ctx, 'start', () => this.onStart(ctx)));
+    bot.command('help', ctx => this.safe(ctx, 'help', async () => {
+      if (this.authorize(ctx)) await this.send(ctx, 'Commands: /rc on|off|status · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /help');
+    }));
+    bot.command('rc', ctx => this.safe(ctx, 'rc', () => this.onRc(ctx)));
+    bot.command('sessions', ctx => this.safe(ctx, 'sessions', () => this.onSessions(ctx)));
+    bot.command('view', ctx => this.safe(ctx, 'view', () => this.onView(ctx)));
+    bot.command('new', ctx => this.safe(ctx, 'new', () => this.onNew(ctx)));
+    bot.command('stop', ctx => this.safe(ctx, 'stop', () => this.onStop(ctx)));
+    bot.command('status', ctx => this.safe(ctx, 'status', () => this.onStatus(ctx)));
+    bot.command('attach', ctx => this.safe(ctx, 'attach', () => this.onAttach(ctx)));
+    bot.command('history', ctx => this.safe(ctx, 'history', () => this.onHistory(ctx)));
+    bot.command('delete', ctx => this.safe(ctx, 'delete', () => this.onDelete(ctx)));
+    bot.on('callback_query:data', ctx => this.safe(ctx, 'callback', () => this.onCallback(ctx)));
+    bot.on('message:text', ctx => this.safe(ctx, 'message', () => this.onMessage(ctx)));
+    bot.on('message:photo', ctx => this.safe(ctx, 'photo', () => this.onPhoto(ctx)));
+    bot.on('message:document', ctx => this.safe(ctx, 'document', () => this.onDocument(ctx)));
   }
 
   private async onStart(ctx: Context): Promise<void> {
@@ -514,7 +540,7 @@ export class TelegramBot {
   }
 
   private requireArmed(ctx: Context): boolean {
-    if (!this.deps.manager.isArmed()) { void this.send(ctx, '🔒 Remote control is off. Send /rc on.'); return false; }
+    if (!this.deps.manager.isArmed()) { this.track(this.send(ctx, '🔒 Remote control is off. Send /rc on.'), 'requireArmed reply'); return false; }
     return true;
   }
 
@@ -563,7 +589,7 @@ export class TelegramBot {
     await this.send(ctx, `🆕 Session <b>${htmlEscape(session.id.slice(0, 8))}</b> started${modeLabel}.`);
     // NON await: grammy processa gli update in sequenza — aspettare un turno di minuti
     // bloccherebbe /stop, /rc off e i callback. Il driver emette gli eventi sul bus.
-    void this.deps.sdk.runTurn(session.id, text);
+    this.track(this.deps.sdk.runTurn(session.id, text), 'runTurn');
   }
 
   private async onStop(ctx: Context): Promise<void> {
@@ -666,7 +692,7 @@ export class TelegramBot {
     await ctx.editMessageText(`${header}\n\n${msg.text}`, {
       parse_mode: 'HTML',
       reply_markup: new InlineKeyboard(), // svuota i bottoni
-    }).catch(() => {});
+    }).catch(this.logCatch('callback edit'));
   }
 
   // Risponde a una domanda a scelta multipla: inietta l'etichetta nel pane
@@ -690,7 +716,7 @@ export class TelegramBot {
         if (this.deps.sdk.isBusy(s.id)) {
           toast = '⏳ Session busy — reply by text';
         } else {
-          void this.deps.sdk.runTurn(s.id, opt.label);
+          this.track(this.deps.sdk.runTurn(s.id, opt.label), 'runTurn');
         }
       }
     } catch (e) {
@@ -698,7 +724,7 @@ export class TelegramBot {
     }
     await ctx.answerCallbackQuery({ text: toast });
     const ack = `${pending.text}\n\n✅ <b>Risposta:</b> ${htmlEscape(opt.label)}`;
-    await ctx.editMessageText(ack, { parse_mode: 'HTML', reply_markup: new InlineKeyboard() }).catch(() => {});
+    await ctx.editMessageText(ack, { parse_mode: 'HTML', reply_markup: new InlineKeyboard() }).catch(this.logCatch('callback edit'));
   }
 
   private async onCallback(ctx: Context): Promise<void> {
@@ -729,7 +755,7 @@ export class TelegramBot {
           await ctx.editMessageText(sessionListText(this.deps.manager.list(), this.activeSessionId), { parse_mode: 'HTML' });
           // Fix 5: mostra la storia recente della sessione appena selezionata.
           const hist = await this.readHistory(parsed.id);
-          if (hist && this.chatId) void this.bot.api.sendMessage(this.chatId, hist, { parse_mode: 'HTML' }).catch(() => {});
+          if (hist && this.chatId) void this.bot.api.sendMessage(this.chatId, hist, { parse_mode: 'HTML' }).catch(this.logCatch('callback send'));
           break;
         }
         case 'answer': {
@@ -745,19 +771,19 @@ export class TelegramBot {
             .text('✗ No', `sess:del-no:${s.id}`);
           await ctx.reply(`Delete session <b>${htmlEscape(s.title) || htmlEscape(s.id.slice(0, 8))}</b> [${s.kind}]?`, {
             parse_mode: 'HTML', reply_markup: kb,
-          }).catch(() => {});
+          }).catch(this.logCatch('callback send'));
           break;
         }
         case 'del-yes': {
           const ok = this.deleteSession(parsed.id);
           await ctx.answerCallbackQuery({ text: ok ? '🗑 Deleted' : 'Already deleted' });
-          await ctx.editMessageText(ok ? '🗑 Session deleted.' : 'Session already gone.', { parse_mode: 'HTML' }).catch(() => {});
+          await ctx.editMessageText(ok ? '🗑 Session deleted.' : 'Session already gone.', { parse_mode: 'HTML' }).catch(this.logCatch('callback send'));
           if (this.activeSessionId === parsed.id) this.activeSessionId = undefined;
           break;
         }
         case 'del-no': {
           await ctx.answerCallbackQuery({ text: 'Cancelled' });
-          await ctx.editMessageText('Delete cancelled.', { parse_mode: 'HTML' }).catch(() => {});
+          await ctx.editMessageText('Delete cancelled.', { parse_mode: 'HTML' }).catch(this.logCatch('callback send'));
           break;
         }
       }
@@ -774,14 +800,19 @@ export class TelegramBot {
         await this.send(ctx, '⏳ Session busy: wait for it to go idle before forwarding.');
         return;
       }
-      void this.deps.sdk.runTurn(session.id, text); // non bloccante (vedi onNew)
+      this.track(this.deps.sdk.runTurn(session.id, text), 'runTurn');
     } else {
       if (!session.tmuxTarget) {
         await this.send(ctx, 'This session is not running in tmux, so text can’t be injected. Start it with:\n<code>tmux new -s claude:&lt;project&gt;</code>');
         return;
       }
-      await this.deps.tmux.injectText(session.tmuxTarget, text);
-      this.recordInjected(session.id, text);
+      try {
+        await this.deps.tmux.injectText(session.tmuxTarget, text);
+        this.recordInjected(session.id, text);
+      } catch (e) {
+        // tmux giù o pane sparito: errore amichevole, mai un throw che uccide il daemon.
+        await this.send(ctx, `❌ Can't inject into <code>${htmlEscape(session.tmuxTarget)}</code>: ${htmlEscape(e instanceof Error ? e.message : String(e))}. Is tmux running?`);
+      }
     }
   }
 
@@ -814,7 +845,7 @@ export class TelegramBot {
   // non i byte — i byte vanno scaricati dall'endpoint /file/bot<token>/<file_path>.
   private async downloadTelegramFile(filePath: string): Promise<Buffer> {
     const url = `https://api.telegram.org/file/bot${this.deps.config.telegramBotToken}/${filePath}`;
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
     if (!res.ok) throw new Error(`Telegram file download ${res.status}`);
     return Buffer.from(await res.arrayBuffer());
   }
@@ -895,7 +926,7 @@ export class TelegramBot {
       }));
       const hint = '\n\n<i>Tocca un\'opzione o rispondi con il numero.</i>';
       if (this.chatId) {
-        void this.bot.api.sendMessage(this.chatId, promptMessage(questions) + hint, { parse_mode: 'HTML', reply_markup: kb }).catch(() => {});
+        void this.bot.api.sendMessage(this.chatId, promptMessage(questions) + hint, { parse_mode: 'HTML', reply_markup: kb }).catch(this.logCatch('prompt send'));
       }
     });
     bus.on('session.tool', e => {
@@ -912,7 +943,7 @@ export class TelegramBot {
         .text('✓ Approve', `perm:approve:${permission.id}`)
         .text('✗ Reject', `perm:deny:${permission.id}`);
       if (this.chatId) {
-        void this.bot.api.sendMessage(this.chatId, permissionMessage(permission), { parse_mode: 'HTML', reply_markup: kb }).catch(() => {});
+        void this.bot.api.sendMessage(this.chatId, permissionMessage(permission), { parse_mode: 'HTML', reply_markup: kb }).catch(this.logCatch('permission send'));
       }
     });
     bus.on('session.result', e => {
