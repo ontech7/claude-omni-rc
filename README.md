@@ -120,6 +120,9 @@ npm install
 For a first test in the foreground instead: `npm run dev` (logs to the
 terminal). The launchd logs go to `~/.ollama-rc/logs/daemon.log`.
 
+After code changes, restart the daemon to load the new code (no reinstall):
+`./scripts/restart.sh` (or `./scripts/restart.sh status` to check it).
+
 ## Telegram setup
 
 1. Open the chat with your bot.
