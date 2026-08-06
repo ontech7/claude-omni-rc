@@ -1,5 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 import { TmuxClient } from '../src/sessions/tmux-inject.js';
+import { createExec } from '../src/sessions/tmux-inject.js';
+
+// vi.mock viene sollevato sopra le dichiarazioni const: la funzione mock deve
+// vivere in vi.hoisted per evitare un ReferenceError da TDZ.
+const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }));
+vi.mock('node:child_process', () => ({ spawn: (...args: unknown[]) => spawnMock(...args) }));
 
 // Il buffer ha nome random per chiamata: la fake verifica solo il primo argomento
 // (comando) e registra gli args reali per le asserzioni successive.
@@ -81,5 +88,39 @@ describe('TmuxClient', () => {
     const tmux = new TmuxClient(exec);
     await tmux.sendKeys('claude:proj', 'C-c');
     expect(calls[1].args).toEqual(['send-keys', '-t', '$0', 'C-c']);
+  });
+});
+
+function fakeChild(): any {
+  const child = new EventEmitter() as any;
+  child.stdout = new EventEmitter() as any;
+  child.stderr = new EventEmitter() as any;
+  child.stdin = { write: vi.fn(), end: vi.fn() } as any;
+  child.kill = vi.fn(() => { child.emit('close', null); });
+  return child;
+}
+
+describe('createExec timeout', () => {
+  it('resolves when the child exits before the timeout', async () => {
+    const child = fakeChild();
+    spawnMock.mockReturnValueOnce(child);
+    const p = createExec({ timeoutMs: 1000 })(['list-sessions']);
+    child.emit('close', 0);
+    await expect(p).resolves.toEqual({ code: 0, stdout: '', stderr: '' });
+  });
+  it('rejects when the child never exits', async () => {
+    vi.useFakeTimers();
+    try {
+      const child = fakeChild();
+      spawnMock.mockReturnValueOnce(child);
+      const p = createExec({ timeoutMs: 1000 })(['list-sessions']);
+      // Handler attaccato PRIMA di far scattare il timer: se il rifiuto avviene
+      // mentre il timer avanza e il .rejects arriva dopo, vitest segnala una
+      // PromiseRejectionHandledWarning ("unhandled rejection") in output.
+      const assertion = expect(p).rejects.toThrow('timed out');
+      await vi.advanceTimersByTimeAsync(1000);
+      await assertion;
+      expect(child.kill).toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
   });
 });

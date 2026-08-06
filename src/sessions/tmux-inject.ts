@@ -4,16 +4,22 @@ import { spawn } from 'node:child_process';
 export interface ExecResult { code: number; stdout: string; stderr: string; }
 export type ExecFn = (args: string[], opts?: { input?: string }) => Promise<ExecResult>;
 
-export function createExec(): ExecFn {
-  return (args, opts) => new Promise((resolve, reject) => {
+export function createExec(opts: { timeoutMs?: number } = {}): ExecFn {
+  const timeoutMs = opts.timeoutMs ?? 10_000;
+  return (args, o) => new Promise((resolve, reject) => {
     const child = spawn('tmux', args, { stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
+    // timeout di sicurezza: un comando tmux appeso non deve stallare un handler.
+    const timer = setTimeout(() => {
+      reject(new Error(`tmux command timed out after ${timeoutMs}ms`));
+      child.kill();
+    }, timeoutMs);
     child.stdout.on('data', d => { stdout += d; });
     child.stderr.on('data', d => { stderr += d; });
-    child.on('error', reject);
-    child.on('close', code => resolve({ code: code ?? -1, stdout, stderr }));
-    if (opts?.input) child.stdin.write(opts.input);
+    child.on('error', err => { clearTimeout(timer); reject(err); });
+    child.on('close', code => { clearTimeout(timer); resolve({ code: code ?? -1, stdout, stderr }); });
+    if (o?.input) child.stdin.write(o.input);
     child.stdin.end();
   });
 }
