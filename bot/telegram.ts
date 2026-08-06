@@ -242,24 +242,10 @@ export function stopReply(o: {
     : 'This terminal session has no tmux pane to interrupt.';
 }
 
-// Icona per tipo di tool: il prefisso visivo delle notifiche tool (comando,
-// lettura, scrittura, ecc.). Usata sia dal fallback `summarizeTool` sia dalle
-// summary via LLM (il testo lo genera il modello, l'emoji resta deterministica).
-export function toolEmoji(toolName: string): string {
-  const name = toolName.toLowerCase();
-  if (name === 'bash') return '⚙️';
-  if (name === 'read' || name === 'readfile') return '📖';
-  if (name === 'write' || name === 'writefile') return '✍️';
-  if (name === 'edit') return '✏️';
-  if (name === 'glob' || name === 'grep') return '🔍';
-  if (name === 'webfetch' || name === 'websearch') return '🌐';
-  if (name === 'taskcreate' || name === 'taskupdate') return '📋';
-  return '🔧';
-}
-
-// Riassunto leggibile di una tool call (niente JSON grezzo): mappa i tool noti
-// a un'icona + il campo chiave dell'input; fallback al nome + primo valore.
-// È il fallback quando la summary via LLM non è disponibile (Ollama lento/giù).
+// Riassunto leggibile di una tool call (niente JSON grezzo): l'ingranaggio ⚙️
+// identifica la riga come tool call, seguito dal campo chiave dell'input
+// (fallback al nome + primo valore). È il fallback quando la summary via LLM
+// non è disponibile (Ollama lento/giù).
 export function summarizeTool(toolName: string, input: Record<string, unknown>): string {
   const s = (v: unknown): string => (typeof v === 'string' ? v : '');
   const first = (): string => {
@@ -278,17 +264,16 @@ export function summarizeTool(toolName: string, input: Record<string, unknown>):
   const trunc = (v: string, max = 80): string => (v.length > max ? `${v.slice(0, max).trimEnd()}…` : v);
 
   const name = toolName.toLowerCase();
-  const emoji = toolEmoji(toolName);
-  if (name === 'bash') return `${emoji} ${trunc(pick('command'))}`;
-  if (name === 'read' || name === 'readfile') return `${emoji} ${trunc(pick('file_path', 'path'))}`;
-  if (name === 'write' || name === 'writefile') return `${emoji} ${trunc(pick('file_path', 'path'))}`;
-  if (name === 'edit') return `${emoji} ${trunc(pick('file_path', 'path'))}`;
-  if (name === 'glob' || name === 'grep') return `${emoji} ${trunc(pick('pattern', 'query'))}`;
-  if (name === 'webfetch') return `${emoji} ${trunc(pick('url'))}`;
-  if (name === 'websearch') return `${emoji} ${trunc(pick('query'))}`;
-  if (name === 'taskcreate' || name === 'taskupdate') return `${emoji} ${trunc(pick('subject'))}`;
+  if (name === 'bash') return `⚙️ ${trunc(pick('command'))}`;
+  if (name === 'read' || name === 'readfile') return `⚙️ ${trunc(pick('file_path', 'path'))}`;
+  if (name === 'write' || name === 'writefile') return `⚙️ ${trunc(pick('file_path', 'path'))}`;
+  if (name === 'edit') return `⚙️ ${trunc(pick('file_path', 'path'))}`;
+  if (name === 'glob' || name === 'grep') return `⚙️ ${trunc(pick('pattern', 'query'))}`;
+  if (name === 'webfetch') return `⚙️ ${trunc(pick('url'))}`;
+  if (name === 'websearch') return `⚙️ ${trunc(pick('query'))}`;
+  if (name === 'taskcreate' || name === 'taskupdate') return `⚙️ ${trunc(pick('subject'))}`;
   const v = first();
-  return v ? `${emoji} ${toolName} — ${trunc(v)}` : `${emoji} ${toolName}`;
+  return v ? `⚙️ ${toolName} — ${trunc(v)}` : `⚙️ ${toolName}`;
 }
 
 // Testo breve del modello mentre una bubble tool è aperta → si fonde nella
@@ -422,7 +407,9 @@ export class ToolBurstAggregator {
     const open = this.open;
     const fresh = open && Date.now() - open.at < this.windowMs;
     if (this.lastWasTool && fresh) {
-      const next = `${open.text}\n${line}`;
+      // riga vuota tra una tool call e l'altra: la bubble non diventa un muro
+      // di testo, ogni tool call resta riconoscibile come voce separata.
+      const next = `${open.text}\n\n${line}`;
       if (next.length <= this.maxLen && await this.sink.edit(open.messageId, next)) {
         if (gen !== this.generation) return; // chiusa nel frattempo: non toccare
         open.text = next;
@@ -592,8 +579,9 @@ export class TelegramBot {
     return agg;
   }
 
-  // Summary via LLM di una tool call, con emoji dal tipo di tool. Fallback a
-  // `summarizeTool` se Ollama non risponde (timeout 5s) o restituisce vuoto.
+  // Summary via LLM di una tool call, con l'ingranaggio ⚙️ che la identifica
+  // come tool call. Fallback a `summarizeTool` se Ollama non risponde (timeout
+  // 5s) o restituisce vuoto.
   private async llmSummarize(model: string, toolName: string, input: Record<string, unknown>, languageHint?: string): Promise<string> {
     const key = `${toolName}:${JSON.stringify(input).slice(0, 200)}`;
     const hit = this.summaryCache.get(key);
@@ -601,7 +589,7 @@ export class TelegramBot {
     let line: string;
     try {
       const llm = await this.deps.ollama.summarize(model, toolName, input, languageHint);
-      line = `${toolEmoji(toolName)} ${llm}`;
+      line = `⚙️ ${llm}`;
     } catch {
       line = summarizeTool(toolName, input);
     }

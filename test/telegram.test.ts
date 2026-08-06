@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, toolEmoji, narrationPlan } from '../bot/telegram.js';
+import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan } from '../bot/telegram.js';
 import type { ToolBurstSink } from '../bot/telegram.js';
 
 describe('parseCommand', () => {
@@ -151,8 +151,8 @@ describe('ToolBurstAggregator', () => {
     expect(sends).toEqual(['t1']);
     expect(sink.send).toHaveBeenCalledTimes(1);
     expect(edits).toEqual([
-      { id: 1, text: 't1\nt2' },
-      { id: 1, text: 't1\nt2\nt3' },
+      { id: 1, text: 't1\n\nt2' }, // riga vuota tra una tool call e l'altra
+      { id: 1, text: 't1\n\nt2\n\nt3' },
     ]);
   });
   it('close() closes the burst: the next push starts a new bubble', async () => {
@@ -164,12 +164,12 @@ describe('ToolBurstAggregator', () => {
     expect(sink.edit).not.toHaveBeenCalled();
   });
   it('starts a new bubble when appending would exceed maxLen', async () => {
-    const { agg, sink, edits, sends } = makeAgg(5);
+    const { agg, sink, edits, sends } = makeAgg(6);
     await agg.push('t1'); // send
-    await agg.push('t2'); // 't1\nt2' = 5 ≤ 5 → edit
-    await agg.push('t3'); // 't1\nt2\nt3' = 8 > 5 → send
+    await agg.push('t2'); // 't1\n\nt2' = 6 ≤ 6 → edit
+    await agg.push('t3'); // 't1\n\nt2\n\nt3' = 10 > 6 → send
     expect(sends).toEqual(['t1', 't3']);
-    expect(edits).toEqual([{ id: 1, text: 't1\nt2' }]);
+    expect(edits).toEqual([{ id: 1, text: 't1\n\nt2' }]);
   });
   it('falls back to a new bubble when the edit fails', async () => {
     const { agg, sink, sends } = makeAgg();
@@ -183,8 +183,8 @@ describe('ToolBurstAggregator', () => {
     await Promise.all([agg.push('t1'), agg.push('t2'), agg.push('t3')]);
     expect(sends).toEqual(['t1']);
     expect(edits).toEqual([
-      { id: 1, text: 't1\nt2' },
-      { id: 1, text: 't1\nt2\nt3' },
+      { id: 1, text: 't1\n\nt2' },
+      { id: 1, text: 't1\n\nt2\n\nt3' },
     ]);
   });
   it('after an edit-failure fallback, the next push edits the new bubble', async () => {
@@ -195,7 +195,7 @@ describe('ToolBurstAggregator', () => {
     (sink.edit as any).mockImplementation(async (id: number, text: string) => { edits.push({ id, text }); return true; });
     await agg.push('t3'); // deve editare la bubble 2, non ri-sendare
     expect(sends).toEqual(['t1', 't2']);
-    expect(edits).toEqual([{ id: 2, text: 't2\nt3' }]);
+    expect(edits).toEqual([{ id: 2, text: 't2\n\nt3' }]);
   });
   it('when send fails (undefined), the next push starts a fresh bubble', async () => {
     const { agg, sink, sends } = makeAgg();
@@ -385,35 +385,20 @@ describe('TypingIndicator', () => {
 });
 
 describe('summarizeTool', () => {
-  it('summarizes known tools with an icon and the key field', () => {
+  it('identifies every tool call with the gear, then the key field', () => {
     expect(summarizeTool('Bash', { command: 'npm test' })).toBe('⚙️ npm test');
-    expect(summarizeTool('Read', { file_path: 'src/foo.ts' })).toBe('📖 src/foo.ts');
-    expect(summarizeTool('Edit', { file_path: 'src/foo.ts' })).toBe('✏️ src/foo.ts');
-    expect(summarizeTool('WebFetch', { url: 'https://x.com' })).toBe('🌐 https://x.com');
-    expect(summarizeTool('Grep', { pattern: 'TODO' })).toBe('🔍 TODO');
+    expect(summarizeTool('Read', { file_path: 'src/foo.ts' })).toBe('⚙️ src/foo.ts');
+    expect(summarizeTool('Edit', { file_path: 'src/foo.ts' })).toBe('⚙️ src/foo.ts');
+    expect(summarizeTool('WebFetch', { url: 'https://x.com' })).toBe('⚙️ https://x.com');
+    expect(summarizeTool('Grep', { pattern: 'TODO' })).toBe('⚙️ TODO');
   });
   it('falls back to the tool name and the first string value', () => {
-    expect(summarizeTool('SomeTool', { a: 1, b: 'hello' })).toBe('🔧 SomeTool — hello');
-    expect(summarizeTool('SomeTool', { a: 1 })).toBe('🔧 SomeTool');
+    expect(summarizeTool('SomeTool', { a: 1, b: 'hello' })).toBe('⚙️ SomeTool — hello');
+    expect(summarizeTool('SomeTool', { a: 1 })).toBe('⚙️ SomeTool');
   });
   it('truncates long values with an explicit marker', () => {
     const long = 'x'.repeat(200);
     expect(summarizeTool('Bash', { command: long })).toBe(`⚙️ ${'x'.repeat(80)}…`);
-  });
-});
-
-describe('toolEmoji', () => {
-  it('maps known tools to their icon', () => {
-    expect(toolEmoji('Bash')).toBe('⚙️');
-    expect(toolEmoji('Read')).toBe('📖');
-    expect(toolEmoji('Write')).toBe('✍️');
-    expect(toolEmoji('Edit')).toBe('✏️');
-    expect(toolEmoji('Grep')).toBe('🔍');
-    expect(toolEmoji('WebFetch')).toBe('🌐');
-    expect(toolEmoji('TaskCreate')).toBe('📋');
-  });
-  it('falls back to a generic icon for unknown tools', () => {
-    expect(toolEmoji('SomeTool')).toBe('🔧');
   });
 });
 
