@@ -85,16 +85,63 @@ export function stripAnsi(s: string): string {
     .replace(/\r/g, '');
 }
 
-// Render minimale markdown → HTML per i messaggi in chat.
+// Rende il markdown del modello in HTML per Telegram, correggendo il markup:
+// blocchi di codice protetti (niente formattazione dentro <pre>/<code>), nesting
+// grassetto/corsivo gestito, e passata finale di bilanciamento → l'output è
+// sempre HTML valido accettato da Telegram (mai un messaggio scartato).
 export function mdToHtml(text: string): string {
+  const blocks: string[] = [];
+  // Separatore per i placeholder del codice: un NUL non compare mai nel testo
+  // del modello, quindi il ripristino non può corrompere il contenuto.
+  const P = String.fromCharCode(0);
+  const protect = (c: string, kind: 'pre' | 'code'): string => {
+    const idx = blocks.length;
+    blocks.push(kind === 'pre' ? `<pre>${c}</pre>` : `<code>${c}</code>`);
+    return `${P}${idx}${P}`;
+  };
   let out = htmlEscape(text);
-  out = out.replace(/```([\s\S]*?)```/g, (_m, c: string) => `<pre>${c}</pre>`);
-  out = out.replace(/`([^`\n]+)`/g, '<code>$1</code>');
-  out = out.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
-  out = out.replace(/\*([^*]+)\*/g, '<i>$1</i>');
+  out = out.replace(/```([\s\S]*?)```/g, (_m, c) => protect(c, 'pre'));
+  out = out.replace(/`([^`\n]+)`/g, (_m, c) => protect(c, 'code'));
+  out = out
+    .replace(/\*\*\*([^*]+)\*\*\*/g, '<b><i>$1</i></b>')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .replace(/\*([^*]+)\*/g, '<i>$1</i>');
   out = out.replace(/^#{1,6}\s+(.+)$/gm, '<b>$1</b>');
   out = out.replace(/^[-*]\s+(.+)$/gm, '• $1');
   out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>');
+  out = out.replace(new RegExp(`${P}([0-9]+)${P}`, 'g'), (_m, i) => blocks[Number(i)]);
+  return balanceHtml(out);
+}
+
+// Chiude i tag ancora aperti a fine stringa (LIFO) e scarta le chiusure orfane:
+// il risultato è sempre HTML bilanciato. Garanzia che Telegram non rigetti mai
+// un messaggio per markup malformato.
+export function balanceHtml(html: string): string {
+  const stack: string[] = [];
+  let out = '';
+  let last = 0;
+  const re = /<\/?(b|i|code|pre|a)(?:\s[^>]*)?>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    out += html.slice(last, m.index);
+    const full = m[0];
+    const tag = m[1];
+    if (full.startsWith('</')) {
+      const idx = stack.lastIndexOf(tag);
+      if (idx !== -1) {
+        for (let i = stack.length - 1; i > idx; i--) out += `</${stack[i]}>`;
+        out += `</${tag}>`;
+        stack.length = idx;
+      }
+      // chiusura orfana: scartata
+    } else {
+      out += full;
+      stack.push(tag);
+    }
+    last = m.index + full.length;
+  }
+  out += html.slice(last);
+  for (let i = stack.length - 1; i >= 0; i--) out += `</${stack[i]}>`;
   return out;
 }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, matchesInjected, renderHistory } from '../bot/telegram.js';
+import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, matchesInjected, renderHistory, balanceHtml } from '../bot/telegram.js';
 import type { ToolBurstSink } from '../bot/telegram.js';
 
 describe('parseCommand', () => {
@@ -203,5 +203,32 @@ describe('ToolBurstAggregator', () => {
     await agg.push('t1'); // send fallisce → nessuna bubble aperta
     await agg.push('t2'); // send ok → bubble nuova
     expect(sends).toEqual(['ok']);
+  });
+});
+
+describe('mdToHtml v2 / balanceHtml', () => {
+  it('renders bold, italic and nested ***both***', () => {
+    expect(mdToHtml('**bold** and *it*')).toBe('<b>bold</b> and <i>it</i>');
+    expect(mdToHtml('***both***')).toBe('<b><i>both</i></b>');
+  });
+  it('protects code blocks and inline code from formatting', () => {
+    expect(mdToHtml('`**code**`')).toBe('<code>**code**</code>');
+    expect(mdToHtml('```js\n# h\n**x**\n```')).toBe('<pre>js\n# h\n**x**\n</pre>');
+  });
+  it('converts headings outside code to bold', () => {
+    expect(mdToHtml('# not a heading')).toBe('<b>not a heading</b>');
+  });
+  it('leaves unclosed markers literal (no unbalanced HTML)', () => {
+    expect(mdToHtml('**unclosed')).toBe('**unclosed');
+  });
+  it('escapes raw HTML and renders links', () => {
+    expect(mdToHtml('<b>')).toBe('&lt;b&gt;');
+    expect(mdToHtml('[t](https://x.com)')).toBe('<a href="https://x.com">t</a>');
+  });
+  it('balanceHtml closes unclosed tags, drops orphan closes, keeps valid HTML', () => {
+    expect(balanceHtml('<b>a')).toBe('<b>a</b>');
+    expect(balanceHtml('<b><i>x</b>')).toBe('<b><i>x</i></b>');
+    expect(balanceHtml('x</i>y')).toBe('xy');
+    expect(balanceHtml('<b>ok</b>')).toBe('<b>ok</b>');
   });
 });
