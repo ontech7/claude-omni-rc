@@ -158,9 +158,10 @@ Anthropic-hosted Claude Code) never show up.
   never replayed: streaming starts from the moment you select
   the session with `/sessions`.
 - **Multiple-choice questions** — when the model asks a question, it arrives as
-  a `❓` message with **one inline button per option**; tap to answer (a reply
-  with the option number or its text also works). `AskUserQuestion` is
-  auto-allowed, so no raw-JSON permission bubble appears.
+  a `❓` message with a numbered list of every option (with descriptions), plus
+  one inline button per option as a shortcut — nothing is truncated; tap or
+  reply with the number. `AskUserQuestion` is auto-allowed, so no raw-JSON
+  permission bubble appears.
 - **Interact 1:1** — a message you send is pasted into the session and
   submitted (Enter). This needs tmux: a session not in tmux streams as chat
   but is read-only.
@@ -221,7 +222,7 @@ in-terminal prompt, so a regular session is never blocked.
 | `/view` | show the active session's current screen |
 | `/new <text>` | create a headless session and send it your prompt (automode; add `--standard` for approve/reject prompts) |
 | `/attach <project>` | attach a `claude:<project>` tmux session |
-| `/stop` | stop the active session (aborts the running turn; sends Ctrl+C to a tmux pane) |
+| `/stop` | stop the active session (aborts the running turn; sends Ctrl+C to a tmux pane); reports whether a turn was actually aborted |
 | `/status` | show the active session's status |
 | `/history [id]` | show the last messages of a session (default: active) |
 | `/delete [id]` | delete a session (headless: stops it; terminal: untracks only) |

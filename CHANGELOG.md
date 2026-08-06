@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+- **Stability hardening** —
+  - **The daemon can no longer crash** — a global `bot.catch` (grammy no longer
+    stops on a middleware error), a `safe()` wrapper on every handler, `track()`
+    on fire-and-forget promises and an `unhandledRejection` guard mean one bad
+    message (e.g. tmux down during injection) yields a friendly error, not a
+    dead daemon.
+  - **Timeouts everywhere** — Telegram API calls (35s), tmux commands (10s),
+    file downloads (30s) and Ollama fetches (10s); the bot can no longer hang
+    on a stuck network call.
+  - **`/stop` reports the real outcome** — "Turn aborted" when a turn was
+    running, the session's actual status otherwise; Ctrl+C to terminal panes is
+    reported accurately.
+  - **Multiple-choice questions show every option** — a numbered list of the
+    full option text (with descriptions) in the message, plus tap buttons as a
+    shortcut; nothing is truncated anymore.
+  - **Markup is corrected, not dropped** — `mdToHtml` protects code blocks and
+    balances tags, so malformed markdown can no longer make Telegram silently
+    discard a message.
+  - **History is capped by whole messages** — never cut mid-message; long
+    messages are truncated at a word boundary with an explicit marker.
+  - **The active session survives restarts** — `activeSessionId` is persisted
+    in the state, so streaming resumes on the same session after a daemon
+    restart.
 - **Telegram UX fixes** —
   - **No echo of your own messages** — text the bot injects into a tmux
     session is not forwarded back from the transcript; messages typed at the
