@@ -5,13 +5,23 @@ import type { TmuxClient } from './tmux-inject.js';
 export interface WatcherDeps {
   config: Config;
   manager: SessionManager;
-  tmux: Pick<TmuxClient, 'listSessions' | 'serverRunning' | 'paneCwd'>;
+  tmux: Pick<TmuxClient, 'listSessions' | 'serverRunning' | 'paneCwd' | 'paneCommand'>;
 }
 
 // Grace prima di rimuovere una sessione terminale il cui target tmux è sparito:
 // /attach può registrare un target non ancora avviato, e un restart di tmux non
 // deve cancellare tutto. Oltre questo tempo la sessione è da considerare morta.
 const PRUNE_GRACE_MS = 30_000;
+
+// Grace per il caso "claude uscito ma finestra tmux ancora aperta": più larga
+// del prune perché l'utente può legittimamente stare facendo altro nel pane
+// (es. qualche comando shell) prima di rilanciare claude o chiudere.
+const CLAUDE_EXIT_GRACE_MS = 120_000;
+
+// Quando il pane mostra una shell, Claude Code non è in esecuzione (il CLI è
+// uscito e il prompt è tornato). Qualsiasi altro comando nel pane — incluso
+// "ollama" (lanciato con `ollama launch claude`) — significa sessione attiva.
+const SHELL_NAMES = new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', 'ash', 'nu', 'pwsh']);
 
 // Scoperta sessioni terminale: `tmux list-sessions` → sessioni `claude:<progetto>`,
 // registrate col cwd reale del pane (serve a risolvere il transcript). Solo
@@ -21,6 +31,7 @@ const PRUNE_GRACE_MS = 30_000;
 export class TmuxWatcher {
   private timer?: NodeJS.Timeout;
   private missingSince = new Map<string, number>();
+  private exitedSince = new Map<string, number>();
 
   constructor(private deps: WatcherDeps) {}
 
@@ -40,10 +51,16 @@ export class TmuxWatcher {
       sessions = await this.deps.tmux.listSessions();
     } catch { return; }
     this.prune(sessions);
+    await this.checkExited(sessions);
     for (const target of sessions) {
       if (!target.startsWith('claude:')) continue;
       if (this.deps.manager.findByTmuxTarget(target)) continue;
       const name = target.slice('claude:'.length);
+      // un pane tornato alla shell non ha claude in esecuzione: niente da
+      // tracciare (checkExited la rinnoverebbe all'infinito altrimenti).
+      try {
+        if (SHELL_NAMES.has(await this.deps.tmux.paneCommand(target))) continue;
+      } catch { /* pane illeggibile → registra comunque (fallback) */ }
       let projectDir = `~/${name}`;
       try {
         projectDir = (await this.deps.tmux.paneCwd(target)) || projectDir;
@@ -67,6 +84,28 @@ export class TmuxWatcher {
       if (now - since < PRUNE_GRACE_MS) continue;
       this.deps.manager.remove(s.id);
       this.deps.manager.persist();
+    }
+  }
+
+  // La finestra tmux c'è ancora ma il pane è tornato alla shell: Claude Code è
+  // uscito. Oltre la grace (l'utente può star facendo altro nel pane) la sessione
+  // viene rimossa dal registro — tenere una sessione "chiusa" solo perché tmux la
+  // vede ancora non ha senso, e se l'utente rilancia claude la sessione torna.
+  private async checkExited(sessions: string[]): Promise<void> {
+    const alive = new Set(sessions);
+    const now = Date.now();
+    for (const s of this.deps.manager.list()) {
+      if (s.kind !== 'terminal' || !s.tmuxTarget) continue;
+      if (!alive.has(s.tmuxTarget)) { this.exitedSince.delete(s.tmuxTarget); continue; } // gestito da prune
+      let cmd: string;
+      try { cmd = await this.deps.tmux.paneCommand(s.tmuxTarget); } catch { continue; } // pane illeggibile → conservativo
+      if (!SHELL_NAMES.has(cmd)) { this.exitedSince.delete(s.tmuxTarget); continue; } // qualcosa gira (claude) → vivo
+      const since = this.exitedSince.get(s.tmuxTarget) ?? now;
+      this.exitedSince.set(s.tmuxTarget, since);
+      if (now - since >= CLAUDE_EXIT_GRACE_MS) {
+        this.deps.manager.remove(s.id);
+        this.deps.manager.persist();
+      }
     }
   }
 }

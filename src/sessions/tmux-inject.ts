@@ -78,6 +78,16 @@ export class TmuxClient {
     return r.stdout.trim();
   }
 
+  // Nome del comando attivo nel pane. Quando Claude Code esce (senza chiudere
+  // la finestra) il pane torna alla shell: il comando passa da "ollama"/"claude"
+  // a "zsh"/"bash"… — è il segnale che la sessione è finita davvero.
+  async paneCommand(target: string): Promise<string> {
+    const t = await this.resolveTarget(target);
+    const r = await this.exec(['display-message', '-p', '-t', t, '#{pane_current_command}']);
+    if (r.code !== 0) throw new Error(`tmux display-message failed: ${r.stderr}`);
+    return r.stdout.trim();
+  }
+
   // 1:1: incolla il testo (bracketed paste, niente interpretazione shell) e preme
   // Invio — invia un prompt o risponde a una domanda interattiva (scelta multipla).
   // load-buffer (non set-buffer) legge davvero il testo da stdin: set-buffer tratta
