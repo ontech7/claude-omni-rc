@@ -1,7 +1,7 @@
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/wordmark-dark.svg">
-    <img src="assets/wordmark-light.svg" alt="claude-omni-rc" width="544">
+    <img src="assets/wordmark-light.svg" alt="claude-omni-rc" width="520">
   </picture>
 </div>
 
@@ -169,8 +169,9 @@ explicitly.
 
 Only **your sessions** are tracked — nothing scans `~/.claude/projects` on its
 own. A session appears via the `claude:*` tmux discovery, the `SessionStart`
-hook, or `/attach`; sessions running outside of claude-omni-rc (e.g. plain
-Anthropic-hosted Claude Code) never show up.
+hook, or `/attach`. Every Claude Code session you start is registered,
+whatever model backs it — Ollama, another provider via `ANTHROPIC_BASE_URL`,
+or Anthropic itself.
 
 - **Chat, not screen** — for each tracked session the daemon reads the
   conversation the CLI itself writes (`~/.claude/projects/<project>/…jsonl`)
@@ -192,7 +193,11 @@ Anthropic-hosted Claude Code) never show up.
 - **Headless sessions** (`/new`) stream their assistant text the same way.
   They run in **automode by default** (every permission is auto-approved, no
   prompts); add `--standard` to `/new` to get the remote-permission
-  approve/reject buttons instead.
+  approve/reject buttons instead. They are **provider-agnostic**: the daemon
+  spawns `claude` with the provider you configured in `.env`
+  (`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`),
+  falling back to Ollama (`OLLAMA_BASE_URL`) when unset. Pick a model per
+  session with `/new --model <name>` (default: `DEFAULT_MODEL`).
 - `/view` still grabs the full current screen of the active session whenever
   you want the raw terminal.
 
@@ -262,7 +267,7 @@ in-terminal prompt, so a regular session is never blocked.
 | `/rc` (no arg) / `/rc on` / `/rc off` / `/rc status` | global armed switch — no argument toggles it |
 | `/sessions` | list sessions, switch the active one |
 | `/view` | show the active session's current screen |
-| `/new <text>` | create a headless session and send it your prompt (automode; add `--standard` for approve/reject prompts) |
+| `/new [--auto\|--standard] [--model <name>] <text>` | create a headless session and send it your prompt (automode by default; `--standard` for approve/reject buttons; `--model` to pick the model for this session) |
 | `/attach <project>` | attach a `claude:<project>` tmux session |
 | `/stop` | stop the active session (aborts the running turn; sends Ctrl+C to a tmux pane); reports whether a turn was actually aborted |
 | `/status` | show the active session's status |
@@ -363,8 +368,10 @@ token and one authorization method.
 | `TELEGRAM_BOT_TOKEN` | — | bot token from @BotFather (**required**) |
 | `ALLOWED_USER_IDS` | — | comma-separated Telegram ids allowed to control |
 | `PAIRING_CODE` | — | secret code authorizing the first `/start <code>` |
-| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | where Ollama listens |
-| `DEFAULT_MODEL` | `deepseek-v4-flash:0731-cloud` | model for headless sessions |
+| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | where Ollama listens; also the fallback provider for headless sessions |
+| `ANTHROPIC_BASE_URL` | — | provider for headless sessions (unset → Ollama); e.g. `https://api.anthropic.com` or a proxy |
+| `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | — | credentials for the headless provider (Ollama uses the placeholder `ollama` token) |
+| `DEFAULT_MODEL` | `deepseek-v4-flash:0731-cloud` | model for headless sessions (override per-session with `/new --model`) |
 | `MAX_HEADLESS_SESSIONS` | `2` | concurrent headless sessions |
 | `PERMISSION_TIMEOUT_SECONDS` | `120` | unanswered permission → deny |
 | `WORKSPACE_DIRS` | — | `:`-separated project roots for `/attach` |

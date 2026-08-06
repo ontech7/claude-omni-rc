@@ -46,7 +46,8 @@ npm install
 | allow only themselves | set `ALLOWED_USER_IDS` to their Telegram numeric id (@userinfobot) |
 | allow via a code instead | set `PAIRING_CODE` in `.env`; they send `/start <code>` once |
 | arm / disarm remote control | from Telegram: `/rc on` / `/rc off` (or `ARMED_ON_START=true` in `.env`) |
-| create a headless session | from Telegram: `/new <prompt>` (automode by default; `/new --standard <prompt>` for approve/reject prompts) |
+| create a headless session | from Telegram: `/new <prompt>` (automode by default; `/new --standard <prompt>` for approve/reject prompts; `/new --model <name> <prompt>` to pick the model) |
+| use a provider other than Ollama for headless sessions | set `ANTHROPIC_BASE_URL` (+ `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`) in `.env`; unset → Ollama (`OLLAMA_BASE_URL`) |
 | continue an ongoing session from the phone | make sure it runs inside tmux — start it with `omni-rc <name>` (or `tmux new -s claude:<project>`); it auto-appears in `/sessions` and streams as a chat |
 | start a session ready for remote control | `omni-rc <name>` (shell function added by `./install.sh`); options in `omni-rc --help` |
 | started claude without tmux and want remote control | you can't move a running process into tmux — restart it with `omni-rc <name>`; the `SessionStart` hook warns you when a session starts outside tmux |
@@ -71,9 +72,12 @@ npm install
 - `/sessions` — list sessions and switch the active one (inline buttons). Only
   the active session's screen is streamed.
 - `/view` — send the active session's current screen (tmux pane).
-- `/new <text>` — create a headless session and send it the prompt (automode by
-  default: permissions auto-approved; `/new --standard <text>` to get the
-  approve/reject buttons).
+- `/new [--auto|--standard] [--model <name>] <text>` — create a headless
+  session and send it the prompt (automode by default: permissions
+  auto-approved; `--standard` for approve/reject buttons; `--model` to pick
+  the model for this session). Headless sessions use the provider configured
+  in `.env` (`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`),
+  falling back to Ollama when unset.
 - `/attach <project>` — attach the `claude:<project>` tmux session.
 - `/stop` — abort the active session's running turn (sends `Ctrl+C` to a tmux
   pane, like pressing ESC).
@@ -99,8 +103,9 @@ Terminal sessions must run inside tmux (`claude:<project>`) to receive text.
 - Data: `~/.claude-omni-rc/state.json` (armed switch + sessions),
   `~/.claude-omni-rc/inbox/` (attachments), `~/.claude-omni-rc/logs/` (daemon.log).
   Override with `STATE_DIR`.
-- The daemon talks only to the local Ollama (`OLLAMA_BASE_URL`) and to the
-  Telegram Bot API. No Anthropic calls.
+- The daemon talks to the Telegram Bot API and, for headless sessions, to the
+  provider configured in `.env` — Ollama by default (`OLLAMA_BASE_URL`), or
+  whatever `ANTHROPIC_BASE_URL` points to (a proxy or Anthropic itself).
 
 ## Verify
 

@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>claude-omni-rc — take your session with you</title>
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
 <meta name="description" content="Unofficial local daemon + Telegram bot that mimics Claude Code's /remote-control for any model running through the Claude Code CLI (Ollama, other LLMs, or Claude): keep talking to any running session, approve permissions, from your phone.">
 <style>
   :root {
@@ -410,7 +411,8 @@
         <h3>Keep going from anywhere</h3>
         <p>Continue the session you left running — a build, a migration, a
         long review — switch between sessions, and approve permissions, all
-        from your phone.</p>
+        from your phone. Headless sessions work with any model that runs
+        through the Claude Code CLI: Ollama, a proxy, or Claude itself.</p>
       </li>
     </ol>
 
@@ -457,6 +459,9 @@ Tool: Bash
       to the session as a path the model can read. Permissions — for headless
       and terminal sessions alike — arrive as <code>✓ Approve</code> /
       <code>✗ Reject</code> buttons; unanswered requests expire into a deny.
+      Headless sessions use the provider you configure in <code>.env</code>
+      (Ollama by default), and <code>/new --model &lt;name&gt;</code> picks the
+      model for a single session.
     </p>
   </section>
 

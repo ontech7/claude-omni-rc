@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- **Headless sessions are now provider-agnostic ("omni")** — the daemon spawns
+  `claude` with the provider configured in `.env` (`ANTHROPIC_BASE_URL` /
+  `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`), falling back to Ollama when
+  unset. `/new --model <name>` picks the model per session. The `SessionStart`
+  hook now registers every Claude Code session, whatever model backs it.
 - **Renamed to `claude-omni-rc`** — the project is now positioned as remote
   control for *any* model that runs through the Claude Code CLI (Ollama-served
   models, other local or proxied LLMs, or Claude itself), not just Ollama.

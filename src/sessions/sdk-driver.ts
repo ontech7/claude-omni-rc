@@ -44,22 +44,25 @@ export class SdkDriver {
       // /stop durante la finestra di modelContext: l'abort è già scattato prima che
       // query() attacchi il listener → va onorato qui (e dopo la fetch), o si perderebbe.
       if (ac.signal.aborted) throw new DOMException('aborted', 'AbortError');
-      const ctx = await this.deps.ollama.modelContext(model);
-      if (ac.signal.aborted) throw new DOMException('aborted', 'AbortError');
-      // L'SDK spawna `claude --model <modello>` con l'ambiente del daemon, che
-      // non ha le env Ollama → il CLI fallirebbe. Replica l'ambiente che
-      // `ollama launch claude` setta (verificato empiricamente): base URL +
-      // auth token + mapping del modello sui default + context length reale.
-      const env = {
-        ...process.env,
-        ANTHROPIC_BASE_URL: config.ollamaBaseUrl,
-        ANTHROPIC_AUTH_TOKEN: 'ollama',
-        ANTHROPIC_API_KEY: '',
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
-        ANTHROPIC_DEFAULT_OPUS_MODEL: model,
-        ANTHROPIC_DEFAULT_SONNET_MODEL: model,
-        CLAUDE_CODE_MAX_CONTEXT_TOKENS: ctx !== undefined ? String(ctx) : undefined,
-      };
+      // L'SDK spawna `claude --model <modello>` con l'ambiente del daemon. Il
+      // driver è "omni": rispetta il provider configurato dall'utente via env
+      // (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY in .env).
+      // Solo quando il base URL è quello di Ollama replica `ollama launch claude`
+      // (token placeholder + mapping dei modelli default + context length reale);
+      // per ogni altro provider l'env passa intatto.
+      const env = { ...process.env };
+      const baseUrl = env.ANTHROPIC_BASE_URL ?? config.ollamaBaseUrl;
+      env.ANTHROPIC_BASE_URL = baseUrl;
+      if (baseUrl === config.ollamaBaseUrl) {
+        if (!env.ANTHROPIC_AUTH_TOKEN && !env.ANTHROPIC_API_KEY) env.ANTHROPIC_AUTH_TOKEN = 'ollama';
+        if (env.ANTHROPIC_API_KEY === undefined) env.ANTHROPIC_API_KEY = '';
+        env.ANTHROPIC_DEFAULT_HAIKU_MODEL = model;
+        env.ANTHROPIC_DEFAULT_OPUS_MODEL = model;
+        env.ANTHROPIC_DEFAULT_SONNET_MODEL = model;
+        const ctx = await this.deps.ollama.modelContext(model);
+        if (ac.signal.aborted) throw new DOMException('aborted', 'AbortError');
+        if (ctx !== undefined) env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(ctx);
+      }
       const stream = query({
         prompt,
         options: {

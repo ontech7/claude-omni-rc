@@ -11,8 +11,9 @@
 # Never fails loudly: if the daemon isn't running, the hook does nothing and
 # Claude Code starts normally.
 #
-# Only Ollama sessions are registered: without ANTHROPIC_BASE_URL (or with
-# Anthropic's) the session isn't served by our daemon and isn't relevant.
+# Every Claude Code session is registered, whatever model backs it (Ollama,
+# another provider via ANTHROPIC_BASE_URL, or Anthropic itself) — that's the
+# "omni" promise of claude-omni-rc.
 #
 # When the session is NOT inside tmux but the daemon is running, the hook emits
 # a systemMessage (JSON on stdout) reminding the user to start it with
@@ -20,11 +21,6 @@
 # from Telegram but can't receive input or be captured with /view.
 #
 set -uo pipefail
-
-case "${ANTHROPIC_BASE_URL:-}" in
-  '') exit 0 ;;
-  *anthropic.com*) exit 0 ;;
-esac
 
 PORT="${API_PORT:-4123}"
 BASE="http://127.0.0.1:${PORT}"

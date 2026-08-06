@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue } from '../bot/telegram.js';
+import { parseCommand, parseNewFlags, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue } from '../bot/telegram.js';
 import type { ToolBurstSink } from '../bot/telegram.js';
 
 describe('parseCommand', () => {
@@ -15,6 +15,16 @@ describe('parseCommand', () => {
   it('classifies plain text and unknown', () => {
     expect(parseCommand('ciao')).toEqual({ kind: 'text' });
     expect(parseCommand('/bogus')).toEqual({ kind: 'unknown' });
+  });
+});
+
+describe('parseNewFlags', () => {
+  it('parses --model and --auto/--standard in any order', () => {
+    expect(parseNewFlags('write a haiku')).toEqual({ mode: 'auto', text: 'write a haiku' });
+    expect(parseNewFlags('--standard review this')).toEqual({ mode: 'standard', text: 'review this' });
+    expect(parseNewFlags('--model deepseek-v4-flash:0731-cloud refactor')).toEqual({ mode: 'auto', model: 'deepseek-v4-flash:0731-cloud', text: 'refactor' });
+    expect(parseNewFlags('--standard --model claude-sonnet-4-5 fix the bug')).toEqual({ mode: 'standard', model: 'claude-sonnet-4-5', text: 'fix the bug' });
+    expect(parseNewFlags('--model m1 --auto go')).toEqual({ mode: 'auto', model: 'm1', text: 'go' });
   });
 });
 

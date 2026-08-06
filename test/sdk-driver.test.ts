@@ -210,12 +210,50 @@ describe('SdkDriver', () => {
     expect(ollama.modelContext).toHaveBeenCalledWith(opts.model);
   });
   it('omits CLAUDE_CODE_MAX_CONTEXT_TOKENS when the context length is unknown', async () => {
-    const { sdk, session, ollama } = makeDriver();
-    (ollama.modelContext as any).mockResolvedValue(undefined);
-    queryMock.mockImplementationOnce(async function* () { yield resultMsg(session.id, 'ok'); });
-    await sdk.runTurn(session.id, 'a');
-    const opts = queryMock.mock.calls[0][0].options;
-    expect(opts.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBeUndefined();
-    expect(opts.env.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:11434');
+    const prev = process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
+    delete process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS; // l'env della shell non deve inquinare il test
+    try {
+      const { sdk, session, ollama } = makeDriver();
+      (ollama.modelContext as any).mockResolvedValue(undefined);
+      queryMock.mockImplementationOnce(async function* () { yield resultMsg(session.id, 'ok'); });
+      await sdk.runTurn(session.id, 'a');
+      const opts = queryMock.mock.calls[0][0].options;
+      expect(opts.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBeUndefined();
+      expect(opts.env.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:11434');
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS; else process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = prev;
+    }
+  });
+  it('passes through a non-Ollama provider env untouched (no Ollama overrides)', async () => {
+    const keys = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL',
+      'CLAUDE_CODE_MAX_CONTEXT_TOKENS'] as const;
+    const prev = Object.fromEntries(keys.map(k => [k, process.env[k]]));
+    process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
+    process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-token';
+    process.env.ANTHROPIC_API_KEY = 'proxy-key';
+    process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'env-haiku';
+    process.env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'env-opus';
+    process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'env-sonnet';
+    process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = '12345';
+    try {
+      const { sdk, session, ollama } = makeDriver();
+      queryMock.mockImplementationOnce(async function* () { yield resultMsg(session.id, 'ok'); });
+      await sdk.runTurn(session.id, 'a');
+      const opts = queryMock.mock.calls[0][0].options;
+      expect(opts.env.ANTHROPIC_BASE_URL).toBe('https://proxy.example.com');
+      expect(opts.env.ANTHROPIC_AUTH_TOKEN).toBe('proxy-token');
+      expect(opts.env.ANTHROPIC_API_KEY).toBe('proxy-key');
+      // i default del CLI e il context length NON vengono toccati in modalità non-Ollama
+      expect(opts.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('env-haiku');
+      expect(opts.env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('env-opus');
+      expect(opts.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('env-sonnet');
+      expect(opts.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('12345');
+      expect(ollama.modelContext).not.toHaveBeenCalled();
+    } finally {
+      for (const k of keys) {
+        if (prev[k] === undefined) delete process.env[k]; else process.env[k] = prev[k];
+      }
+    }
   });
 });

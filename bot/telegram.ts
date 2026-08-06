@@ -45,6 +45,30 @@ export function parseCommand(text: string): ParsedCommand {
   return { kind: 'unknown' };
 }
 
+// Flag in testa di /new, in qualsiasi ordine: --auto/--standard (permessi) e
+// --model <name> (modello per questa sessione, default da DEFAULT_MODEL).
+export function parseNewFlags(raw: string): { mode: 'auto' | 'standard'; model?: string; text: string } {
+  let mode: 'auto' | 'standard' = 'auto';
+  let model: string | undefined;
+  let text = raw.trim();
+  for (;;) {
+    const modeFlag = text.match(/^--(auto|standard)(?:\s+|$)/);
+    if (modeFlag) {
+      mode = modeFlag[1] === 'standard' ? 'standard' : 'auto';
+      text = text.slice(modeFlag[0].length).trim();
+      continue;
+    }
+    const modelFlag = text.match(/^--model\s+(\S+)(?:\s+|$)/);
+    if (modelFlag) {
+      model = modelFlag[1];
+      text = text.slice(modelFlag[0].length).trim();
+      continue;
+    }
+    break;
+  }
+  return { mode, model, text };
+}
+
 export interface CallbackData {
   action: 'approve' | 'deny' | 'select' | 'answer' | 'del' | 'del-yes' | 'del-no';
   id: string;
@@ -771,23 +795,16 @@ export class TelegramBot {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
     const raw = ctx.match?.toString().trim() ?? '';
     if (!raw) {
-      await this.send(ctx, 'Usage: /new &lt;text&gt; — automode di default; /new --standard &lt;text&gt; per le approvazioni manuali');
+      await this.send(ctx, 'Usage: /new [--auto|--standard] [--model &lt;name&gt;] &lt;text&gt;');
       return;
     }
-    // Flag in testa: --standard (approve/reject) o --auto (default).
-    let mode: 'auto' | 'standard' = 'auto';
-    let text = raw;
-    const flag = raw.match(/^--(auto|standard)(?:\s+|$)/);
-    if (flag) {
-      mode = flag[1] === 'standard' ? 'standard' : 'auto';
-      text = raw.slice(flag[0].length).trim();
-      if (!text) { await this.send(ctx, 'Usage: /new &lt;text&gt;'); return; }
-    }
+    const { mode, model, text } = parseNewFlags(raw);
+    if (!text) { await this.send(ctx, 'Usage: /new [--auto|--standard] [--model &lt;name&gt;] &lt;text&gt;'); return; }
     const running = this.deps.manager.list().filter(s => s.kind === 'headless' && s.status === 'running').length;
     if (running >= this.deps.config.maxHeadlessSessions) { await this.send(ctx, `Reached the limit of ${this.deps.config.maxHeadlessSessions} active headless sessions.`); return; }
     const projectDir = this.deps.config.workspaceDirs[0] ?? homedir();
     const session = this.deps.manager.createHeadless({
-      title: text.slice(0, 40), projectDir, model: this.deps.config.defaultModel,
+      title: text.slice(0, 40), projectDir, model: model ?? this.deps.config.defaultModel,
       permissionMode: mode,
     });
     this.deps.manager.setActive(session.id); // persiste anche la nuova sessione
