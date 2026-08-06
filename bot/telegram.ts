@@ -242,6 +242,38 @@ export function stopReply(o: {
     : 'This terminal session has no tmux pane to interrupt.';
 }
 
+// Riassunto leggibile di una tool call (niente JSON grezzo): mappa i tool noti
+// a un'icona + il campo chiave dell'input; fallback al nome + primo valore.
+export function summarizeTool(toolName: string, input: Record<string, unknown>): string {
+  const s = (v: unknown): string => (typeof v === 'string' ? v : '');
+  const first = (): string => {
+    for (const v of Object.values(input)) {
+      if (typeof v === 'string' && v.trim()) return v;
+    }
+    return '';
+  };
+  const pick = (...keys: string[]): string => {
+    for (const k of keys) {
+      const v = s(input[k]);
+      if (v.trim()) return v;
+    }
+    return first();
+  };
+  const trunc = (v: string, max = 80): string => (v.length > max ? `${v.slice(0, max).trimEnd()}…` : v);
+
+  const name = toolName.toLowerCase();
+  if (name === 'bash') return `⚙️ ${trunc(pick('command'))}`;
+  if (name === 'read' || name === 'readfile') return `📖 ${trunc(pick('file_path', 'path'))}`;
+  if (name === 'write' || name === 'writefile') return `✍️ ${trunc(pick('file_path', 'path'))}`;
+  if (name === 'edit') return `✏️ ${trunc(pick('file_path', 'path'))}`;
+  if (name === 'glob' || name === 'grep') return `🔍 ${trunc(pick('pattern', 'query'))}`;
+  if (name === 'webfetch') return `🌐 ${trunc(pick('url'))}`;
+  if (name === 'websearch') return `🌐 ${trunc(pick('query'))}`;
+  if (name === 'taskcreate' || name === 'taskupdate') return `📋 ${trunc(pick('subject'))}`;
+  const v = first();
+  return v ? `🔧 ${toolName} — ${trunc(v)}` : `🔧 ${toolName}`;
+}
+
 // Indicatore "sta scrivendo…" di Telegram: la bolla del chat action dura ~5s,
 // quindi va rinnovata. start() invia subito e poi a intervalli; stop() ferma.
 export class TypingIndicator {
@@ -475,13 +507,17 @@ export class TelegramBot {
           const chatId = this.chatId;
           if (!chatId) return false;
           const ok = await this.throttler.throttled(() =>
-            this.bot.api.editMessageText(chatId, messageId, text, { parse_mode: 'HTML' }).then(() => true).catch(() => false));
+            this.bot.api.editMessageText(chatId, messageId, text, { parse_mode: 'HTML' })
+              .then(() => true)
+              .catch(err => { console.error('ollama-rc tool edit failed:', err); return false; }));
           return ok ?? false;
         },
         send: async text => {
           const chatId = this.chatId;
           if (!chatId) return undefined;
-          const msg = await this.bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' }).catch(() => undefined);
+          // anche il send passa dal throttler: massimo 1 op/sec per chat (niente 429).
+          const msg = await this.throttler.throttled(() =>
+            this.bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' }).catch(() => undefined));
           return msg?.message_id;
         },
       });
@@ -971,7 +1007,8 @@ export class TelegramBot {
       if (!this.deps.manager.isArmed()) return;
       if (e.kind === 'tool_use' && e.sessionId === this.deps.manager.getActive() && e.input) {
         this.typing.start(); // il modello sta lavorando di nuovo
-        const line = `🔧 <code>${htmlEscape(e.toolName)}</code> — <pre>${htmlEscape(JSON.stringify(e.input).slice(0, 300))}</pre>`;
+        // riassunto leggibile della tool call (niente JSON grezzo).
+        const line = htmlEscape(summarizeTool(e.toolName, e.input));
         void this.toolBurst(e.sessionId).push(line);
       }
     });

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator } from '../bot/telegram.js';
+import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool } from '../bot/telegram.js';
 import type { ToolBurstSink } from '../bot/telegram.js';
 
 describe('parseCommand', () => {
@@ -326,5 +326,59 @@ describe('TypingIndicator', () => {
   it('stop without start is a no-op', () => {
     const t = new TypingIndicator(async () => {});
     expect(() => t.stop()).not.toThrow();
+  });
+});
+
+describe('summarizeTool', () => {
+  it('summarizes known tools with an icon and the key field', () => {
+    expect(summarizeTool('Bash', { command: 'npm test' })).toBe('⚙️ npm test');
+    expect(summarizeTool('Read', { file_path: 'src/foo.ts' })).toBe('📖 src/foo.ts');
+    expect(summarizeTool('Edit', { file_path: 'src/foo.ts' })).toBe('✏️ src/foo.ts');
+    expect(summarizeTool('WebFetch', { url: 'https://x.com' })).toBe('🌐 https://x.com');
+    expect(summarizeTool('Grep', { pattern: 'TODO' })).toBe('🔍 TODO');
+  });
+  it('falls back to the tool name and the first string value', () => {
+    expect(summarizeTool('SomeTool', { a: 1, b: 'hello' })).toBe('🔧 SomeTool — hello');
+    expect(summarizeTool('SomeTool', { a: 1 })).toBe('🔧 SomeTool');
+  });
+  it('truncates long values with an explicit marker', () => {
+    const long = 'x'.repeat(200);
+    expect(summarizeTool('Bash', { command: long })).toBe(`⚙️ ${'x'.repeat(80)}…`);
+  });
+});
+
+describe('ToolBurstAggregator with throttled sink', () => {
+  it('5 consecutive pushes → 1 send + 4 edits (real throttler pacing)', async () => {
+    vi.useFakeTimers();
+    try {
+      const throttler = new EditThrottler(1000);
+      const sends: string[] = [];
+      const edits: { id: number; text: string }[] = [];
+      let nextId = 1;
+      const sink: ToolBurstSink = {
+        edit: async (id, text) => {
+          const ok = await throttler.throttled(async () => { edits.push({ id, text }); return true; });
+          return ok ?? false;
+        },
+        send: async text => {
+          const id = await throttler.throttled(async () => { sends.push(text); return nextId++; });
+          return id;
+        },
+      };
+      const agg = new ToolBurstAggregator(sink, 3800);
+      const p1 = agg.push('t1');
+      await vi.advanceTimersByTimeAsync(0);
+      const p2 = agg.push('t2');
+      await vi.advanceTimersByTimeAsync(1100);
+      const p3 = agg.push('t3');
+      await vi.advanceTimersByTimeAsync(1100);
+      const p4 = agg.push('t4');
+      await vi.advanceTimersByTimeAsync(1100);
+      const p5 = agg.push('t5');
+      await vi.advanceTimersByTimeAsync(1100);
+      await Promise.all([p1, p2, p3, p4, p5]);
+      expect(sends).toHaveLength(1);
+      expect(edits).toHaveLength(4);
+    } finally { vi.useRealTimers(); }
   });
 });
