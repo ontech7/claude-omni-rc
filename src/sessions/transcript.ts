@@ -1,5 +1,5 @@
 import { existsSync, openSync, readSync, closeSync, fstatSync, readdirSync, statSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import type { PromptQuestion } from '../types.js';
 
 // Lettura dei transcript che Claude Code scrive da solo
@@ -91,6 +91,46 @@ export function newestTranscriptFile(dir: string): string | undefined {
   }
 }
 
+// Cerca un transcript per basename in TUTTE le sottocartelle di projectsDir.
+// Copre il caso in cui il CLI ha spostato la sessione (es. in un git worktree):
+// `~/.claude/projects/<progetto>--claude-worktrees-<wt>/<uuid>.jsonl` non sta più
+// nella dir munged del projectDir registrato, ma il nome file resta lo stesso.
+export function findTranscriptFile(projectsDir: string, fileName: string): string | undefined {
+  if (!fileName.endsWith('.jsonl') || fileName.includes('/') || fileName.includes('\\') || fileName.includes('..')) return undefined;
+  try {
+    for (const dir of readdirSync(projectsDir)) {
+      const p = join(projectsDir, dir, fileName);
+      try {
+        if (statSync(p).isFile()) return p;
+      } catch { /* non in questa dir */ }
+    }
+  } catch { /* projectsDir illeggibile */ }
+  return undefined;
+}
+
+// Il sessionId del transcript (presente nelle righe del jsonl): serve a
+// verificare che un file "più recente" adottato appartenga davvero alla
+// sessione (e non a un'altra istanza nella stessa dir).
+export function transcriptSessionId(file: string): string | undefined {
+  try {
+    const buf = Buffer.alloc(64_000);
+    const fh = openSync(file, 'r');
+    try {
+      const n = readSync(fh, buf, 0, buf.length, 0);
+      const head = buf.toString('utf8', 0, n);
+      for (const line of head.split('\n')) {
+        if (!line.trim()) continue;
+        let d: { sessionId?: unknown };
+        try { d = JSON.parse(line); } catch { continue; }
+        if (typeof d.sessionId === 'string' && d.sessionId) return d.sessionId;
+      }
+    } finally {
+      closeSync(fh);
+    }
+  } catch { /* file illeggibile */ }
+  return undefined;
+}
+
 export interface RecentMessage { role: 'user' | 'assistant'; text: string }
 
 // Storia retroattiva per il Fix 5: legge gli ultimi `max` messaggi testuali
@@ -132,7 +172,16 @@ export function readRecentMessages(file: string, max = 10): RecentMessage[] {
 // createdAfterMs: se il fallback "più recente" è più vecchio della creazione
 // della sessione, appartiene a una sessione PRECEDENTE — una sessione fresca non
 // ha ancora un transcript suo e non deve mostrare la storia di quella vecchia.
-export function resolveSessionTranscript(projectsDir: string, projectDir: string, claudeSessionId?: string, createdAfterMs?: number): string | undefined {
+//
+// recordedFile: il path del transcript registrato sul manager. Se non esiste più
+// (il CLI ha spostato la sessione, es. in un git worktree) lo si ritrova per
+// basename in tutte le dir di projectsDir prima di ripiegare sul "più recente".
+export function resolveSessionTranscript(projectsDir: string, projectDir: string, claudeSessionId?: string, createdAfterMs?: number, recordedFile?: string): string | undefined {
+  if (recordedFile) {
+    if (existsSync(recordedFile)) return recordedFile;
+    const relocated = findTranscriptFile(projectsDir, basename(recordedFile));
+    if (relocated) return relocated;
+  }
   const dir = resolveTranscriptDir(projectsDir, projectDir);
   if (!dir) return undefined;
   if (claudeSessionId) {

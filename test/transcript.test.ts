@@ -14,6 +14,8 @@ import {
   parseAskUserQuestions,
   readRecentMessages,
   resolveSessionTranscript,
+  findTranscriptFile,
+  transcriptSessionId,
 } from '../src/sessions/transcript.js';
 
 function tmpDir(): string { return mkdtempSync(join(tmpdir(), 'orc-tr-')); }
@@ -316,5 +318,70 @@ describe('readRecentMessages / resolveSessionTranscript', () => {
     utimesSync(prev, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
     utimesSync(own, new Date(), new Date());
     expect(resolveSessionTranscript(base, '/Users/u/proj', undefined, Date.now() - 5000)).toBe(own);
+  });
+});
+
+describe('findTranscriptFile / transcriptSessionId', () => {
+  it('finds a relocated transcript by basename across project dirs (git worktree)', () => {
+    const base = tmpDir();
+    const wt = join(base, mungedProjectDir('/Users/u/proj/.claude/worktrees/fix'));
+    mkdirSync(wt, { recursive: true });
+    writeFileSync(join(wt, 'abc.jsonl'), '');
+    expect(findTranscriptFile(base, 'abc.jsonl')).toBe(join(wt, 'abc.jsonl'));
+  });
+  it('returns undefined when the file is nowhere', () => {
+    const base = tmpDir();
+    expect(findTranscriptFile(base, 'abc.jsonl')).toBeUndefined();
+  });
+  it('rejects unsafe basenames (traversal, subdirs, wrong extension)', () => {
+    const base = tmpDir();
+    expect(findTranscriptFile(base, '../evil.jsonl')).toBeUndefined();
+    expect(findTranscriptFile(base, 'a/b.jsonl')).toBeUndefined();
+    expect(findTranscriptFile(base, 'x.txt')).toBeUndefined();
+    expect(findTranscriptFile(base, '')).toBeUndefined();
+  });
+  it('reads the session id from a transcript', () => {
+    const dir = tmpDir();
+    const file = join(dir, 'abc.jsonl');
+    writeFileSync(file, JSON.stringify({ type: 'mode', sessionId: 'abc-123' }) + '\n');
+    expect(transcriptSessionId(file)).toBe('abc-123');
+  });
+  it('returns undefined for a transcript without a sessionId', () => {
+    const dir = tmpDir();
+    const file = join(dir, 'abc.jsonl');
+    writeFileSync(file, JSON.stringify({ type: 'assistant', message: {} }) + '\n');
+    expect(transcriptSessionId(file)).toBeUndefined();
+  });
+  it('returns undefined for a missing file', () => {
+    expect(transcriptSessionId(join(tmpDir(), 'nope.jsonl'))).toBeUndefined();
+  });
+});
+
+describe('resolveSessionTranscript with recordedFile', () => {
+  it('keeps returning the recorded file while it exists', () => {
+    const base = tmpDir();
+    const main = join(base, mungedProjectDir('/Users/u/proj'));
+    mkdirSync(main, { recursive: true });
+    const recorded = join(main, 'abc.jsonl');
+    writeFileSync(recorded, '');
+    expect(resolveSessionTranscript(base, '/Users/u/proj', undefined, undefined, recorded)).toBe(recorded);
+  });
+  it('re-resolves a stale recorded path to the relocated transcript (worktree)', () => {
+    const base = tmpDir();
+    const main = join(base, mungedProjectDir('/Users/u/proj'));
+    const wt = join(base, mungedProjectDir('/Users/u/proj/.claude/worktrees/fix'));
+    mkdirSync(main, { recursive: true });
+    mkdirSync(wt, { recursive: true });
+    writeFileSync(join(wt, 'abc.jsonl'), '');
+    const recorded = join(main, 'abc.jsonl'); // registrato, ormai non esiste
+    expect(resolveSessionTranscript(base, '/Users/u/proj', undefined, undefined, recorded)).toBe(join(wt, 'abc.jsonl'));
+  });
+  it('falls back to the newest project transcript when the recorded file is gone everywhere', () => {
+    const base = tmpDir();
+    const main = join(base, mungedProjectDir('/Users/u/proj'));
+    mkdirSync(main, { recursive: true });
+    const recorded = join(main, 'abc.jsonl'); // non esiste da nessuna parte
+    writeFileSync(join(main, 'def.jsonl'), '');
+    expect(resolveSessionTranscript(base, '/Users/u/proj', undefined, undefined, recorded)).toBe(join(main, 'def.jsonl'));
   });
 });

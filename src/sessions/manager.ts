@@ -90,6 +90,12 @@ export class SessionManager {
     if (s.transcriptFile !== transcriptFile) { s.transcriptFile = transcriptFile; this.emitUpdated(id); }
   }
 
+  setProjectDir(id: string, projectDir: string): void {
+    const s = this.get(id);
+    if (!s) return;
+    if (s.projectDir !== projectDir) { s.projectDir = projectDir; this.emitUpdated(id); }
+  }
+
   touch(id: string): void {
     const s = this.get(id);
     if (s) s.lastActivity = new Date().toISOString();

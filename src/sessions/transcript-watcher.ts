@@ -1,4 +1,5 @@
 import { existsSync, statSync } from 'node:fs';
+import { basename, dirname } from 'node:path';
 import type { Bus } from '../bus.js';
 import type { Config } from '../config.js';
 import type { Session, SessionStatus } from '../types.js';
@@ -7,6 +8,8 @@ import {
   TranscriptTail,
   resolveTranscriptDir,
   newestTranscriptFile,
+  findTranscriptFile,
+  transcriptSessionId,
   peekTranscriptState,
   transcriptModel,
   type TranscriptEvent,
@@ -77,12 +80,26 @@ export class TranscriptWatcher {
 
   private pollSession(s: Session, known: Set<string>): void {
     const { config, manager } = this.deps;
-    const dir = resolveTranscriptDir(config.projectsDir, s.projectDir);
-    const newest = dir ? newestTranscriptFile(dir) : undefined;
     let file = s.transcriptFile;
-    // il transcript può ruotare (nuova sessione nello stesso progetto) o sparire:
-    // se quello registrato non è più il più recente, ri-risolviamo.
-    if (!file || !existsSync(file) || (newest && newest !== file)) {
+
+    // Il path registrato è sparito: il CLI può aver spostato la sessione (es. in
+    // un git worktree) e il transcript ora vive in un'altra dir di projectsDir.
+    // Lo cerchiamo per basename prima di ripiegare sul "più recente" della dir
+    // registrata, che potrebbe appartenere a un'ALTRA sessione.
+    if (file && !existsSync(file)) {
+      const relocated = findTranscriptFile(config.projectsDir, basename(file));
+      if (relocated) {
+        file = relocated;
+        manager.setTranscriptFile(s.id, file);
+      } else {
+        file = undefined; // non è da nessuna parte → fallback sotto
+      }
+    }
+
+    if (!file || !existsSync(file)) {
+      // Nessun transcript (ancora): il più recente nella dir del project registrato.
+      const dir = resolveTranscriptDir(config.projectsDir, s.projectDir);
+      const newest = dir ? newestTranscriptFile(dir) : undefined;
       if (!newest) return; // niente transcript → sessione screen-only (via /view)
       // una sessione ancora senza transcript non deve adottare quello di una
       // sessione PRECEDENTE: aspetta il file suo, che è più recente della
@@ -98,9 +115,27 @@ export class TranscriptWatcher {
         }
       }
       if (!this.isOllamaModel(transcriptModel(newest), known)) return; // non-Ollama
+      // Guardia anti-adozione sbagliata: se la sessione AVEVA un transcript che è
+      // sparito (e non è stato ritrovato altrove), il "più recente" qui può essere
+      // di un'altra istanza → confronta l'id prima di adottarlo.
+      const expectedId = s.claudeSessionId ?? (s.transcriptFile ? basename(s.transcriptFile).replace(/\.jsonl$/, '') : undefined);
+      if (expectedId) {
+        const nid = transcriptSessionId(newest);
+        if (nid && nid !== expectedId) return;
+      }
       file = newest;
       manager.setTranscriptFile(s.id, file);
+    } else {
+      // Transcript valido: se nella SUA dir è comparso un file più recente (nuova
+      // sessione nello stesso progetto) lo seguiamo — rotazione storica, senza
+      // guardia: il vecchio file esiste ancora, quindi non è l'adozione sbagliata.
+      const newest = newestTranscriptFile(dirname(file));
+      if (newest && newest !== file && this.isOllamaModel(transcriptModel(newest), known)) {
+        file = newest;
+        manager.setTranscriptFile(s.id, file);
+      }
     }
+
     let tail = this.tails.get(s.id);
     if (!tail || tail.file !== file) {
       tail = new TranscriptTail(file);

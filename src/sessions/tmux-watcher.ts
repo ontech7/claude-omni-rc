@@ -68,6 +68,19 @@ export class TmuxWatcher {
       this.deps.manager.registerTerminal({ title: name, projectDir, tmuxTarget: target });
       this.deps.manager.persist();
     }
+    // refresh: il cwd reale del pane può cambiare (il CLI sposta la sessione in
+    // un git worktree). Senza aggiornare projectDir, il transcript verrebbe
+    // risolto nella dir sbagliata e la chat resterebbe muta.
+    for (const s of this.deps.manager.list()) {
+      if (s.kind !== 'terminal' || !s.tmuxTarget || !sessions.includes(s.tmuxTarget)) continue;
+      try {
+        const cwd = await this.deps.tmux.paneCwd(s.tmuxTarget);
+        if (cwd && cwd !== s.projectDir) {
+          this.deps.manager.setProjectDir(s.id, cwd);
+          this.deps.manager.persist();
+        }
+      } catch { /* pane illeggibile in questo poll → si riprova al prossimo */ }
+    }
   }
 
   private prune(sessions: string[]): void {

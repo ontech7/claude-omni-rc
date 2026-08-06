@@ -32,6 +32,17 @@ describe('SessionManager', () => {
     expect(b.id).toBe(a.id);
     expect(manager.list().filter(s => s.tmuxTarget === 'claude:x')).toHaveLength(1);
   });
+  it('setProjectDir updates projectDir and emits session.updated only on change', () => {
+    const { manager, onUpdated } = makeManager();
+    const s = manager.registerTerminal({ title: 'x', projectDir: '/tmp/x', tmuxTarget: 'claude:x' });
+    manager.setProjectDir(s.id, '/tmp/x/.claude/worktrees/fix');
+    expect(manager.get(s.id)?.projectDir).toBe('/tmp/x/.claude/worktrees/fix');
+    expect(onUpdated).toHaveBeenCalledTimes(2); // register + setProjectDir
+    manager.setProjectDir(s.id, '/tmp/x/.claude/worktrees/fix'); // invariato → niente emit
+    expect(onUpdated).toHaveBeenCalledTimes(2);
+    manager.setProjectDir('missing-id', '/tmp/y');
+    expect(onUpdated).toHaveBeenCalledTimes(2); // id inesistente → niente emit
+  });
   it('persists armed switch and applies ARMED_ON_START only on first run', () => {
     const shared = mkdtempSync(join(tmpdir(), 'orc-mgr-'));
     const { manager } = makeManager(true, 3000, shared);

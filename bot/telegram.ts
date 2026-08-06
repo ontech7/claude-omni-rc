@@ -817,8 +817,13 @@ export class TelegramBot {
   private async readHistory(sessionId: string): Promise<string | undefined> {
     const s = this.deps.manager.get(sessionId);
     if (!s) return undefined;
-    const file = s.transcriptFile
-      ?? resolveSessionTranscript(this.deps.config.projectsDir, s.projectDir, s.kind === 'headless' ? s.claudeSessionId : undefined, Date.parse(s.createdAt));
+    const file = resolveSessionTranscript(
+      this.deps.config.projectsDir,
+      s.projectDir,
+      s.kind === 'headless' ? s.claudeSessionId : undefined,
+      Date.parse(s.createdAt),
+      s.transcriptFile, // path registrato: se non esiste più viene ritrovato per basename (worktree)
+    );
     if (!file) return undefined;
     const msgs = readRecentMessages(file, 10);
     if (!msgs.length) return undefined;

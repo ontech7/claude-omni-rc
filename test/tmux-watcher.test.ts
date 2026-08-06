@@ -111,6 +111,29 @@ describe('TmuxWatcher', () => {
     await (watcher as any).poll(); // paneCommand → 'ollama', non una shell
     expect(manager.list()).toHaveLength(1);
   });
+  it('refreshes projectDir when the pane cwd changes (worktree relocation)', async () => {
+    const bus = new Bus();
+    const dir = mkdtempSync(join(tmpdir(), 'orc-watch-'));
+    const config = loadConfig({ STATE_DIR: dir });
+    const state = new StateStore(join(dir, 'state.json'));
+    const manager = new SessionManager({ bus, state, idleGraceMs: 3000, armedOnStart: false });
+    let cwd = '/home/user/proj1';
+    const tmux = {
+      serverRunning: vi.fn(async () => true),
+      listSessions: vi.fn(async () => ['claude:proj1']),
+      paneCwd: vi.fn(async () => cwd),
+      paneCommand: vi.fn(async () => 'ollama'),
+    };
+    const watcher = new TmuxWatcher({ config, manager, tmux: tmux as any });
+    manager.setArmed(true);
+    await (watcher as any).poll();
+    const s = manager.findByTmuxTarget('claude:proj1')!;
+    expect(s.projectDir).toBe('/home/user/proj1');
+    // il CLI sposta la sessione nel worktree → il cwd del pane cambia
+    cwd = '/home/user/proj1/.claude/worktrees/fix';
+    await (watcher as any).poll();
+    expect(manager.get(s.id)?.projectDir).toBe('/home/user/proj1/.claude/worktrees/fix');
+  });
   it('does not remove when the pane command cannot be read', async () => {
     const bus = new Bus();
     const dir = mkdtempSync(join(tmpdir(), 'orc-watch-'));
