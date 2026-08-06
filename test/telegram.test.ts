@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml } from '../bot/telegram.js';
+import { parseCommand, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply } from '../bot/telegram.js';
 import type { ToolBurstSink } from '../bot/telegram.js';
 
 describe('parseCommand', () => {
@@ -256,5 +256,30 @@ describe('promptMessage v2 / promptLayout', () => {
     const { options: btns, hint } = promptLayout([{ question: 'q', options }], 'tok1');
     expect(btns).toEqual([]);
     expect(hint).toContain('number');
+  });
+});
+
+describe('renderHistory v2 / truncateAtWord', () => {
+  it('caps by whole messages, never splitting one in half', () => {
+    const html = renderHistory(
+      [{ role: 'user', text: 'a'.repeat(200) }, { role: 'assistant', text: 'b'.repeat(200) }],
+      'proj', 100);
+    expect(html).toContain('(truncated)');
+    expect(html).toContain('b'.repeat(60)); // il messaggio più recente c'è (troncato)
+  });
+  it('truncates at a late word boundary with an explicit marker', () => {
+    expect(truncateAtWord('aaaa bbb ccc', 10)).toBe('aaaa bbb… (truncated)');
+    expect(truncateAtWord('short', 100)).toBe('short');
+  });
+});
+
+describe('stopReply', () => {
+  it('reports the real outcome for headless sessions', () => {
+    expect(stopReply({ kind: 'headless', id8: 'abc12345', aborted: true })).toContain('abc12345');
+    expect(stopReply({ kind: 'headless', id8: 'abc', aborted: false, status: 'idle' })).toContain('status: idle');
+  });
+  it('reports the target for terminal sessions and the no-pane case', () => {
+    expect(stopReply({ kind: 'terminal', id8: 'abc', target: 'claude:proj' })).toContain('Ctrl+C');
+    expect(stopReply({ kind: 'terminal', id8: 'abc' })).toContain('no tmux');
   });
 });

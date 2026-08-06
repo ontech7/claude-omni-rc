@@ -192,10 +192,54 @@ export function matchesInjected(recent: { text: string; at: number }[], text: st
   return recent.some(item => now - item.at <= windowMs && item.text.trim() === t);
 }
 
-// Blocco di storia per il Fix 5: gli ultimi messaggi renderizzati come chat.
-export function renderHistory(messages: RecentMessage[], title: string, maxChars = 3000): string {
-  const body = messages.map(m => `${m.role === 'user' ? '🧑' : '🤖'} ${mdToHtml(m.text)}`).join('\n\n');
-  return `<b>Last messages · ${htmlEscape(title)}</b>\n\n${body.slice(0, maxChars)}`;
+// Blocco di storia (Fix 5): gli ultimi messaggi renderizzati come chat. Il cap è
+// per messaggi INTERI — i più vecchi vengono scartati, mai un messaggio spezzato;
+// un singolo messaggio più lungo del cap viene troncato a fine parola.
+export function renderHistory(messages: RecentMessage[], title: string, maxChars = 3800): string {
+  const header = `<b>Last messages · ${htmlEscape(title)}</b>`;
+  let remaining = maxChars - header.length - 2;
+  const body: string[] = [];
+  for (let i = messages.length - 1; i >= 0 && remaining > 0; i--) {
+    const m = messages[i];
+    const line = `${m.role === 'user' ? '🧑' : '🤖'} ${mdToHtml(m.text)}`;
+    const sep = body.length ? 2 : 0;
+    if (line.length + sep > remaining) {
+      body.push(truncateAtWord(line, remaining - sep));
+      break;
+    }
+    body.push(line);
+    remaining -= line.length + sep;
+  }
+  return `${header}\n\n${body.reverse().join('\n\n')}`;
+}
+
+// Tronca preferendo un confine di parola (se cade oltre metà del budget): mai
+// tagli a metà stringa, con un marcatore esplicito di troncamento.
+export function truncateAtWord(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max);
+  const sp = cut.lastIndexOf(' ');
+  const end = sp > max * 0.5 ? sp : max;
+  return s.slice(0, end).trimEnd() + '… (truncated)';
+}
+
+// Risposta di /stop basata sull'esito reale (spec §3.3): mai un generico
+// "Stop requested" quando non c'è nulla da fermare.
+export function stopReply(o: {
+  kind: 'headless' | 'terminal';
+  id8: string;
+  aborted?: boolean;
+  status?: string;
+  target?: string;
+}): string {
+  if (o.kind === 'headless') {
+    return o.aborted
+      ? `🛑 Turn aborted for session <b>${htmlEscape(o.id8)}</b>.`
+      : `No turn is running for session <b>${htmlEscape(o.id8)}</b> (status: ${htmlEscape(o.status ?? 'unknown')}).`;
+  }
+  return o.target
+    ? `🛑 Ctrl+C sent to <code>${htmlEscape(o.target)}</code> — generation interrupted.`
+    : 'This terminal session has no tmux pane to interrupt.';
 }
 
 export function relativeTime(iso: string): string {
