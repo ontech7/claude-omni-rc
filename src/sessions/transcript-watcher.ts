@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import type { Bus } from '../bus.js';
 import type { Config } from '../config.js';
 import type { Session, SessionStatus } from '../types.js';
@@ -84,6 +84,19 @@ export class TranscriptWatcher {
     // se quello registrato non è più il più recente, ri-risolviamo.
     if (!file || !existsSync(file) || (newest && newest !== file)) {
       if (!newest) return; // niente transcript → sessione screen-only (via /view)
+      // una sessione ancora senza transcript non deve adottare quello di una
+      // sessione PRECEDENTE: aspetta il file suo, che è più recente della
+      // creazione della sessione (altrimenti mostrerebbe storia/status altrui).
+      if (!file && s.createdAt) {
+        const after = Date.parse(s.createdAt);
+        if (!Number.isNaN(after)) {
+          try {
+            if (statSync(newest).mtimeMs < after) return;
+          } catch {
+            return;
+          }
+        }
+      }
       if (!this.isOllamaModel(transcriptModel(newest), known)) return; // non-Ollama
       file = newest;
       manager.setTranscriptFile(s.id, file);

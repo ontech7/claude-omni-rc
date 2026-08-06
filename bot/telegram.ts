@@ -830,7 +830,7 @@ export class TelegramBot {
     const s = this.deps.manager.get(sessionId);
     if (!s) return undefined;
     const file = s.transcriptFile
-      ?? resolveSessionTranscript(this.deps.config.projectsDir, s.projectDir, s.kind === 'headless' ? s.claudeSessionId : undefined);
+      ?? resolveSessionTranscript(this.deps.config.projectsDir, s.projectDir, s.kind === 'headless' ? s.claudeSessionId : undefined, Date.parse(s.createdAt));
     if (!file) return undefined;
     const msgs = readRecentMessages(file, 10);
     if (!msgs.length) return undefined;
@@ -931,8 +931,12 @@ export class TelegramBot {
           await ctx.answerCallbackQuery({ text: 'Session selected' });
           await ctx.editMessageText(sessionListText(this.deps.manager.list(), this.deps.manager.getActive()), { parse_mode: 'HTML' });
           // Fix 5: mostra la storia recente della sessione appena selezionata.
+          // Una sessione fresca non ha transcript suo → niente storia vecchia, solo
+          // una nota (prima mostrava la history della sessione precedente).
           const hist = await this.readHistory(parsed.id);
-          if (hist && this.chatId) void this.bot.api.sendMessage(this.chatId, hist, { parse_mode: 'HTML' }).catch(this.logCatch('callback send'));
+          if (this.chatId) {
+            void this.bot.api.sendMessage(this.chatId, hist ?? 'Fresh session — no history yet.', { parse_mode: 'HTML' }).catch(this.logCatch('callback send'));
+          }
           break;
         }
         case 'answer': {

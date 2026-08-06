@@ -292,4 +292,29 @@ describe('readRecentMessages / resolveSessionTranscript', () => {
     expect(resolveSessionTranscript(base, '/Users/u/proj')).toBe(join(dir, 'xyz.jsonl')); // più recente
     expect(resolveSessionTranscript(base, '/Users/u/other')).toBeUndefined();
   });
+  it('does not fall back to a PREVIOUS session transcript for a fresh session', () => {
+    const base = tmpDir();
+    const dir = join(base, mungedProjectDir('/Users/u/proj'));
+    mkdirSync(dir, { recursive: true });
+    const prev = join(dir, 'prev.jsonl');
+    writeFileSync(prev, '');
+    const sessionCreatedMs = Date.now();
+    utimesSync(prev, new Date(sessionCreatedMs - 60_000), new Date(sessionCreatedMs - 60_000));
+    // il file è più vecchio della sessione → appartiene a una sessione precedente
+    expect(resolveSessionTranscript(base, '/Users/u/proj', undefined, sessionCreatedMs)).toBeUndefined();
+    // senza guardia (param omesso) il comportamento resta quello storico
+    expect(resolveSessionTranscript(base, '/Users/u/proj', undefined)).toBe(prev);
+  });
+  it('falls back to the newest file when it was created after the session', () => {
+    const base = tmpDir();
+    const dir = join(base, mungedProjectDir('/Users/u/proj'));
+    mkdirSync(dir, { recursive: true });
+    const prev = join(dir, 'prev.jsonl');
+    writeFileSync(prev, '');
+    const own = join(dir, 'own.jsonl');
+    writeFileSync(own, '');
+    utimesSync(prev, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+    utimesSync(own, new Date(), new Date());
+    expect(resolveSessionTranscript(base, '/Users/u/proj', undefined, Date.now() - 5000)).toBe(own);
+  });
 });

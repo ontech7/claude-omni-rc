@@ -128,14 +128,27 @@ export function readRecentMessages(file: string, max = 10): RecentMessage[] {
 // Risolve il file transcript di una sessione: quello esatto per claudeSessionId
 // (le headless lo scrivono in ~/.claude/projects), altrimenti il più recente
 // per il project dir (stessa logica del TranscriptWatcher).
-export function resolveSessionTranscript(projectsDir: string, projectDir: string, claudeSessionId?: string): string | undefined {
+//
+// createdAfterMs: se il fallback "più recente" è più vecchio della creazione
+// della sessione, appartiene a una sessione PRECEDENTE — una sessione fresca non
+// ha ancora un transcript suo e non deve mostrare la storia di quella vecchia.
+export function resolveSessionTranscript(projectsDir: string, projectDir: string, claudeSessionId?: string, createdAfterMs?: number): string | undefined {
   const dir = resolveTranscriptDir(projectsDir, projectDir);
   if (!dir) return undefined;
   if (claudeSessionId) {
     const p = join(dir, `${claudeSessionId}.jsonl`);
     if (existsSync(p)) return p;
   }
-  return newestTranscriptFile(dir);
+  const newest = newestTranscriptFile(dir);
+  if (!newest) return undefined;
+  if (createdAfterMs !== undefined && !Number.isNaN(createdAfterMs)) {
+    try {
+      if (statSync(newest).mtimeMs < createdAfterMs) return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  return newest;
 }
 
 // Il modello usato dalla sessione: prima riga assistant con `model`.
