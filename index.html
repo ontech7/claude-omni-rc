@@ -271,6 +271,62 @@
   }
   .note a { color: var(--ink); text-underline-offset: 3px; }
 
+  /* ---------- session types & models ---------- */
+  .types, .models {
+    display: grid;
+    gap: 16px;
+    list-style: none;
+  }
+  .types { grid-template-columns: repeat(3, 1fr); }
+  .models { grid-template-columns: 1fr 1fr; margin-bottom: 34px; }
+  .types li, .models > div {
+    background: var(--fill);
+    border-radius: 14px;
+    padding: 20px 18px;
+  }
+  .types h3, .models h3 {
+    font-size: 15px;
+    font-weight: 500;
+    line-height: 1.4;
+    margin-bottom: 8px;
+  }
+  .types p, .models p {
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.6;
+  }
+  .types p em, .models p em {
+    font-style: normal;
+    font-weight: 500;
+    color: var(--ink);
+  }
+  .types code, .models code {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    background: rgba(0, 0, 0, 0.06);
+    border-radius: 5px;
+    padding: 1px 5px;
+  }
+  .models ul { list-style: none; margin-top: 10px; display: grid; gap: 8px; }
+  .models li {
+    position: relative;
+    padding-left: 14px;
+    color: var(--muted);
+    font-size: 13.5px;
+    line-height: 1.55;
+  }
+  .models li::before { content: "·"; position: absolute; left: 2px; color: var(--faint); }
+
+  .model-head { margin: 44px 0 16px; text-align: center; }
+  .model-head h3 { font-size: 17px; font-weight: 500; letter-spacing: -0.01em; }
+  .model-head p {
+    margin: 8px auto 0;
+    max-width: 54ch;
+    color: var(--muted);
+    font-size: 14.5px;
+    line-height: 1.6;
+  }
+
   /* ---------- footer ---------- */
   footer {
     padding: 20px 24px 26px;
@@ -307,6 +363,7 @@
   }
   @media (max-width: 700px) {
     .steps { grid-template-columns: 1fr; gap: 26px; }
+    .types, .models { grid-template-columns: 1fr; gap: 16px; }
   }
   @media (max-width: 560px) {
     .nav-links .optional { display: none; }
@@ -462,6 +519,87 @@ Tool: Bash
       Headless sessions use the provider you configure in <code>.env</code>
       (Ollama by default), and <code>/new --model &lt;name&gt;</code> picks the
       model for a single session.
+    </p>
+  </section>
+
+  <section class="section" id="session-types">
+    <header>
+      <h2>Terminal, tmux, or headless</h2>
+      <p class="lede">
+        Every session — however it starts, whatever model backs it — streams to
+        Telegram as a chat. What changes is how much you can steer it, and which
+        provider answers.
+      </p>
+    </header>
+
+    <ul class="types">
+      <li>
+        <h3>📟 In a terminal, no tmux</h3>
+        <p><em>Stream-only.</em> Start <code>claude</code> normally and the
+        <code>SessionStart</code> hook registers it: its transcript mirrors to
+        Telegram as a chat. But outside tmux it's read-only — you can follow it,
+        not steer it (no input, no <code>/view</code>). The hook reminds you to
+        restart it with <code>omni-rc</code> for full control.</p>
+      </li>
+      <li>
+        <h3>🖥️ Inside tmux — <code>omni-rc &lt;name&gt;</code></h3>
+        <p><em>Full remote control.</em> The recommended way to run a session
+        you'll keep using. <code>omni-rc</code> opens a <code>claude:&lt;name&gt;</code>
+        tmux session the daemon tracks: messages stream as a chat, your replies
+        are injected 1:1, permissions arrive as ✓/✗ buttons, <code>❓</code>
+        questions answer by tapping an option, and <code>/view</code> grabs the
+        raw screen.</p>
+      </li>
+      <li>
+        <h3>🤖 Headless — <code>/new</code> from Telegram</h3>
+        <p><em>No terminal at all.</em> The daemon owns the session and drives it
+        through the Claude Agent SDK. Automode by default (every permission
+        auto-approved); <code>/new --standard</code> turns on approve/reject
+        buttons. It runs on the same machine, in the background.</p>
+      </li>
+    </ul>
+
+    <div class="model-head">
+      <h3>Any model that runs through the Claude Code CLI</h3>
+      <p>Ollama, a proxy, or Anthropic — one binary, same daemon. The provider follows the model.</p>
+    </div>
+
+    <div class="models">
+      <div>
+        <h3>Non-Anthropic — Ollama by default</h3>
+        <p>Local models (and local proxies) need no Anthropic account.</p>
+        <ul>
+          <li><code>omni-rc my-project</code> — no <code>-m</code>: uses <code>DEFAULT_MODEL</code> from <code>.env</code>, Ollama by default</li>
+          <li><code>/new &lt;prompt&gt;</code> — headless uses the <code>.env</code> provider, Ollama by default</li>
+          <li>per-session: <code>omni-rc … -m deepseek-v4-flash:0731-cloud</code> or <code>/new --model …</code></li>
+        </ul>
+      </div>
+      <div>
+        <h3>Anthropic</h3>
+        <p>Anthropic models — <code>claude-*</code> — use your usual Claude Code
+        auth in terminal sessions, or the provider set in <code>.env</code> for
+        headless.</p>
+        <ul>
+          <li><code>omni-rc my-project -m claude-opus-5</code> — a <code>claude-*</code> model means Anthropic</li>
+          <li>headless on Anthropic: set <code>ANTHROPIC_BASE_URL</code> (+ <code>ANTHROPIC_AUTH_TOKEN</code> or <code>ANTHROPIC_API_KEY</code>) in <code>.env</code></li>
+          <li>a proxy works the same way, via <code>ANTHROPIC_BASE_URL</code></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="term">
+      <div class="term-bar"><i></i><i></i><i></i><span>Terminal</span></div>
+      <pre><span class="prompt">$</span> omni-rc my-project                  <span class="dim"># Ollama — DEFAULT_MODEL</span>
+<span class="prompt">$</span> omni-rc my-project -m deepseek-v4-flash:0731-cloud
+<span class="prompt">$</span> omni-rc my-project -m claude-opus-5 <span class="dim"># Anthropic</span>
+<span class="prompt">$</span> omni-rc -l                            <span class="dim"># list claude:* sessions</span></pre>
+    </div>
+
+    <p class="note">
+      The rule: a model starting with <code>claude-</code> runs on Anthropic;
+      any other model runs on Ollama; an explicit <code>ANTHROPIC_BASE_URL</code>
+      in <code>.env</code> (different from Ollama) overrides both. Terminal and
+      headless sessions share the same provider logic.
     </p>
   </section>
 
