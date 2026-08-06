@@ -18,6 +18,7 @@ export class OllamaClient {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ model }),
+      signal: AbortSignal.timeout(10_000), // Ollama irraggiungibile non deve stallare
     });
     if (!res.ok) throw new Error(`Ollama /api/show ${res.status}`);
     const data = (await res.json()) as ShowResponse;
@@ -33,6 +34,7 @@ export class OllamaClient {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ model }),
+        signal: AbortSignal.timeout(10_000), // Ollama irraggiungibile non deve stallare
       });
       if (!res.ok) return undefined;
       const data = (await res.json()) as { model_info?: Record<string, unknown> };
@@ -48,7 +50,9 @@ export class OllamaClient {
   // Nomi dei modelli locali (`ollama list`): usati per distinguere le sessioni
   // Ollama da quelle Anthropic-hosted nel TranscriptWatcher.
   async listModels(): Promise<Set<string>> {
-    const res = await this.fetchImpl(`${this.deps.baseUrl}/api/tags`);
+    const res = await this.fetchImpl(`${this.deps.baseUrl}/api/tags`, {
+      signal: AbortSignal.timeout(10_000), // Ollama irraggiungibile non deve stallare
+    });
     if (!res.ok) throw new Error(`Ollama /api/tags ${res.status}`);
     const data = (await res.json()) as TagsResponse;
     const out = new Set<string>();

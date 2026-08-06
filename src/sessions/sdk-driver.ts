@@ -41,9 +41,10 @@ export class SdkDriver {
     this.aborters.set(sessionId, ac);
     try {
       const model = session.model ?? config.defaultModel;
+      // /stop durante la finestra di modelContext: l'abort è già scattato prima che
+      // query() attacchi il listener → va onorato qui (e dopo la fetch), o si perderebbe.
+      if (ac.signal.aborted) throw new DOMException('aborted', 'AbortError');
       const ctx = await this.deps.ollama.modelContext(model);
-      // /stop durante la finestra di modelContext: l'abort è già scattato prima
-      // che query() attacchi il listener → va onorato qui, o si perderebbe.
       if (ac.signal.aborted) throw new DOMException('aborted', 'AbortError');
       // L'SDK spawna `claude --model <modello>` con l'ambiente del daemon, che
       // non ha le env Ollama → il CLI fallirebbe. Replica l'ambiente che

@@ -50,4 +50,11 @@ describe('OllamaClient', () => {
     const client = new OllamaClient({ baseUrl: 'http://127.0.0.1:11434', fetchImpl });
     await expect(client.modelContext('m')).resolves.toBeUndefined();
   });
+  it('bounds the request with an AbortSignal timeout', async () => {
+    let captured: RequestInit | undefined;
+    const fetchImpl: any = async (_url: string, init?: RequestInit) => { captured = init; return new Response(JSON.stringify({ capabilities: ['vision'] })); };
+    const client = new OllamaClient({ baseUrl: 'http://127.0.0.1:11434', fetchImpl });
+    await client.hasVision('m');
+    expect(captured?.signal).toBeInstanceOf(AbortSignal);
+  });
 });
