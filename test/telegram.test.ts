@@ -535,10 +535,23 @@ describe('TypingIndicator', () => {
 describe('summarizeTool', () => {
   it('identifies every tool call with the gear, then the key field', () => {
     expect(summarizeTool('Bash', { command: 'npm test' })).toBe('⚙️ npm test');
-    expect(summarizeTool('Read', { file_path: 'src/foo.ts' })).toBe('⚙️ src/foo.ts');
-    expect(summarizeTool('Edit', { file_path: 'src/foo.ts' })).toBe('⚙️ src/foo.ts');
     expect(summarizeTool('WebFetch', { url: 'https://x.com' })).toBe('⚙️ https://x.com');
     expect(summarizeTool('Grep', { pattern: 'TODO' })).toBe('⚙️ TODO');
+  });
+  it('prefixes Read/Write/Edit with a verb — same path, different action', () => {
+    expect(summarizeTool('Read', { file_path: 'src/foo.ts' })).toBe('⚙️ Read src/foo.ts');
+    expect(summarizeTool('Write', { file_path: 'src/foo.ts' })).toBe('⚙️ Write src/foo.ts');
+    expect(summarizeTool('Edit', { file_path: 'src/foo.ts' })).toBe('⚙️ Edit src/foo.ts');
+    expect(summarizeTool('MultiEdit', { file_path: 'src/foo.ts' })).toBe('⚙️ Edit src/foo.ts');
+    expect(summarizeTool('NotebookEdit', { notebook_path: 'nb.ipynb' })).toBe('⚙️ Edit nb.ipynb');
+  });
+  it('summarizes Task (sub-agent) with its description', () => {
+    expect(summarizeTool('Task', { description: 'Fix flaky tests', prompt: 'x'.repeat(500) })).toBe('⚙️ Agent: Fix flaky tests');
+    expect(summarizeTool('Task', { prompt: 'x'.repeat(500) })).toBe('⚙️ Agent');
+  });
+  it('summarizes TodoWrite/TodoRead without dumping the todo list', () => {
+    expect(summarizeTool('TodoWrite', { todos: [{ content: 'a' }] })).toBe('⚙️ Updates the task list');
+    expect(summarizeTool('TodoRead', {})).toBe('⚙️ Updates the task list');
   });
   it('falls back to the tool name and the first string value', () => {
     expect(summarizeTool('SomeTool', { a: 1, b: 'hello' })).toBe('⚙️ SomeTool — hello');

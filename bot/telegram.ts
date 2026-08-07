@@ -513,13 +513,21 @@ export function summarizeTool(toolName: string, input: Record<string, unknown>):
 
   const name = toolName.toLowerCase();
   if (name === 'bash') return `⚙️ ${trunc(pick('command'))}`;
-  if (name === 'read' || name === 'readfile') return `⚙️ ${trunc(pick('file_path', 'path'))}`;
-  if (name === 'write' || name === 'writefile') return `⚙️ ${trunc(pick('file_path', 'path'))}`;
-  if (name === 'edit') return `⚙️ ${trunc(pick('file_path', 'path'))}`;
+  // Read/Write/Edit senza verbo sono indistinguibili (stesso path, stesso
+  // formato) — il verbo è quello che dà contesto quando il fallback scatta.
+  if (name === 'read' || name === 'readfile') return `⚙️ Read ${trunc(pick('file_path', 'path'))}`;
+  if (name === 'write' || name === 'writefile') return `⚙️ Write ${trunc(pick('file_path', 'path'))}`;
+  if (name === 'edit' || name === 'multiedit') return `⚙️ Edit ${trunc(pick('file_path', 'path'))}`;
+  if (name === 'notebookedit') return `⚙️ Edit ${trunc(pick('notebook_path', 'path'))}`;
   if (name === 'glob' || name === 'grep') return `⚙️ ${trunc(pick('pattern', 'query'))}`;
   if (name === 'webfetch') return `⚙️ ${trunc(pick('url'))}`;
   if (name === 'websearch') return `⚙️ ${trunc(pick('query'))}`;
   if (name === 'taskcreate' || name === 'taskupdate') return `⚙️ ${trunc(pick('subject'))}`;
+  if (name === 'task') {
+    const desc = s(input['description']);
+    return desc.trim() ? `⚙️ Agent: ${trunc(desc)}` : '⚙️ Agent';
+  }
+  if (name === 'todowrite' || name === 'todoread') return '⚙️ Updates the task list';
   const v = first();
   return v ? `⚙️ ${toolName} — ${trunc(v)}` : `⚙️ ${toolName}`;
 }
