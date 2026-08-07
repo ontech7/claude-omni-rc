@@ -14,12 +14,13 @@ import { TmuxClient } from './sessions/tmux-inject.js';
 import { Inbox } from './input.js';
 import { startApi } from './api.js';
 import { TelegramBot } from '../bot/telegram.js';
+import { checkForUpdate, markNotified, CURRENT_VERSION, RELEASES_URL, CHECK_INTERVAL_MS } from './update.js';
 
 export interface Daemon { start(): Promise<void>; stop(): Promise<void>; }
 
 export function createDaemon(
   config: Config,
-  overrides: { bot?: Pick<TelegramBot, 'start' | 'stop'> } = {},
+  overrides: { bot?: Pick<TelegramBot, 'start' | 'stop' | 'notify'> } = {},
 ): Daemon {
   const state = new StateStore(join(config.stateDir, 'state.json'));
   const bus = new Bus();
@@ -27,7 +28,7 @@ export function createDaemon(
   // Il bot nasce dopo il flusso permessi (gli serve), ma il flusso deve poter
   // chiedere al bot se esiste una chat di notifica → riferimento tardivo.
   // Con un bot iniettato dai test (senza canNotify) si assume che possa notificare.
-  let botRef: Pick<TelegramBot, 'start' | 'stop'> & { canNotify?: () => boolean };
+  let botRef: Pick<TelegramBot, 'start' | 'stop' | 'notify'> & { canNotify?: () => boolean };
   const permissionFlow = new PermissionFlow({
     bus, config,
     setStatus: (id, s) => manager.setStatus(id, s),
@@ -51,6 +52,19 @@ export function createDaemon(
   reaper.unref();
   const api = startApi(config.apiPort, { manager, permissionFlow, config });
 
+  // Check versione su GitHub (vedi update.ts): al riavvio e poi ogni 24h. Log +
+  // notifica Telegram, una volta per versione — mai bloccante sull'avvio.
+  const updateStatePath = join(config.stateDir, 'update-check.json');
+  async function runUpdateCheck(): Promise<void> {
+    const latest = await checkForUpdate({ statePath: updateStatePath, disabled: config.noUpdateCheck });
+    if (!latest) return;
+    const message = `⬆️ New version available: claude-omni-rc ${latest} (you have ${CURRENT_VERSION}) — ${RELEASES_URL}`;
+    console.error(message);
+    bot.notify(message);
+    markNotified(updateStatePath, latest);
+  }
+  let updateTimer: NodeJS.Timeout | undefined;
+
   return {
     async start() {
       // Prima sincronizzazione dei terminali PRIMA che il transcript-watcher
@@ -60,9 +74,13 @@ export function createDaemon(
       watcher.start(); // gated su armed
       transcriptWatcher.start();
       await bot.start();
+      void runUpdateCheck();
+      updateTimer = setInterval(() => void runUpdateCheck(), CHECK_INTERVAL_MS);
+      updateTimer.unref();
     },
     async stop() {
       clearInterval(reaper);
+      if (updateTimer) clearInterval(updateTimer);
       watcher.stop();
       transcriptWatcher.stop();
       await api.close();

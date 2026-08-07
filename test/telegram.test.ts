@@ -1,6 +1,20 @@
 import { describe, it, expect, vi } from 'vitest';
-import { resolveHeadlessProjectDir, isPrivateChat, splitHtmlMessage, parseCommand, parseNewFlags, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToInjection, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard } from '../bot/telegram.js';
+import { resolveHeadlessProjectDir, isPrivateChat, splitHtmlMessage, parseCommand, parseNewFlags, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToInjection, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt } from '../bot/telegram.js';
 import type { ToolBurstSink } from '../bot/telegram.js';
+
+describe('formatPct / formatResetAt', () => {
+  it('formats a rounded percentage, or an em-dash when absent', () => {
+    expect(formatPct(42.5)).toBe('43%');
+    expect(formatPct(0)).toBe('0%');
+    expect(formatPct(null)).toBe('—');
+    expect(formatPct(undefined)).toBe('—');
+  });
+  it('formats an ISO reset timestamp as HH:MM DD/MM, or an em-dash when absent/invalid', () => {
+    expect(formatResetAt(null)).toBe('—');
+    expect(formatResetAt('not-a-date')).toBe('—');
+    expect(formatResetAt('2026-08-07T16:30:00Z')).toMatch(/^\d{2}:\d{2} \d{2}\/\d{2}$/);
+  });
+});
 
 describe('parseCommand', () => {
   it('classifies control commands', () => {

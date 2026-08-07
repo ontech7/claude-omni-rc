@@ -9,11 +9,13 @@ import type { PermissionFlow } from '../src/permissions.js';
 import type { DialogFlow } from '../src/dialogs.js';
 import type { SdkDriver } from '../src/sessions/sdk-driver.js';
 import type { TmuxClient } from '../src/sessions/tmux-inject.js';
+import { createShExec } from '../src/sessions/tmux-inject.js';
 import type { OllamaClient } from '../src/ollama.js';
 import type { Inbox } from '../src/input.js';
 import type { Session, PermissionRequest, PromptQuestion, PromptAnswer, UserDialog } from '../src/types.js';
 import type { RecentMessage } from '../src/sessions/transcript.js';
 import { readRecentMessages, resolveSessionTranscript } from '../src/sessions/transcript.js';
+import { isOllamaProvider, fetchOllamaUsage, fetchAnthropicUsage } from '../src/usage.js';
 
 // ---------- pure helpers ----------
 
@@ -123,6 +125,19 @@ export function parseCallbackData(data: string): CallbackData {
 // dinamico prima di interpolarlo nei template HTML.
 export function htmlEscape(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+export function formatPct(value: number | null | undefined): string {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '—';
+  return `${Math.round(value)}%`;
+}
+
+export function formatResetAt(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())} ${pad(d.getDate())}/${pad(d.getMonth() + 1)}`;
 }
 
 // Rimuove le sequenze ANSI (colori, movimento cursore) dal contenuto del pane.
@@ -760,6 +775,7 @@ export class TelegramBot {
     if (!this.chatId) return Promise.resolve();
     return this.bot.api.sendChatAction(this.chatId, 'typing');
   });
+  private shExec = createShExec();
 
   constructor(private deps: BotDeps) {
     // Ripristina la chat di notifica dallo stato: dopo un riavvio del daemon le
@@ -788,6 +804,7 @@ export class TelegramBot {
       { command: 'attach', description: 'Attach a tmux terminal session' },
       { command: 'history', description: 'Show the last messages of a session' },
       { command: 'delete', description: 'Delete a session' },
+      { command: 'usage', description: 'Check provider usage (5h / weekly)' },
       { command: 'help', description: 'Show all commands' },
     ]).catch(this.logCatch('setMyCommands'));
     await this.bot.start({ drop_pending_updates: true });
@@ -817,7 +834,8 @@ export class TelegramBot {
     return lastId;
   }
 
-  private notify(text: string): void {
+  // Pubblico: usato anche da daemon.ts per l'avviso "nuova versione disponibile".
+  notify(text: string): void {
     const chatId = this.chatId;
     if (!chatId) return;
     this.track(this.sendChunked(chatId, text), 'notify');
@@ -963,7 +981,7 @@ export class TelegramBot {
     const bot = this.bot;
     bot.command('start', ctx => this.safe(ctx, 'start', () => this.onStart(ctx)));
     bot.command('help', ctx => this.safe(ctx, 'help', async () => {
-      if (this.authorize(ctx)) await this.send(ctx, 'Commands: /rc [on|off|status] (no arg toggles) · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /help');
+      if (this.authorize(ctx)) await this.send(ctx, 'Commands: /rc [on|off|status] (no arg toggles) · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /usage · /help');
     }));
     bot.command('rc', ctx => this.safe(ctx, 'rc', () => this.onRc(ctx)));
     bot.command('sessions', ctx => this.safe(ctx, 'sessions', () => this.onSessions(ctx)));
@@ -974,6 +992,7 @@ export class TelegramBot {
     bot.command('attach', ctx => this.safe(ctx, 'attach', () => this.onAttach(ctx)));
     bot.command('history', ctx => this.safe(ctx, 'history', () => this.onHistory(ctx)));
     bot.command('delete', ctx => this.safe(ctx, 'delete', () => this.onDelete(ctx)));
+    bot.command('usage', ctx => this.safe(ctx, 'usage', () => this.onUsage(ctx)));
     bot.on('callback_query:data', ctx => this.safe(ctx, 'callback', () => this.onCallback(ctx)));
     bot.on('message:text', ctx => this.safe(ctx, 'message', () => this.onMessage(ctx)));
     bot.on('message:photo', ctx => this.safe(ctx, 'photo', () => this.onPhoto(ctx)));
@@ -1119,6 +1138,63 @@ export class TelegramBot {
     await this.send(ctx, s
       ? `Active session: <b>${s.id.slice(0, 8)}</b> [${s.kind}] — ${s.status}`
       : 'No active session. Create one with /new.');
+  }
+
+  // Ollama Cloud (via ollama-usage) o Anthropic (via l'API sperimentale della
+  // Agent SDK) a seconda del provider configurato — stesso criterio usato da
+  // sdk-driver.ts per le sessioni headless.
+  private async onUsage(ctx: Context): Promise<void> {
+    if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
+    if (isOllamaProvider(this.deps.config)) {
+      await this.sendOllamaUsage(ctx);
+    } else {
+      await this.sendAnthropicUsage(ctx);
+    }
+  }
+
+  private async sendOllamaUsage(ctx: Context): Promise<void> {
+    const result = await fetchOllamaUsage(this.shExec);
+    switch (result.kind) {
+      case 'not-installed':
+        await this.send(ctx, '🦙 <code>ollama-usage</code> isn\'t installed on the daemon\'s machine. Install it:\n<code>curl -fsSL https://ontech7.github.io/ollama-usage/install.sh | sh</code>');
+        return;
+      case 'needs-auth':
+        await this.send(ctx, '🦙 No Ollama session. Run <code>ollama-usage auth</code> on the daemon\'s machine.');
+        return;
+      case 'error':
+        await this.send(ctx, `⚠️ <code>ollama-usage</code> failed: ${htmlEscape(result.message)}`);
+        return;
+      case 'ok': {
+        const five = result.windows['5h'];
+        const weekly = result.windows.weekly;
+        const lines = ['🦙 <b>Ollama Cloud usage</b>'];
+        if (five) lines.push(`5h: ${formatPct(five.pct_used)} (resets ${formatResetAt(five.reset_at)})`);
+        if (weekly) lines.push(`weekly: ${formatPct(weekly.pct_used)} (resets ${formatResetAt(weekly.reset_at)})`);
+        if (!five && !weekly) lines.push('No usage windows reported.');
+        await this.send(ctx, lines.join('\n'));
+        return;
+      }
+    }
+  }
+
+  private async sendAnthropicUsage(ctx: Context): Promise<void> {
+    const result = await fetchAnthropicUsage();
+    switch (result.kind) {
+      case 'unavailable':
+        await this.send(ctx, '🤖 Rate-limit windows aren\'t available for this auth method (API key / Bedrock / Vertex have no plan usage windows).');
+        return;
+      case 'error':
+        await this.send(ctx, `⚠️ Couldn\'t fetch Anthropic usage: ${htmlEscape(result.message)}`);
+        return;
+      case 'ok': {
+        const lines = ['🤖 <b>Anthropic usage</b>'];
+        if (result.fiveHour) lines.push(`5h: ${formatPct(result.fiveHour.utilization)} (resets ${formatResetAt(result.fiveHour.resetsAt)})`);
+        if (result.sevenDay) lines.push(`7d: ${formatPct(result.sevenDay.utilization)} (resets ${formatResetAt(result.sevenDay.resetsAt)})`);
+        if (!result.fiveHour && !result.sevenDay) lines.push('No usage windows reported.');
+        await this.send(ctx, lines.join('\n'));
+        return;
+      }
+    }
   }
 
   private async onAttach(ctx: Context): Promise<void> {

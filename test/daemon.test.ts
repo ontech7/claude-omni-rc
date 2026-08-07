@@ -14,8 +14,9 @@ describe('createDaemon', () => {
       TELEGRAM_BOT_TOKEN: 'test-token',
       ARMED_ON_START: 'true',
       WORKSPACE_DIRS: '/tmp',
+      CLAUDE_OMNI_RC_NO_UPDATE_CHECK: '1', // niente fetch reale a GitHub durante i test
     });
-    const bot = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+    const bot = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}), notify: vi.fn() };
     const daemon = createDaemon(config, { bot: bot as any });
     await daemon.start();
     expect(bot.start).toHaveBeenCalled();
@@ -29,8 +30,8 @@ describe('createDaemon', () => {
 
   it('starts disarmed by default (no mirror, no relay)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'orc-daemon2-'));
-    const config = loadConfig({ STATE_DIR: dir, API_PORT: '0', TELEGRAM_BOT_TOKEN: 't' });
-    const bot = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+    const config = loadConfig({ STATE_DIR: dir, API_PORT: '0', TELEGRAM_BOT_TOKEN: 't', CLAUDE_OMNI_RC_NO_UPDATE_CHECK: '1' });
+    const bot = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}), notify: vi.fn() };
     const daemon = createDaemon(config, { bot: bot as any });
     await daemon.start();
     await daemon.stop();

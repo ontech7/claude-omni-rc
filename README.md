@@ -139,6 +139,7 @@ reattached.
 | `/status` | the active session's status |
 | `/history [id]` | last messages of a session |
 | `/delete [id]` | delete a session (headless: stops it; terminal: untracks only) |
+| `/usage` | 5h / weekly usage for the configured provider |
 | `/help` | list the commands |
 
 Plain text goes to the active session — a new turn for headless sessions, typed
@@ -227,6 +228,22 @@ on the machine. See [SECURITY.md](SECURITY.md) for what that implies.
 
 </details>
 
+### Usage windows (`/usage`)
+
+`/usage` checks the 5-hour and weekly windows for whichever provider is
+currently configured — the same detection `omni-rc`/headless sessions use
+(`ANTHROPIC_BASE_URL` unset → Ollama; set → that provider):
+
+- **Anthropic** (a claude.ai Pro/Max/Team/Enterprise session): read via the
+  Agent SDK's experimental `/usage` control API — no extra install needed. API
+  key / Bedrock / Vertex auth has no plan rate limits, so the bot says so
+  instead of a number.
+- **Non-Anthropic** (Ollama, or any other `ANTHROPIC_BASE_URL`): requires
+  [`ollama-usage`](https://github.com/ontech7/ollama-usage) installed and
+  authenticated (`ollama-usage auth`) **on the machine running the daemon** —
+  `/usage` shells out to `ollama-usage --json`. If it's missing, the bot
+  replies with the install command.
+
 ### Media
 
 Files and photos are saved to `~/.claude-omni-rc/inbox/` and forwarded to the
@@ -278,9 +295,22 @@ and one authorization method — plus `WORKSPACE_DIRS` if you want `/new`.
 | `IDLE_GRACE_MS` | `3000` | how long a session must be quiet to count as idle |
 | `POLL_INTERVAL_MS` | `500` | tmux discovery polling interval |
 | `CWD_REFRESH_MS` | `10000` | how often to re-check a session's real cwd (costs a `ps` + `lsof`) |
+| `CLAUDE_OMNI_RC_NO_UPDATE_CHECK` | unset | set to disable the GitHub release check below |
 
 > `~/.claude-omni-rc/logs/daemon.log` has no automatic rotation — that's left to
 > the OS (`newsyslog`) or to you.
+
+## Update notifications
+
+The daemon checks GitHub once a day (on start, then every 24h) for a newer
+release. When one exists, it logs a one-line notice to `daemon.log` **and**
+sends it to your bound Telegram chat — at most once per version:
+
+```
+⬆️ New version available: claude-omni-rc 0.3.0 (you have 0.2.0) — https://github.com/ontech7/claude-omni-rc/releases
+```
+
+Disable it with `CLAUDE_OMNI_RC_NO_UPDATE_CHECK=1` in `.env`.
 
 ## Troubleshooting
 

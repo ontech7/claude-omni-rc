@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **`/usage`**: 5h/weekly usage window for whichever provider is configured.
+  Anthropic is read natively via the Agent SDK's experimental `/usage` control
+  API; any other provider (Ollama, a custom proxy) shells out to
+  [`ollama-usage`](https://github.com/ontech7/ollama-usage), which must be
+  installed and authenticated on the daemon's machine.
+- **Update check**: the daemon checks GitHub once a day for a newer release
+  and, at most once per version, logs and sends a Telegram notice to the bound
+  chat. Disable with `CLAUDE_OMNI_RC_NO_UPDATE_CHECK=1`.
+
 ## [0.2.0] - 2026-08-07
 
 ### Hardening pass (breaking defaults)

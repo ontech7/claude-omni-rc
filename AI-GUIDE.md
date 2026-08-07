@@ -61,6 +61,7 @@ npm install
 | see the active session's raw screen | from Telegram: `/view` |
 | send a file | the bot saves it to `~/.claude-omni-rc/inbox/` and forwards the path |
 | check what sessions exist | from Telegram: `/sessions` or `/status` |
+| check provider usage (5h / weekly) | from Telegram: `/usage` — Anthropic reads it via the Agent SDK directly; any other provider (Ollama, a custom proxy) shells out to `ollama-usage`, which must be installed and authenticated on the daemon's machine |
 | run it without launchd | `npm run dev` in the repo (foreground) |
 | uninstall claude-omni-rc | `./install.sh --uninstall` (asks about the Ollama model, then removes launchd, the hooks, and on confirmation the state dir; `.env` is kept) |
 
@@ -85,6 +86,8 @@ npm install
 - `/status` — active session status.
 - `/history [id]` — show the last messages of a session.
 - `/delete [id]` — delete a session (with an inline confirm).
+- `/usage` — 5h/weekly usage window for the configured provider (Anthropic
+  natively; any other provider via `ollama-usage`, which must be installed).
 - `/help` — list commands.
 
 Plain messages go to the active session: headless sessions receive them as a

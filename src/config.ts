@@ -25,6 +25,8 @@ export interface Config {
   // tracciata. Costa `ps` + `lsof`, quindi non va fatto a ogni poll: serve solo
   // a seguire una sessione che si sposta in un git worktree.
   cwdRefreshMs: number;
+  // Disabilita il check periodico di nuove versioni su GitHub (vedi src/update.ts).
+  noUpdateCheck: boolean;
 }
 
 function expandHome(p: string): string {
@@ -61,5 +63,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     idleGraceMs: parseNum(env, 'IDLE_GRACE_MS', 3000),
     pollIntervalMs: parseNum(env, 'POLL_INTERVAL_MS', 500),
     cwdRefreshMs: parseNum(env, 'CWD_REFRESH_MS', 10_000),
+    noUpdateCheck: Boolean(env.CLAUDE_OMNI_RC_NO_UPDATE_CHECK),
   };
 }
