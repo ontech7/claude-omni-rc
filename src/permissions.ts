@@ -19,7 +19,7 @@ export interface PermissionFlowDeps {
 
 interface Pending {
   resolve: (d: PermissionDecision) => void;
-  timer: NodeJS.Timeout;
+  timer?: NodeJS.Timeout; // parte con arm(), non alla creazione — vedi request()
   sessionId: string;
   toolName: string;
   input: Record<string, unknown>;
@@ -48,15 +48,18 @@ export class PermissionFlow {
     }
     return new Promise<PermissionDecision>((resolve) => {
       const id = randomUUID();
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        resolve({ behavior: 'deny', message: `Timeout ${this.deps.config.permissionTimeoutSeconds}s` });
-      }, this.deps.config.permissionTimeoutSeconds * 1000);
-      this.pending.set(id, { resolve, timer, sessionId, toolName, input });
+      // Il timeout NON parte qui: se il bot tiene la richiesta in coda (sessione
+      // non selezionata in Telegram) non deve scadere prima che l'utente l'abbia
+      // anche solo vista — parte con arm(), chiamato quando la richiesta viene
+      // davvero mostrata.
+      this.pending.set(id, { resolve, sessionId, toolName, input });
       if (signal) {
         signal.addEventListener('abort', () => {
-          clearTimeout(timer);
-          if (this.pending.delete(id)) resolve({ behavior: 'deny', message: 'Interrupted' });
+          const p = this.pending.get(id);
+          if (!p) return;
+          if (p.timer) clearTimeout(p.timer);
+          this.pending.delete(id);
+          resolve({ behavior: 'deny', message: 'Interrupted' });
         });
       }
       this.deps.setStatus?.(sessionId, 'waiting-permission');
@@ -65,6 +68,20 @@ export class PermissionFlow {
       };
       this.deps.bus.emit({ type: 'session.permission', permission: req });
     });
+  }
+
+  // Fa partire il countdown di scadenza: va chiamato quando la richiesta viene
+  // EFFETTIVAMENTE mostrata all'utente (subito se la sessione è quella attiva in
+  // Telegram, più tardi se era in coda) — mai alla creazione, altrimenti una
+  // richiesta tenuta in coda scadrebbe prima che l'utente la veda mai. No-op se
+  // già armata o già risolta.
+  arm(id: string): void {
+    const p = this.pending.get(id);
+    if (!p || p.timer) return;
+    p.timer = setTimeout(() => {
+      this.pending.delete(id);
+      p.resolve({ behavior: 'deny', message: `Timeout ${this.deps.config.permissionTimeoutSeconds}s` });
+    }, this.deps.config.permissionTimeoutSeconds * 1000);
   }
 
   // Tool, input e sessione della richiesta pendente (per ExitPlanMode: il piano
@@ -79,7 +96,7 @@ export class PermissionFlow {
   approve(id: string, updatedInput?: Record<string, unknown>): boolean {
     const p = this.pending.get(id);
     if (!p) return false;
-    clearTimeout(p.timer);
+    if (p.timer) clearTimeout(p.timer);
     this.pending.delete(id);
     this.deps.setStatus?.(p.sessionId, 'running');
     p.resolve(updatedInput ? { behavior: 'allow', updatedInput } : { behavior: 'allow' });
@@ -89,7 +106,7 @@ export class PermissionFlow {
   deny(id: string, message = 'Rejected by the user'): boolean {
     const p = this.pending.get(id);
     if (!p) return false;
-    clearTimeout(p.timer);
+    if (p.timer) clearTimeout(p.timer);
     this.pending.delete(id);
     this.deps.setStatus?.(p.sessionId, 'running');
     p.resolve({ behavior: 'deny', message });
@@ -99,7 +116,7 @@ export class PermissionFlow {
   cancelAllForSession(sessionId: string): void {
     for (const [id, p] of this.pending) {
       if (p.sessionId !== sessionId) continue;
-      clearTimeout(p.timer);
+      if (p.timer) clearTimeout(p.timer);
       this.pending.delete(id);
       p.resolve({ behavior: 'deny', message: 'Session stopped' });
     }

@@ -37,12 +37,25 @@ describe('DialogFlow', () => {
     await expect(p).resolves.toEqual({ behavior: 'cancelled' });
     expect(flow.cancel(dlg.id)).toBe(false); // already resolved
   });
-  it('times out to cancelled', async () => {
+  it('times out to cancelled once armed', async () => {
     vi.useFakeTimers();
     try {
       const { flow, onDialog } = makeFlow(120);
       const p = flow.request('s1', { dialogKind: 'refusal_fallback_prompt', payload: {} });
-      onDialog.mock.calls[0][0].dialog;
+      const dlg = onDialog.mock.calls[0][0].dialog;
+      flow.arm(dlg.id);
+      vi.advanceTimersByTime(120_000);
+      await expect(p).resolves.toEqual({ behavior: 'cancelled' });
+    } finally { vi.useRealTimers(); }
+  });
+  it('does not time out while queued (unarmed) — arming is what starts the clock', async () => {
+    vi.useFakeTimers();
+    try {
+      const { flow, onDialog } = makeFlow(120);
+      const p = flow.request('s1', { dialogKind: 'refusal_fallback_prompt', payload: {} });
+      const dlg = onDialog.mock.calls[0][0].dialog;
+      vi.advanceTimersByTime(10 * 60_000); // ben oltre il timeout, ma mai armato
+      flow.arm(dlg.id);
       vi.advanceTimersByTime(120_000);
       await expect(p).resolves.toEqual({ behavior: 'cancelled' });
     } finally { vi.useRealTimers(); }

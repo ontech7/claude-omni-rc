@@ -769,6 +769,11 @@ export class TelegramBot {
   // Permessi ExitPlanMode in attesa del testo libero per "Edit plan":
   // sessionId → id della richiesta di permesso.
   private pendingPlanEdits = new Map<string, string>();
+  // Permessi/dialoghi arrivati per una sessione NON selezionata: restano in coda
+  // (niente notifica, niente countdown — vedi PermissionFlow.arm/DialogFlow.arm)
+  // finché l'utente non seleziona quella sessione (sess:select in onCallback).
+  private pendingPermissions = new Map<string, PermissionRequest[]>();
+  private pendingDialogs = new Map<string, UserDialog[]>();
   // Summary via LLM per le tool call: una coda per sessione che bufferizza i
   // risultati (le chiamate partono in parallelo) e li pusha in ordine. `reset()`
   // a fine turno (result/errore/domanda/permesso/testo lungo) scarta le summary
@@ -1043,6 +1048,8 @@ export class TelegramBot {
       this.deps.permissionFlow.cancelAllForSession(s.id);
       this.deps.dialogFlow.cancelAllForSession(s.id);
       this.pendingPlanEdits.delete(s.id);
+      this.pendingPermissions.delete(s.id);
+      this.pendingDialogs.delete(s.id);
       this.deps.sdk.stop(s.id); // spegne anche i turni headless in corso
     }
     this.deps.manager.persist();
@@ -1270,6 +1277,8 @@ export class TelegramBot {
     this.deps.permissionFlow.cancelAllForSession(id);
     this.deps.dialogFlow.cancelAllForSession(id);
     this.pendingPlanEdits.delete(id);
+    this.pendingPermissions.delete(id); // niente notifiche fantasma per una sessione sparita
+    this.pendingDialogs.delete(id);
     this.deps.sdk.stop(id); // abort del turno headless in corso
     const flow = this.questionFlows.get(id);
     if (flow) this.deleteFlow(flow); // niente domande pendenti per una sessione sparita
@@ -1310,7 +1319,11 @@ export class TelegramBot {
     }
     flow.sets.push(questions);
     flow.answers.push(questions.map(() => undefined));
-    if (flow.setIndex === 0 && flow.qIndex === 0 && !flow.messageId) {
+    // La prima domanda di un flow nuovo si mostra subito solo se questa
+    // sessione è quella selezionata — altrimenti resta in pending: niente
+    // interruzioni per sessioni che non stai guardando (vedi sess:select per
+    // il recupero quando l'utente ci passa sopra).
+    if (sessionId === this.deps.manager.getActive() && flow.setIndex === 0 && flow.qIndex === 0 && !flow.messageId) {
       await this.showQuestion(flow);
     }
   }
@@ -1538,10 +1551,13 @@ export class TelegramBot {
   // ---------- dialoghi bloccanti (request_user_dialog) ----------
 
   // Un dialogo arriva dal driver (headless): lo si mostra in chat con i bottoni
-  // giusti. NON è gated sulla sessione attiva: un dialogo va visto comunque,
-  // qualunque sessione sia selezionata.
-  private async onSessionDialog(sessionId: string, dialog: UserDialog): Promise<void> {
+  // giusti. Va chiamato solo quando il dialogo deve DAVVERO apparire (sessione
+  // attiva, o appena selezionata da onCallback) — arma qui il countdown, non
+  // prima, altrimenti un dialogo tenuto in coda scadrebbe senza che l'utente
+  // l'abbia mai visto.
+  private async showDialog(sessionId: string, dialog: UserDialog): Promise<void> {
     if (!this.chatId) return;
+    this.deps.dialogFlow.arm(dialog.id);
     const session = this.deps.manager.get(sessionId);
     const text = dialogMessage(dialog, session);
     const kb = dialogKeyboard(dialog);
@@ -1563,6 +1579,17 @@ export class TelegramBot {
     const ok = this.deps.dialogFlow.cancel(parsed.id);
     await ctx.answerCallbackQuery({ text: ok ? 'Skipped' : 'Already resolved' });
     if (ok) await this.editCallbackDecision(ctx, '⏭️ <b>Skipped</b>');
+  }
+
+  // Una richiesta di permesso va mostrata: va chiamato solo quando deve DAVVERO
+  // apparire (sessione attiva, o appena selezionata da onCallback) — arma qui il
+  // countdown, non prima (vedi showDialog).
+  private showPermission(permission: PermissionRequest): void {
+    this.deps.permissionFlow.arm(permission.id);
+    const kb = permissionKeyboard(permission);
+    if (this.chatId) {
+      this.track(this.sendChunked(this.chatId, permissionMessage(permission), { reply_markup: kb }), 'permission send');
+    }
   }
 
   // ---------- approvazione del piano (ExitPlanMode via canUseTool) ----------
@@ -1636,6 +1663,29 @@ export class TelegramBot {
           const hist = await this.readHistory(parsed.id);
           if (this.chatId) {
             this.track(this.sendChunked(this.chatId, hist ?? 'Fresh session — no history yet.'), 'callback send');
+          }
+          // Se questa sessione ha una domanda in pending (arrivata mentre era in
+          // background, vedi onSessionPrompt) la ri-mostra qui, sempre — anche se
+          // era già stata mostrata in una visita precedente a questa sessione.
+          const flow = this.questionFlows.get(parsed.id);
+          if (flow) {
+            flow.awaitingOther = undefined; // torna ai bottoni invece del testo libero lasciato a metà
+            this.track(this.showQuestion(flow), 'pending question resend');
+          }
+          // Permessi/dialoghi arrivati mentre questa sessione era in background
+          // (vedi session.permission/session.dialog in subscribeBus): a differenza
+          // della domanda sopra, una volta mostrati il countdown è già armato e
+          // vivo in chat — non vanno ri-mandati a ogni nuova select, solo svuotati
+          // dalla coda una volta.
+          const perms = this.pendingPermissions.get(parsed.id);
+          if (perms?.length) {
+            this.pendingPermissions.delete(parsed.id);
+            for (const p of perms) this.showPermission(p);
+          }
+          const dlgs = this.pendingDialogs.get(parsed.id);
+          if (dlgs?.length) {
+            this.pendingDialogs.delete(parsed.id);
+            for (const d of dlgs) this.track(this.showDialog(parsed.id, d), 'dialog send');
           }
           break;
         }
@@ -1872,11 +1922,14 @@ export class TelegramBot {
     });
     bus.on('session.prompt', ({ sessionId, questions }) => {
       if (!this.deps.manager.isArmed()) return;
-      // NON gated sulla sessione attiva (a differenza di session.text/session.tool):
-      // AskUserQuestion blocca il CLI in attesa di risposta, quindi va sempre
-      // mostrata — altrimenti una domanda di una sessione non selezionata viene
-      // scartata per sempre e quella sessione resta bloccata senza modo di
-      // rispondere da Telegram (va risolta solo tornando al PC).
+      // L'evento va SEMPRE registrato (mai scartato, a differenza di
+      // session.text/session.tool che restano solo sulla sessione attiva): a
+      // differenza dei permessi/dialoghi, AskUserQuestion non ha timeout, quindi
+      // può restare in coda senza rischio — ma se viene silenziosamente
+      // ignorato per una sessione non selezionata, quella sessione resta
+      // bloccata per sempre senza modo di rispondere da Telegram. onSessionPrompt
+      // decide se mostrarla subito (sessione attiva) o lasciarla in pending
+      // (mostrata quando l'utente ci seleziona sopra, vedi sess:select).
       this.toolBurst(sessionId).close();
       this.resetSummarize(sessionId);
       // Fix 2: flusso domande multiple — accoda il set e mostra una domanda alla
@@ -1899,16 +1952,34 @@ export class TelegramBot {
       if (!this.deps.manager.isArmed()) return;
       this.toolBurst(permission.sessionId).close();
       this.resetSummarize(permission.sessionId);
-      const kb = permissionKeyboard(permission);
-      if (this.chatId) {
-        this.track(this.sendChunked(this.chatId, permissionMessage(permission), { reply_markup: kb }), 'permission send');
+      // Stessa logica delle domande (onSessionPrompt): mostrata subito solo se
+      // la sessione è quella selezionata, altrimenti in coda — ma qui il
+      // countdown NON parte finché non viene davvero mostrata (arm(), dentro
+      // showPermission), quindi restare in coda non rischia una scadenza al buio.
+      // Una sessione non tracciata (es. race all'avvio: il permesso arriva prima
+      // che il TmuxWatcher l'abbia registrata) non compare in /sessions → non
+      // sarebbe mai selezionabile per sbloccarla: va mostrata subito.
+      const known = this.deps.manager.get(permission.sessionId);
+      if (!known || permission.sessionId === this.deps.manager.getActive()) {
+        this.showPermission(permission);
+      } else {
+        const q = this.pendingPermissions.get(permission.sessionId) ?? [];
+        q.push(permission);
+        this.pendingPermissions.set(permission.sessionId, q);
       }
     });
     bus.on('session.dialog', ({ sessionId, dialog }) => {
       if (!this.deps.manager.isArmed()) return;
       this.toolBurst(sessionId).close();
       this.resetSummarize(sessionId);
-      this.track(this.onSessionDialog(sessionId, dialog), 'dialog send');
+      const known = this.deps.manager.get(sessionId);
+      if (!known || sessionId === this.deps.manager.getActive()) {
+        this.track(this.showDialog(sessionId, dialog), 'dialog send');
+      } else {
+        const q = this.pendingDialogs.get(sessionId) ?? [];
+        q.push(dialog);
+        this.pendingDialogs.set(sessionId, q);
+      }
     });
     bus.on('session.result', e => {
       if (!this.deps.manager.isArmed() || e.sessionId !== this.deps.manager.getActive()) return;

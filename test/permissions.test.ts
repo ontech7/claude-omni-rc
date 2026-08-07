@@ -34,14 +34,43 @@ describe('PermissionFlow', () => {
     await expect(p).resolves.toEqual({ behavior: 'deny', message: 'no' });
     expect(flow.deny(req.id)).toBe(false); // already resolved
   });
-  it('times out to deny', async () => {
+  it('times out to deny once armed', async () => {
     vi.useFakeTimers();
     try {
       const { flow, onPerm } = makeFlow(120);
       const p = flow.request('s1', 'Bash', {});
-      onPerm.mock.calls[0][0].permission; // request emitted
+      const req = onPerm.mock.calls[0][0].permission;
+      flow.arm(req.id);
       vi.advanceTimersByTime(120_000);
       await expect(p).resolves.toEqual({ behavior: 'deny', message: 'Timeout 120s' });
+    } finally { vi.useRealTimers(); }
+  });
+  it('does not time out while queued (unarmed) — arming is what starts the clock', async () => {
+    vi.useFakeTimers();
+    try {
+      const { flow, onPerm } = makeFlow(120);
+      const p = flow.request('s1', 'Bash', {});
+      const req = onPerm.mock.calls[0][0].permission;
+      vi.advanceTimersByTime(10 * 60_000); // ben oltre il timeout, ma mai armata
+      flow.arm(req.id); // ora la sessione viene selezionata: il countdown parte da qui
+      vi.advanceTimersByTime(119_000);
+      let settled = false;
+      void p.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false); // ancora entro i 120s da arm(), non da request()
+      vi.advanceTimersByTime(1_000);
+      await expect(p).resolves.toEqual({ behavior: 'deny', message: 'Timeout 120s' });
+    } finally { vi.useRealTimers(); }
+  });
+  it('arm() is a no-op once resolved or already armed', async () => {
+    vi.useFakeTimers();
+    try {
+      const { flow, onPerm } = makeFlow(120);
+      const p = flow.request('s1', 'Bash', {});
+      const req = onPerm.mock.calls[0][0].permission;
+      flow.approve(req.id);
+      await expect(p).resolves.toEqual({ behavior: 'allow' });
+      expect(() => flow.arm(req.id)).not.toThrow(); // già risolta: nessun timer fantasma
     } finally { vi.useRealTimers(); }
   });
   it('resolves deny when the AbortSignal fires', async () => {

@@ -22,7 +22,7 @@ export interface DialogFlowDeps {
 
 interface Pending {
   resolve: (d: DialogDecision) => void;
-  timer: NodeJS.Timeout;
+  timer?: NodeJS.Timeout; // parte con arm(), non alla creazione — vedi request()
   sessionId: string;
   dialogKind: string;
 }
@@ -47,21 +47,34 @@ export class DialogFlow {
     }
     return new Promise<DialogDecision>((resolve) => {
       const id = randomUUID();
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        resolve({ behavior: 'cancelled' });
-      }, this.deps.config.permissionTimeoutSeconds * 1000);
-      this.pending.set(id, { resolve, timer, sessionId, dialogKind: dialog.dialogKind });
+      // Il timeout NON parte qui: se il bot tiene il dialogo in coda (sessione
+      // non selezionata in Telegram) non deve scadere prima che l'utente l'abbia
+      // anche solo visto — parte con arm(), chiamato quando viene davvero mostrato.
+      this.pending.set(id, { resolve, sessionId, dialogKind: dialog.dialogKind });
       if (signal) {
         signal.addEventListener('abort', () => {
-          clearTimeout(timer);
-          if (this.pending.delete(id)) resolve({ behavior: 'cancelled' });
+          const p = this.pending.get(id);
+          if (!p) return;
+          if (p.timer) clearTimeout(p.timer);
+          this.pending.delete(id);
+          resolve({ behavior: 'cancelled' });
         });
       }
       this.deps.setStatus?.(sessionId, 'waiting-permission');
       const full: UserDialog = { id, ...dialog };
       this.deps.bus.emit({ type: 'session.dialog', sessionId, dialog: full });
     });
+  }
+
+  // Fa partire il countdown di scadenza — va chiamato quando il dialogo viene
+  // EFFETTIVAMENTE mostrato all'utente, mai alla creazione (vedi PermissionFlow.arm).
+  arm(id: string): void {
+    const p = this.pending.get(id);
+    if (!p || p.timer) return;
+    p.timer = setTimeout(() => {
+      this.pending.delete(id);
+      p.resolve({ behavior: 'cancelled' });
+    }, this.deps.config.permissionTimeoutSeconds * 1000);
   }
 
   // Sessione a cui appartiene un dialogo pendente (per l'edit: il testo libero
@@ -73,7 +86,7 @@ export class DialogFlow {
   complete(id: string, result: unknown): boolean {
     const p = this.pending.get(id);
     if (!p) return false;
-    clearTimeout(p.timer);
+    if (p.timer) clearTimeout(p.timer);
     this.pending.delete(id);
     this.deps.setStatus?.(p.sessionId, 'running');
     p.resolve({ behavior: 'completed', result });
@@ -83,7 +96,7 @@ export class DialogFlow {
   cancel(id: string): boolean {
     const p = this.pending.get(id);
     if (!p) return false;
-    clearTimeout(p.timer);
+    if (p.timer) clearTimeout(p.timer);
     this.pending.delete(id);
     this.deps.setStatus?.(p.sessionId, 'running');
     p.resolve({ behavior: 'cancelled' });
@@ -93,7 +106,7 @@ export class DialogFlow {
   cancelAllForSession(sessionId: string): void {
     for (const [id, p] of this.pending) {
       if (p.sessionId !== sessionId) continue;
-      clearTimeout(p.timer);
+      if (p.timer) clearTimeout(p.timer);
       this.pending.delete(id);
       p.resolve({ behavior: 'cancelled' });
     }

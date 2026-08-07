@@ -107,11 +107,14 @@ describe('startApi', () => {
     expect(await res.text()).toBe('allow');
   });
 
-  it('denies on timeout when nobody answers', async () => {
-    const { manager, api } = makeApi({ PERMISSION_TIMEOUT_SECONDS: '1' });
+  it('denies on timeout once armed (shown to the user) and nobody answers', async () => {
+    const { manager, permissionFlow, api, bus } = makeApi({ PERMISSION_TIMEOUT_SECONDS: '1' });
     open.push(api);
     await api.ready;
     manager.setArmed(true);
+    // Il countdown parte solo quando la richiesta viene mostrata (arm()) — qui
+    // si simula il bot che la mostra subito, come farebbe per la sessione attiva.
+    bus.on('session.permission', ({ permission }) => permissionFlow.arm(permission.id));
     const started = Date.now();
     const res = await fetch(`http://127.0.0.1:${api.port()}/api/permission`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
