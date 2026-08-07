@@ -1316,9 +1316,12 @@ export class TelegramBot {
   }
 
   // Header + elenco numerato + stato selezione per la domanda corrente.
+  // L'id sessione è nell'header perché la domanda arriva anche da sessioni non
+  // selezionate (vedi session.prompt in subscribeBus) — senza non si capirebbe
+  // a quale sessione rispondere quando ce n'è più di una in attesa.
   private renderQuestion(flow: QuestionFlow, q: PromptQuestion): string {
     const set = flow.sets[flow.setIndex];
-    const header = `Set ${flow.setIndex + 1} of ${flow.sets.length} · Question ${flow.qIndex + 1} of ${set.length}`;
+    const header = `Session ${flow.sessionId.slice(0, 8)} · Set ${flow.setIndex + 1} of ${flow.sets.length} · Question ${flow.qIndex + 1} of ${set.length}`;
     const title = q.header ? `${q.header}: ${q.question}` : q.question;
     const multi = q.multiSelect ? ' (select all that apply)' : '';
     const opts = q.options
@@ -1869,7 +1872,11 @@ export class TelegramBot {
     });
     bus.on('session.prompt', ({ sessionId, questions }) => {
       if (!this.deps.manager.isArmed()) return;
-      if (sessionId !== this.deps.manager.getActive()) return;
+      // NON gated sulla sessione attiva (a differenza di session.text/session.tool):
+      // AskUserQuestion blocca il CLI in attesa di risposta, quindi va sempre
+      // mostrata — altrimenti una domanda di una sessione non selezionata viene
+      // scartata per sempre e quella sessione resta bloccata senza modo di
+      // rispondere da Telegram (va risolta solo tornando al PC).
       this.toolBurst(sessionId).close();
       this.resetSummarize(sessionId);
       // Fix 2: flusso domande multiple — accoda il set e mostra una domanda alla
