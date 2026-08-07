@@ -3,6 +3,7 @@ import type { Bus } from '../bus.js';
 import type { Config } from '../config.js';
 import type { OllamaClient } from '../ollama.js';
 import type { PermissionFlow } from '../permissions.js';
+import type { DialogFlow } from '../dialogs.js';
 import type { SessionManager } from './manager.js';
 import { parseAskUserQuestions } from './transcript.js';
 
@@ -11,6 +12,7 @@ export interface SdkDriverDeps {
   manager: SessionManager;
   config: Config;
   permissionFlow: PermissionFlow;
+  dialogFlow: DialogFlow;
   ollama: Pick<OllamaClient, 'modelContext'>;
 }
 
@@ -76,10 +78,21 @@ export class SdkDriver {
           canUseTool: (toolName, input, opts) => {
             // AskUserQuestion: niente permesso — la risposta è la domanda stessa.
             if (toolName === 'AskUserQuestion') return Promise.resolve({ behavior: 'allow' });
-            // automode (default per /new): accetta ogni permesso senza chiedere.
-            if ((session.permissionMode ?? 'auto') === 'auto') return Promise.resolve({ behavior: 'allow' });
+            // automode: accetta ogni permesso senza chiedere. È opt-in esplicito
+            // (/new --auto o DEFAULT_PERMISSION_MODE=auto) — una sessione senza
+            // modo dichiarato (es. stato salvato da una versione precedente)
+            // passa sempre dai bottoni.
+            if (session.permissionMode === 'auto') return Promise.resolve({ behavior: 'allow' });
             return permissionFlow.request(sessionId, toolName, input as Record<string, unknown>, opts.signal);
           },
+          // Dialoghi bloccanti (request_user_dialog): l'unico kind che il CLI
+          // emette davvero è refusal_fallback_prompt (retry dopo un refusal).
+          // Senza onUserDialog il CLI parcheggia il turno e l'utente resta
+          // bloccato — esattamente il caso da evitare. L'approvazione del piano
+          // NON passa da qui: ExitPlanMode arriva come permesso via canUseTool.
+          onUserDialog: (request, opts) =>
+            this.deps.dialogFlow.request(sessionId, request, opts.signal),
+          supportedDialogKinds: ['refusal_fallback_prompt'],
         },
       });
       let finished = false;
@@ -130,7 +143,7 @@ export class SdkDriver {
       if (!finished) manager.setStatus(sessionId, 'idle');
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') {
-        bus.emit({ type: 'session.error', sessionId, message: "Fermata dall'utente" });
+        bus.emit({ type: 'session.error', sessionId, message: 'Stopped by the user' });
         manager.setStatus(sessionId, 'stopped');
       } else {
         const message = err instanceof Error ? err.message : String(err);

@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { Bot, Context, InlineKeyboard } from 'grammy';
@@ -7,11 +6,12 @@ import type { Bus } from '../src/bus.js';
 import type { Config } from '../src/config.js';
 import type { SessionManager } from '../src/sessions/manager.js';
 import type { PermissionFlow } from '../src/permissions.js';
+import type { DialogFlow } from '../src/dialogs.js';
 import type { SdkDriver } from '../src/sessions/sdk-driver.js';
 import type { TmuxClient } from '../src/sessions/tmux-inject.js';
 import type { OllamaClient } from '../src/ollama.js';
 import type { Inbox } from '../src/input.js';
-import type { Session, PermissionRequest, PromptQuestion } from '../src/types.js';
+import type { Session, PermissionRequest, PromptQuestion, PromptAnswer, UserDialog } from '../src/types.js';
 import type { RecentMessage } from '../src/sessions/transcript.js';
 import { readRecentMessages, resolveSessionTranscript } from '../src/sessions/transcript.js';
 
@@ -47,8 +47,10 @@ export function parseCommand(text: string): ParsedCommand {
 
 // Flag in testa di /new, in qualsiasi ordine: --auto/--standard (permessi) e
 // --model <name> (modello per questa sessione, default da DEFAULT_MODEL).
-export function parseNewFlags(raw: string): { mode: 'auto' | 'standard'; model?: string; text: string } {
-  let mode: 'auto' | 'standard' = 'auto';
+// `mode` resta undefined se nessun flag è presente: il default lo decide la
+// config (DEFAULT_PERMISSION_MODE), non il parser.
+export function parseNewFlags(raw: string): { mode?: 'auto' | 'standard'; model?: string; text: string } {
+  let mode: 'auto' | 'standard' | undefined;
   let model: string | undefined;
   let text = raw.trim();
   for (;;) {
@@ -66,14 +68,26 @@ export function parseNewFlags(raw: string): { mode: 'auto' | 'standard'; model?:
     }
     break;
   }
-  return { mode, model, text };
+  return { ...(mode ? { mode } : {}), ...(model ? { model } : {}), text };
+}
+
+// Dove gira una sessione headless. Senza WORKSPACE_DIRS il vecchio fallback era
+// la home: un agente con accesso a Bash radicato su TUTTI i file dell'utente.
+// Meglio rifiutare e chiedere una configurazione esplicita.
+export function resolveHeadlessProjectDir(workspaceDirs: string[]): { dir?: string; error?: string } {
+  const dir = workspaceDirs[0];
+  if (!dir) {
+    return { error: 'No workspace configured. Set <code>WORKSPACE_DIRS</code> in .env to the project roots headless sessions may run in, then restart the daemon.' };
+  }
+  return { dir };
 }
 
 export interface CallbackData {
-  action: 'approve' | 'deny' | 'select' | 'answer' | 'del' | 'del-yes' | 'del-no';
+  action: 'approve' | 'deny' | 'select' | 'answer' | 'done' | 'other' | 'cancel' | 'del' | 'del-yes' | 'del-no'
+    | 'perm-edit' | 'dlg-retry' | 'dlg-skip';
   id: string;
   index?: number;        // per 'answer': indice opzione
-  questionIndex?: number; // per 'answer': indice domanda
+  questionIndex?: number; // per 'answer'/'done'/'other': indice domanda
 }
 
 export function parseCallbackData(data: string): CallbackData {
@@ -81,9 +95,19 @@ export function parseCallbackData(data: string): CallbackData {
   if (parts.length === 3) {
     const [ns, action, id] = parts;
     if (ns === 'perm' && (action === 'approve' || action === 'deny') && id) return { action, id };
+    if (ns === 'perm' && action === 'edit' && id) return { action: 'perm-edit', id };
     if (ns === 'sess' && action === 'select' && id) return { action: 'select', id };
     if (ns === 'sess' && action === 'del' && id) return { action: 'del', id };
     if (ns === 'sess' && (action === 'del-yes' || action === 'del-no') && id) return { action, id };
+    if (ns === 'dlg' && (action === 'retry' || action === 'skip') && id) {
+      return { action: `dlg-${action}` as CallbackData['action'], id };
+    }
+  }
+  if (parts.length === 4) {
+    const [ns, action, token, q] = parts;
+    if (ns === 'q' && (action === 'done' || action === 'other' || action === 'cancel') && token && /^\d+$/.test(q)) {
+      return { action, id: token, questionIndex: Number(q) };
+    }
   }
   if (parts.length === 5) {
     const [ns, action, token, q, o] = parts;
@@ -169,9 +193,139 @@ export function balanceHtml(html: string): string {
   return out;
 }
 
+// Telegram rifiuta un messaggio oltre 4096 caratteri: il send è dentro un
+// .catch() → una risposta lunga del modello sparirebbe in silenzio. Il testo
+// viene quindi spezzato in più messaggi, preferendo un confine di riga e
+// riaprendo in ogni pezzo i tag rimasti aperti (così ogni chunk è HTML valido
+// e la formattazione non si perde a metà blocco di codice).
+// Il limite duro è 4096: si sta sotto con margine, perché i tag riaperti a
+// inizio chunk e l'escaping HTML aggiungono caratteri.
+export const SEND_MAX_CHARS = 3800;
+const HTML_TAG = /<\/?(b|i|code|pre|a)(?:\s[^>]*)?>/g;
+
+export function splitHtmlMessage(html: string, max = SEND_MAX_CHARS): string[] {
+  if (html.length <= max) return [html];
+
+  // tokenizza in tag e testo: un tag non va mai spezzato a metà
+  const tokens: { tag?: string; text?: string }[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  HTML_TAG.lastIndex = 0;
+  while ((m = HTML_TAG.exec(html)) !== null) {
+    if (m.index > last) tokens.push({ text: html.slice(last, m.index) });
+    tokens.push({ tag: m[0] });
+    last = m.index + m[0].length;
+  }
+  if (last < html.length) tokens.push({ text: html.slice(last) });
+
+  const chunks: string[] = [];
+  const stack: { name: string; open: string }[] = [];
+  const openers = (): string => stack.map(t => t.open).join('');
+  const closers = (): string => stack.map(t => `</${t.name}>`).reverse().join('');
+  let cur = '';
+  const flush = (): void => {
+    const reopened = openers();
+    if (cur !== reopened) chunks.push(cur + closers());
+    cur = reopened;
+  };
+
+  for (const t of tokens) {
+    if (t.tag !== undefined) {
+      const name = /^<\/?([a-z]+)/.exec(t.tag)![1];
+      if (cur.length + t.tag.length + closers().length > max) flush();
+      cur += t.tag;
+      if (t.tag.startsWith('</')) {
+        const i = stack.map(s => s.name).lastIndexOf(name);
+        if (i !== -1) stack.splice(i, 1);
+      } else {
+        stack.push({ name, open: t.tag });
+      }
+      continue;
+    }
+    let text = t.text ?? '';
+    while (text) {
+      let budget = max - cur.length - closers().length;
+      if (budget <= 0) {
+        // il chunk corrente è pieno: chiudilo. Se anche così non c'è spazio
+        // (max troppo piccolo per i soli tag) si avanza di 1 char per non
+        // restare in loop.
+        if (cur !== openers()) { flush(); continue; }
+        budget = 1;
+      }
+      if (text.length <= budget) { cur += text; break; }
+      const slice = text.slice(0, budget);
+      let cut = slice.lastIndexOf('\n');
+      if (cut < budget * 0.5) cut = slice.lastIndexOf(' ');
+      if (cut < budget * 0.5) cut = budget; // nessun confine utile: taglio netto
+      cur += text.slice(0, cut);
+      text = text.slice(cut).replace(/^[ \n]/, '');
+      flush();
+    }
+  }
+  flush();
+  return chunks;
+}
+
+// Il controllo remoto vive SOLO in chat privata: in un gruppo il daemon
+// streammerebbe codice, output dei tool e path davanti a membri non autorizzati
+// (l'autorizzazione è per utente, la destinazione delle notifiche è la chat).
+export function isPrivateChat(chat: { type?: string } | undefined): boolean {
+  return chat?.type === 'private';
+}
+
 export function permissionMessage(req: PermissionRequest): string {
+  // ExitPlanMode: il "permesso" è l'approvazione del piano — mostra il piano
+  // (non il JSON troncato) e i bottoni Approve/Reject/Edit.
+  if (req.toolName === 'ExitPlanMode') {
+    const plan = typeof req.input.plan === 'string' ? req.input.plan : '';
+    const body = plan ? truncateAtWord(plan, 2000) : '<i>(no plan text in input)</i>';
+    return `📋 <b>Plan approval</b> — session <b>${htmlEscape(req.sessionId.slice(0, 8))}</b>\n<pre>${htmlEscape(body)}</pre>`;
+  }
   const input = htmlEscape(JSON.stringify(req.input, null, 2).slice(0, 1000));
   return `🔧 Permission requested — session <b>${htmlEscape(req.sessionId.slice(0, 8))}</b>\nTool: <code>${htmlEscape(req.toolName)}</code>\n<pre>${input}</pre>`;
+}
+
+// Bottoni per una richiesta di permesso: Approve/Reject, più Edit per ExitPlanMode.
+export function permissionKeyboard(req: PermissionRequest): InlineKeyboard {
+  const kb = new InlineKeyboard()
+    .text('✓ Approve', `perm:approve:${req.id}`)
+    .text('✗ Reject', `perm:deny:${req.id}`);
+  if (req.toolName === 'ExitPlanMode') kb.text('✏️ Edit', `perm:edit:${req.id}`).row();
+  return kb;
+}
+
+// ---------- dialoghi bloccanti (request_user_dialog) ----------
+
+// Messaggio Telegram per un dialogo bloccante. L'unico kind che il CLI emette
+// davvero via request_user_dialog è refusal_fallback_prompt (l'approvazione del
+// piano passa da canUseTool/ExitPlanMode, non da qui). I kind sconosciuti
+// vengono comunque mostrati (con un bottone Cancel) invece di essere ignorati:
+// un dialogo ignorato parcheggia il turno e blocca l'utente.
+export function dialogMessage(dialog: UserDialog, session?: Session): string {
+  const who = session ? `<b>${htmlEscape(session.title)}</b>` : `<code>${htmlEscape(dialog.id.slice(0, 8))}</code>`;
+  if (dialog.dialogKind === 'refusal_fallback_prompt') {
+    const model = typeof dialog.payload.fallbackModel === 'string' ? dialog.payload.fallbackModel
+      : typeof dialog.payload.fallback_model === 'string' ? dialog.payload.fallback_model
+      : typeof dialog.payload.model === 'string' ? dialog.payload.model : undefined;
+    const reason = typeof dialog.payload.guidanceText === 'string' ? dialog.payload.guidanceText
+      : typeof dialog.payload.reason === 'string' ? dialog.payload.reason : undefined;
+    const why = reason ? `\n<i>${htmlEscape(reason.slice(0, 300))}</i>` : '';
+    return `❌ <b>Model refused</b> — ${who}${model ? `\nRetry with <code>${htmlEscape(model)}</code>?` : '\nRetry?'}${why}`;
+  }
+  return `❓ <b>Dialog</b> <code>${htmlEscape(dialog.dialogKind)}</code> — ${who}`;
+}
+
+// Bottoni per un dialogo: refusal → Retry/Skip; sconosciuto → solo Cancel (il
+// default del CLI è comunque applicato).
+export function dialogKeyboard(dialog: UserDialog): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  if (dialog.dialogKind === 'refusal_fallback_prompt') {
+    kb.text('🔄 Retry', `dlg:retry:${dialog.id}`).row();
+    kb.text('Skip', `dlg:skip:${dialog.id}`).row();
+  } else {
+    kb.text('Cancel', `dlg:skip:${dialog.id}`).row();
+  }
+  return kb;
 }
 
 // Intestazione della domanda a scelta multipla: elenco numerato completo delle
@@ -207,6 +361,61 @@ export function promptLayout(questions: PromptQuestion[], token: string, maxButt
       ? '\n\n<i>Tap an option or reply with its number.</i>'
       : '\n\n<i>Reply with the number of an option.</i>',
   };
+}
+
+// ---------- flusso domande multiple (AskUserQuestion) ----------
+
+// Macchina a stati per le domande del CLI: accoda i set (ogni `session.prompt`
+// = una chiamata AskUserQuestion), mostra UNA domanda alla volta e raccoglie le
+// risposte. Un set è completo quando tutte le sue domande hanno una risposta; a
+// quel punto le risposte vengono consegnate (iniezione tmux per le terminali,
+// un messaggio unico via runTurn per le headless) e si passa al set successivo.
+export interface QuestionFlow {
+  sessionId: string;
+  sets: PromptQuestion[][];   // coda dei set
+  setIndex: number;           // set corrente
+  qIndex: number;             // domanda corrente nel set
+  answers: (PromptAnswer | undefined)[][];  // risposte per set, per domanda (undefined = non risposta)
+  token: string;              // token callback
+  messageId?: number;         // messaggio Telegram della domanda corrente
+  chatId?: number;
+  multiSel: number[];         // opzioni togglate per la multi-select corrente
+  awaitingOther?: { setIndex: number; qIndex: number };  // in attesa di testo libero
+}
+
+// Riepilogo leggibile di una risposta (per l'acknowledgment e la consegna).
+export function answerSummary(a: PromptAnswer): string {
+  return a.kind === 'option' ? a.labels.join(', ') : a.text;
+}
+
+// Testo da iniettare nel pane tmux per rispondere a una domanda: il numero
+// dell'opzione (1-based) per le opzioni, i numeri separati da virgola per la
+// multi-select, il testo libero per "Other". Il menu del CLI mostra i numeri.
+export function answerToInjection(q: PromptQuestion, a: PromptAnswer): string {
+  if (a.kind === 'other') return a.text;
+  const nums = a.labels
+    .map(label => q.options.findIndex(o => o.label === label) + 1)
+    .filter(n => n > 0);
+  return nums.join(', ');
+}
+
+// Messaggio unico con tutte le risposte di un set, per le sessioni headless.
+export function answersToMessage(questions: PromptQuestion[], answers: (PromptAnswer | undefined)[]): string {
+  const lines = answers.map((a, i) => {
+    const q = questions[i];
+    const title = q.header ? `${q.header}: ${q.question}` : q.question;
+    return `${i + 1}. ${title} → ${a ? answerSummary(a) : '(no answer)'}`;
+  });
+  return `Answers to your questions:\n${lines.join('\n')}`;
+}
+
+// Reply numerico dell'utente come fallback ai bottoni: "2" → [2], "1, 3" → [1,3].
+// undefined se il testo non è una lista di numeri positivi.
+export function parseNumericReply(text: string): number[] | undefined {
+  const t = text.trim();
+  if (!/^[\d,\s]+$/.test(t)) return undefined;
+  const nums = t.split(',').map(s => Number(s.trim())).filter(n => Number.isInteger(n) && n > 0);
+  return nums.length ? nums : undefined;
 }
 
 // Matcher per il Fix 1: sopprime l'echo di un testo che il bot ha appena
@@ -512,6 +721,7 @@ export interface BotDeps {
   bus: Bus;
   manager: SessionManager;
   permissionFlow: PermissionFlow;
+  dialogFlow: DialogFlow;
   sdk: SdkDriver;
   tmux: TmuxClient;
   inbox: Inbox;
@@ -529,8 +739,13 @@ export class TelegramBot {
   private toolBursts = new Map<string, ToolBurstAggregator>();
   // Fix 1: testi iniettati dal bot per sessione (per sopprimere l'echo del transcript).
   private recentInjected = new Map<string, { text: string; at: number }[]>();
-  // Fix 2: domande a scelta multipla in attesa, token → domanda (per i bottoni).
-  private pendingPrompts = new Map<string, { sessionId: string; questions: PromptQuestion[]; text: string }>();
+  // Fix 2: flusso delle domande a scelta multipla per sessione (macchina a
+  // stati: set accodati, una domanda alla volta, multi-select e "Other").
+  private questionFlows = new Map<string, QuestionFlow>(); // sessionId → flow
+  private flowsByToken = new Map<string, QuestionFlow>(); // token → flow
+  // Permessi ExitPlanMode in attesa del testo libero per "Edit plan":
+  // sessionId → id della richiesta di permesso.
+  private pendingPlanEdits = new Map<string, string>();
   // Summary via LLM per le tool call: una coda per sessione che bufferizza i
   // risultati (le chiamate partono in parallelo) e li pusha in ordine. `reset()`
   // a fine turno (result/errore/domanda/permesso/testo lungo) scarta le summary
@@ -547,6 +762,10 @@ export class TelegramBot {
   });
 
   constructor(private deps: BotDeps) {
+    // Ripristina la chat di notifica dallo stato: dopo un riavvio del daemon le
+    // richieste di permesso devono avere una destinazione già al primo prompt,
+    // senza aspettare che l'utente scriva.
+    this.chatId = deps.manager.getChatId();
     // timeout di sicurezza su ogni chiamata API Telegram (le getUpdates long-poll
     // usano 30s server-side: 35s non le taglia, ma ogni altra chiamata è limitata).
     this.bot = new Bot(deps.config.telegramBotToken, { client: { timeoutSeconds: 35 } });
@@ -577,11 +796,31 @@ export class TelegramBot {
     await this.bot.stop();
   }
 
-  private send(ctx: Context, text: string): Promise<unknown> {
-    return ctx.reply(text, { parse_mode: 'HTML' });
+  // Ogni risposta passa dallo splitter: oltre 4096 caratteri Telegram rigetta il
+  // messaggio e il .catch lo farebbe sparire in silenzio.
+  private async send(ctx: Context, text: string): Promise<unknown> {
+    let last: unknown;
+    for (const part of splitHtmlMessage(text)) last = await ctx.reply(part, { parse_mode: 'HTML' });
+    return last;
   }
+
+  // Invio sequenziale dei chunk (l'ordine conta) con gli extra — tastiera
+  // inclusa — solo sull'ultimo. Ritorna l'id dell'ultimo messaggio inviato.
+  private async sendChunked(chatId: number, text: string, extra: Record<string, unknown> = {}): Promise<number | undefined> {
+    const parts = splitHtmlMessage(text);
+    let lastId: number | undefined;
+    for (let i = 0; i < parts.length; i++) {
+      const opts = { parse_mode: 'HTML' as const, ...(i === parts.length - 1 ? extra : {}) };
+      const msg = await this.bot.api.sendMessage(chatId, parts[i], opts).catch(err => { this.logCatch('send')(err); return undefined; });
+      if (msg) lastId = msg.message_id;
+    }
+    return lastId;
+  }
+
   private notify(text: string): void {
-    if (this.chatId) void this.bot.api.sendMessage(this.chatId, text, { parse_mode: 'HTML' }).catch(this.logCatch('notify'));
+    const chatId = this.chatId;
+    if (!chatId) return;
+    this.track(this.sendChunked(chatId, text), 'notify');
   }
 
   // Contiene ogni errore degli handler: log + reply amichevole, mai un throw che
@@ -609,13 +848,21 @@ export class TelegramBot {
     const now = Date.now();
     // concatena solo messaggi dello stesso ruolo (un turno con più blocchi text
     // diventa una bubble unica; non mischia mai un echo utente con una risposta).
-    if (last && last.role === role && now - last.at < 10_000) {
+    // Il merge si ferma prima del limite Telegram: oltre, ogni edit fallirebbe e
+    // il testo nuovo andrebbe perso — meglio un messaggio nuovo.
+    const merged = last ? `${last.text}\n${text}` : '';
+    if (last && last.role === role && now - last.at < 10_000 && merged.length <= SEND_MAX_CHARS) {
       const ok = await this.throttler.throttled(() =>
-        this.bot.api.editMessageText(chatId, last.messageId, last.text + '\n' + text, { parse_mode: 'HTML' }).then(() => true).catch(() => false));
-      if (ok) { last.text += '\n' + text; last.at = now; return; }
+        this.bot.api.editMessageText(chatId, last.messageId, merged, { parse_mode: 'HTML' }).then(() => true).catch(() => false));
+      if (ok) { last.text = merged; last.at = now; return; }
     }
-    const msg = await this.bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' }).catch(() => undefined);
-    if (msg) this.lastMsg.set(sessionId, { messageId: msg.message_id, text, at: now, role });
+    // testo lungo → più messaggi; il tracking punta all'ultimo, che è quello
+    // che eventuali blocchi successivi dello stesso turno estenderanno.
+    const parts = splitHtmlMessage(text);
+    const messageId = await this.sendChunked(chatId, text);
+    if (messageId !== undefined) {
+      this.lastMsg.set(sessionId, { messageId, text: parts[parts.length - 1], at: now, role });
+    }
   }
 
   // Bubble di raffica per le notifiche tool (una per sessione); il sink usa
@@ -687,12 +934,27 @@ export class TelegramBot {
   }
 
   private isAuthorized(ctx: Context): boolean {
+    if (!isPrivateChat(ctx.chat)) return false;
     const userId = ctx.from?.id;
     return !!userId && (this.deps.config.allowedUserIds.includes(userId) || this.deps.manager.isAuthorizedUser(userId));
   }
 
+  // Destinazione delle notifiche: la chat privata da cui è arrivato l'ultimo
+  // comando autorizzato, persistita così da sopravvivere ai riavvii del daemon.
+  private bindChat(ctx: Context): void {
+    const id = ctx.chat?.id;
+    if (id === undefined || !isPrivateChat(ctx.chat)) return;
+    this.chatId = id;
+    this.deps.manager.setChatId(id);
+  }
+
+  // C'è una chat a cui notificare? Lo consulta il flusso permessi: senza
+  // destinazione una richiesta resterebbe appesa fino al timeout.
+  canNotify(): boolean { return this.chatId !== undefined; }
+
   private authorize(ctx: Context): boolean {
-    if (this.isAuthorized(ctx)) { this.chatId = ctx.chat?.id ?? this.chatId; return true; }
+    if (this.isAuthorized(ctx)) { this.bindChat(ctx); return true; }
+    if (!isPrivateChat(ctx.chat)) return false; // in un gruppo il bot tace del tutto
     this.track(this.send(ctx, '⛔ Not authorized. Send <code>/start &lt;pairing code&gt;</code>.'), 'authorize reply');
     return false;
   }
@@ -721,8 +983,14 @@ export class TelegramBot {
   private async onStart(ctx: Context): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) return;
+    // Il pairing non avviene mai in un gruppo: autorizzerebbe un account e
+    // punterebbe le notifiche su una chat condivisa.
+    if (!isPrivateChat(ctx.chat)) {
+      await this.send(ctx, '⛔ claude-omni-rc works only in a private chat with the bot.');
+      return;
+    }
     if (this.isAuthorized(ctx)) {
-      this.chatId = ctx.chat?.id;
+      this.bindChat(ctx);
       await this.send(ctx, `👋 Welcome! State: ${this.deps.manager.isArmed() ? '🔓 armed' : '🔒 disarmed'}. Use /help.`);
       return;
     }
@@ -730,7 +998,7 @@ export class TelegramBot {
     if (this.deps.config.pairingCode && code === this.deps.config.pairingCode) {
       this.deps.manager.addAuthorizedUser(userId);
       this.deps.manager.persist();
-      this.chatId = ctx.chat?.id;
+      this.bindChat(ctx);
       await this.send(ctx, '✅ Pairing successful. Use /help.');
     } else {
       await this.send(ctx, '⛔ Not authorized. Send <code>/start &lt;pairing code&gt;</code>.');
@@ -746,6 +1014,8 @@ export class TelegramBot {
     this.deps.manager.setArmed(false);
     for (const s of this.deps.manager.list()) {
       this.deps.permissionFlow.cancelAllForSession(s.id);
+      this.deps.dialogFlow.cancelAllForSession(s.id);
+      this.pendingPlanEdits.delete(s.id);
       this.deps.sdk.stop(s.id); // spegne anche i turni headless in corso
     }
     this.deps.manager.persist();
@@ -802,13 +1072,15 @@ export class TelegramBot {
     if (!text) { await this.send(ctx, 'Usage: /new [--auto|--standard] [--model &lt;name&gt;] &lt;text&gt;'); return; }
     const running = this.deps.manager.list().filter(s => s.kind === 'headless' && s.status === 'running').length;
     if (running >= this.deps.config.maxHeadlessSessions) { await this.send(ctx, `Reached the limit of ${this.deps.config.maxHeadlessSessions} active headless sessions.`); return; }
-    const projectDir = this.deps.config.workspaceDirs[0] ?? homedir();
+    const { dir: projectDir, error } = resolveHeadlessProjectDir(this.deps.config.workspaceDirs);
+    if (!projectDir) { await this.send(ctx, `⚠️ ${error}`); return; }
+    const permissionMode = mode ?? this.deps.config.defaultPermissionMode;
     const session = this.deps.manager.createHeadless({
       title: text.slice(0, 40), projectDir, model: model ?? this.deps.config.defaultModel,
-      permissionMode: mode,
+      permissionMode,
     });
     this.deps.manager.setActive(session.id); // persiste anche la nuova sessione
-    const modeLabel = mode === 'standard' ? ' (standard — approvals via buttons)' : ' (automode — no approvals)';
+    const modeLabel = permissionMode === 'standard' ? ' (standard — approvals via buttons)' : ' (automode — no approvals)';
     await this.send(ctx, `🆕 Session <b>${htmlEscape(session.id.slice(0, 8))}</b> started${modeLabel}.`);
     // NON await: grammy processa gli update in sequenza — aspettare un turno di minuti
     // bloccherebbe /stop, /rc off e i callback. Il driver emette gli eventi sul bus.
@@ -821,8 +1093,12 @@ export class TelegramBot {
     const s = active ? this.deps.manager.get(active) : undefined;
     if (!s) { await this.send(ctx, 'No active session.'); return; }
     const id8 = s.id.slice(0, 8);
+    const flow = this.questionFlows.get(s.id);
+    if (flow) this.deleteFlow(flow); // /stop: niente domande pendenti
+    this.pendingPlanEdits.delete(s.id);
     if (s.kind === 'headless') {
       this.deps.permissionFlow.cancelAllForSession(s.id);
+      this.deps.dialogFlow.cancelAllForSession(s.id);
       const aborted = this.deps.sdk.stop(s.id); // abort del turno in corso
       await this.send(ctx, stopReply({ kind: 'headless', id8, aborted, status: s.status }));
     } else if (s.tmuxTarget) {
@@ -908,7 +1184,11 @@ export class TelegramBot {
   // Per le terminali il pane tmux continua a girare: si perde solo il tracking.
   private deleteSession(id: string): boolean {
     this.deps.permissionFlow.cancelAllForSession(id);
+    this.deps.dialogFlow.cancelAllForSession(id);
+    this.pendingPlanEdits.delete(id);
     this.deps.sdk.stop(id); // abort del turno headless in corso
+    const flow = this.questionFlows.get(id);
+    if (flow) this.deleteFlow(flow); // niente domande pendenti per una sessione sparita
     const ok = this.deps.manager.remove(id);
     if (ok) this.deps.manager.persist();
     return ok;
@@ -924,36 +1204,306 @@ export class TelegramBot {
     }).catch(this.logCatch('callback edit'));
   }
 
-  // Risponde a una domanda a scelta multipla: inietta l'etichetta nel pane
-  // (terminali) o la invia come testo (headless, best-effort). Il messaggio
-  // viene modificato per mostrare la risposta scelta.
-  private async answerPrompt(ctx: Context, parsed: CallbackData): Promise<void> {
-    const pending = this.pendingPrompts.get(parsed.id);
-    if (!pending) { await ctx.answerCallbackQuery({ text: 'Expired question' }); return; }
-    const q = pending.questions[parsed.questionIndex ?? 0];
-    const opt = q?.options[parsed.index ?? 0];
-    if (!q || !opt) { await ctx.answerCallbackQuery({ text: 'Invalid option' }); return; }
-    const s = this.deps.manager.get(pending.sessionId);
-    if (!s) { await ctx.answerCallbackQuery({ text: 'Session gone' }); return; }
-    this.pendingPrompts.delete(parsed.id);
-    let toast = `✓ ${opt.label}`;
-    try {
-      if (s.kind === 'terminal' && s.tmuxTarget) {
-        await this.deps.tmux.injectText(s.tmuxTarget, opt.label);
-        this.recordInjected(s.id, opt.label);
-      } else if (s.kind === 'headless') {
-        if (this.deps.sdk.isBusy(s.id)) {
-          toast = '⏳ Session busy — reply by text';
-        } else {
-          this.track(this.deps.sdk.runTurn(s.id, opt.label), 'runTurn');
-        }
-      }
-    } catch (e) {
-      toast = `⚠️ ${e instanceof Error ? e.message : String(e)}`;
+  // ---------- flusso domande multiple ----------
+
+  private setFlow(flow: QuestionFlow): void {
+    this.questionFlows.set(flow.sessionId, flow);
+    this.flowsByToken.set(flow.token, flow);
+  }
+
+  private deleteFlow(flow: QuestionFlow): void {
+    this.questionFlows.delete(flow.sessionId);
+    this.flowsByToken.delete(flow.token);
+  }
+
+  // Un nuovo set di domande (una chiamata AskUserQuestion) arriva dal bus:
+  // accodato al flow della sessione; se il flow è idle, mostra la prima domanda.
+  private async onSessionPrompt(sessionId: string, questions: PromptQuestion[]): Promise<void> {
+    let flow = this.questionFlows.get(sessionId);
+    if (!flow) {
+      flow = { sessionId, sets: [], setIndex: 0, qIndex: 0, answers: [], token: randomUUID(), multiSel: [] };
+      this.setFlow(flow);
     }
-    await ctx.answerCallbackQuery({ text: toast });
-    const ack = `${pending.text}\n\n✅ <b>Risposta:</b> ${htmlEscape(opt.label)}`;
-    await ctx.editMessageText(ack, { parse_mode: 'HTML', reply_markup: new InlineKeyboard() }).catch(this.logCatch('callback edit'));
+    flow.sets.push(questions);
+    flow.answers.push(questions.map(() => undefined));
+    if (flow.setIndex === 0 && flow.qIndex === 0 && !flow.messageId) {
+      await this.showQuestion(flow);
+    }
+  }
+
+  // Header + elenco numerato + stato selezione per la domanda corrente.
+  private renderQuestion(flow: QuestionFlow, q: PromptQuestion): string {
+    const set = flow.sets[flow.setIndex];
+    const header = `Set ${flow.setIndex + 1} of ${flow.sets.length} · Question ${flow.qIndex + 1} of ${set.length}`;
+    const title = q.header ? `${q.header}: ${q.question}` : q.question;
+    const multi = q.multiSelect ? ' (select all that apply)' : '';
+    const opts = q.options
+      .map((o, i) => `  ${i + 1}. ${htmlEscape(o.label)}${o.description ? ` — <i>${htmlEscape(o.description)}</i>` : ''}`)
+      .join('\n');
+    const sel = q.multiSelect && flow.multiSel.length
+      ? `\n\n<i>Selected: ${flow.multiSel.map(i => htmlEscape(q.options[i].label)).join(', ')}</i>`
+      : '';
+    return `❓ <b>${htmlEscape(header)}</b>\n<b>${htmlEscape(title)}</b>${multi}\n${opts}${sel}`;
+  }
+
+  // Bottoni per la domanda corrente: opzioni (toggle per multi-select), Done e Other.
+  private buildQuestionKeyboard(flow: QuestionFlow, q: PromptQuestion): InlineKeyboard {
+    const kb = new InlineKeyboard();
+    const token = flow.token;
+    const qi = flow.qIndex;
+    if (q.multiSelect) {
+      for (let i = 0; i < q.options.length; i++) {
+        const selected = flow.multiSel.includes(i);
+        kb.text(`${selected ? '✓ ' : ''}${q.options[i].label}`, `q:answer:${token}:${qi}:${i}`).row();
+      }
+      kb.text('✓ Done', `q:done:${token}:${qi}`).row();
+      kb.text('✏️ Other', `q:other:${token}:${qi}`).row();
+    } else {
+      for (let i = 0; i < q.options.length; i++) {
+        kb.text(q.options[i].label, `q:answer:${token}:${qi}:${i}`).row();
+      }
+      kb.text('✏️ Other', `q:other:${token}:${qi}`).row();
+    }
+    return kb;
+  }
+
+  // Invia un nuovo messaggio per la domanda corrente.
+  private async showQuestion(flow: QuestionFlow): Promise<void> {
+    if (!this.chatId) return;
+    const q = flow.sets[flow.setIndex][flow.qIndex];
+    const text = this.renderQuestion(flow, q);
+    const kb = this.buildQuestionKeyboard(flow, q);
+    const id = await this.sendChunked(this.chatId, text, { reply_markup: kb });
+    if (id) flow.messageId = id;
+  }
+
+  // Edita il messaggio corrente (toggle multi-select, cancel Other).
+  private async updateQuestionMessage(flow: QuestionFlow): Promise<void> {
+    if (!flow.messageId || !this.chatId) return;
+    const q = flow.sets[flow.setIndex][flow.qIndex];
+    const text = this.renderQuestion(flow, q);
+    const kb = this.buildQuestionKeyboard(flow, q);
+    await this.bot.api.editMessageText(this.chatId, flow.messageId, text, {
+      parse_mode: 'HTML', reply_markup: kb,
+    }).catch(this.logCatch('prompt edit'));
+  }
+
+  // Conferma visiva della risposta sul messaggio corrente (bottoni rimossi).
+  private async acknowledgeAnswer(flow: QuestionFlow, ack: string): Promise<void> {
+    if (!flow.messageId || !this.chatId) return;
+    const q = flow.sets[flow.setIndex][flow.qIndex];
+    const text = `${this.renderQuestion(flow, q)}\n\n✅ <b>Answer:</b> ${htmlEscape(ack)}`;
+    await this.bot.api.editMessageText(this.chatId, flow.messageId, text, {
+      parse_mode: 'HTML', reply_markup: new InlineKeyboard(),
+    }).catch(this.logCatch('prompt edit'));
+  }
+
+  // Prompt per il testo libero "Other" (con Cancel per tornare ai bottoni).
+  private async showOtherPrompt(flow: QuestionFlow, qIndex: number): Promise<void> {
+    if (!flow.messageId || !this.chatId) return;
+    const q = flow.sets[flow.setIndex][qIndex];
+    const title = q.header ? `${q.header}: ${q.question}` : q.question;
+    const kb = new InlineKeyboard().text('↩️ Cancel', `q:cancel:${flow.token}:${qIndex}`);
+    await this.bot.api.editMessageText(this.chatId, flow.messageId, `✏️ <b>Type your answer for:</b> ${htmlEscape(title)}`, {
+      parse_mode: 'HTML', reply_markup: kb,
+    }).catch(this.logCatch('prompt edit'));
+  }
+
+  // Tap su un'opzione: single-select risponde subito, multi-select toggla.
+  private async answerPrompt(ctx: Context, parsed: CallbackData): Promise<void> {
+    const flow = this.flowsByToken.get(parsed.id);
+    if (!flow) { await ctx.answerCallbackQuery({ text: 'Expired question' }); return; }
+    const qIndex = parsed.questionIndex ?? 0;
+    const optIndex = parsed.index ?? 0;
+    const q = flow.sets[flow.setIndex][qIndex];
+    const opt = q?.options[optIndex];
+    if (!q || !opt) { await ctx.answerCallbackQuery({ text: 'Invalid option' }); return; }
+    if (q.multiSelect) {
+      const i = flow.multiSel.indexOf(optIndex);
+      if (i === -1) flow.multiSel.push(optIndex);
+      else flow.multiSel.splice(i, 1);
+      await ctx.answerCallbackQuery({ text: flow.multiSel.includes(optIndex) ? `✓ ${opt.label}` : opt.label });
+      await this.updateQuestionMessage(flow);
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: `✓ ${opt.label}` });
+    await this.answerSingle(flow, qIndex, optIndex);
+  }
+
+  // Tap su "Done": conferma la multi-select.
+  private async donePrompt(ctx: Context, parsed: CallbackData): Promise<void> {
+    const flow = this.flowsByToken.get(parsed.id);
+    if (!flow) { await ctx.answerCallbackQuery({ text: 'Expired question' }); return; }
+    const qIndex = parsed.questionIndex ?? 0;
+    const q = flow.sets[flow.setIndex][qIndex];
+    if (!q?.multiSelect) { await ctx.answerCallbackQuery({ text: 'Invalid' }); return; }
+    if (!flow.multiSel.length) { await ctx.answerCallbackQuery({ text: 'Select at least one option' }); return; }
+    const labels = flow.multiSel.map(i => q.options[i].label);
+    await ctx.answerCallbackQuery({ text: `✓ ${labels.join(', ')}` });
+    await this.doneMultiSelect(flow, qIndex);
+  }
+
+  // Logica core single-select (usata da callback e reply numerico).
+  private async answerSingle(flow: QuestionFlow, qIndex: number, optIndex: number): Promise<void> {
+    const q = flow.sets[flow.setIndex][qIndex];
+    const opt = q.options[optIndex];
+    flow.answers[flow.setIndex][qIndex] = { kind: 'option', labels: [opt.label] };
+    await this.acknowledgeAnswer(flow, opt.label);
+    await this.recordAndAdvance(flow);
+  }
+
+  // Logica core multi-select (usata da callback e reply numerico).
+  private async doneMultiSelect(flow: QuestionFlow, qIndex: number): Promise<void> {
+    const q = flow.sets[flow.setIndex][qIndex];
+    const labels = flow.multiSel.map(i => q.options[i].label);
+    flow.answers[flow.setIndex][qIndex] = { kind: 'option', labels };
+    flow.multiSel = [];
+    await this.acknowledgeAnswer(flow, labels.join(', '));
+    await this.recordAndAdvance(flow);
+  }
+
+  // Tap su "Other": il prossimo testo dell'utente è la risposta libera.
+  private async otherPrompt(ctx: Context, parsed: CallbackData): Promise<void> {
+    const flow = this.flowsByToken.get(parsed.id);
+    if (!flow) { await ctx.answerCallbackQuery({ text: 'Expired question' }); return; }
+    const qIndex = parsed.questionIndex ?? 0;
+    flow.awaitingOther = { setIndex: flow.setIndex, qIndex };
+    await ctx.answerCallbackQuery({ text: 'Type your answer' });
+    await this.showOtherPrompt(flow, qIndex);
+  }
+
+  // Tap su "Cancel" durante il testo libero: torna ai bottoni.
+  private async cancelPrompt(ctx: Context, parsed: CallbackData): Promise<void> {
+    const flow = this.flowsByToken.get(parsed.id);
+    if (!flow) { await ctx.answerCallbackQuery({ text: 'Expired question' }); return; }
+    flow.awaitingOther = undefined;
+    await ctx.answerCallbackQuery({ text: 'Cancelled' });
+    await this.updateQuestionMessage(flow);
+  }
+
+  // Testo libero arrivato da onMessage mentre awaitingOther è attivo.
+  private async answerOther(flow: QuestionFlow, text: string): Promise<void> {
+    const { setIndex, qIndex } = flow.awaitingOther!;
+    flow.answers[setIndex][qIndex] = { kind: 'other', text };
+    flow.awaitingOther = undefined;
+    await this.acknowledgeAnswer(flow, text);
+    await this.recordAndAdvance(flow);
+  }
+
+  // Dopo una risposta: per le terminali inietta subito la risposta nel pane;
+  // poi avanza (per le headless la consegna avviene a set completo in advance).
+  private async recordAndAdvance(flow: QuestionFlow): Promise<void> {
+    const session = this.deps.manager.get(flow.sessionId);
+    if (session?.kind === 'terminal') {
+      const q = flow.sets[flow.setIndex][flow.qIndex];
+      const a = flow.answers[flow.setIndex][flow.qIndex];
+      if (a) await this.deliverAnswer(session, q, a);
+    }
+    await this.advance(flow);
+  }
+
+  // Avanza alla prossima domanda/set; a set completo consegna (headless) e
+  // passa al set successivo; a fine coda pulisce il flow.
+  private async advance(flow: QuestionFlow): Promise<void> {
+    const set = flow.sets[flow.setIndex];
+    if (flow.qIndex < set.length - 1) {
+      flow.qIndex++;
+      await this.showQuestion(flow);
+      return;
+    }
+    const session = this.deps.manager.get(flow.sessionId);
+    if (session?.kind === 'headless') {
+      await this.deliverSet(flow, flow.setIndex);
+    }
+    flow.setIndex++;
+    flow.qIndex = 0;
+    if (flow.setIndex < flow.sets.length) {
+      await this.showQuestion(flow);
+    } else {
+      this.deleteFlow(flow);
+    }
+  }
+
+  // Iniezione tmux della risposta a una domanda (terminali).
+  private async deliverAnswer(session: Session, q: PromptQuestion, a: PromptAnswer): Promise<void> {
+    if (session.kind !== 'terminal' || !session.tmuxTarget) return;
+    const text = answerToInjection(q, a);
+    try {
+      await this.deps.tmux.injectText(session.tmuxTarget, text);
+      this.recordInjected(session.id, text);
+    } catch (e) {
+      console.error('deliverAnswer failed:', e);
+    }
+  }
+
+  // Consegna di un intero set (headless): un unico messaggio con tutte le risposte.
+  private async deliverSet(flow: QuestionFlow, setIndex: number): Promise<void> {
+    const session = this.deps.manager.get(flow.sessionId);
+    if (!session || session.kind !== 'headless') return;
+    const text = answersToMessage(flow.sets[setIndex], flow.answers[setIndex]);
+    if (this.deps.sdk.isBusy(session.id)) {
+      this.notify('⏳ Session busy — the answers were not sent. Reply by text.');
+      return;
+    }
+    this.track(this.deps.sdk.runTurn(session.id, text), 'runTurn');
+  }
+
+  // ---------- dialoghi bloccanti (request_user_dialog) ----------
+
+  // Un dialogo arriva dal driver (headless): lo si mostra in chat con i bottoni
+  // giusti. NON è gated sulla sessione attiva: un dialogo va visto comunque,
+  // qualunque sessione sia selezionata.
+  private async onSessionDialog(sessionId: string, dialog: UserDialog): Promise<void> {
+    if (!this.chatId) return;
+    const session = this.deps.manager.get(sessionId);
+    const text = dialogMessage(dialog, session);
+    const kb = dialogKeyboard(dialog);
+    await this.sendChunked(this.chatId, text, { reply_markup: kb });
+  }
+
+  // Retry con il modello di fallback (refusal_fallback_prompt). Il result è la
+  // stringa enum che il CLI si aspetta: 'retry_fallback' | 'edit_prompt' |
+  // 'cancelled'. 'edit_prompt' fa editare il prompt localmente (inutile da
+  // Telegram), quindi qui si offre solo Retry/Skip.
+  private async dlgRetry(ctx: Context, parsed: CallbackData): Promise<void> {
+    const ok = this.deps.dialogFlow.complete(parsed.id, 'retry_fallback');
+    await ctx.answerCallbackQuery({ text: ok ? '🔄 Retrying' : 'Already resolved' });
+    if (ok) await this.editCallbackDecision(ctx, '🔄 <b>Retrying with fallback model</b>');
+  }
+
+  // Skip / cancel (refusal_fallback_prompt o kind sconosciuto).
+  private async dlgSkip(ctx: Context, parsed: CallbackData): Promise<void> {
+    const ok = this.deps.dialogFlow.cancel(parsed.id);
+    await ctx.answerCallbackQuery({ text: ok ? 'Skipped' : 'Already resolved' });
+    if (ok) await this.editCallbackDecision(ctx, '⏭️ <b>Skipped</b>');
+  }
+
+  // ---------- approvazione del piano (ExitPlanMode via canUseTool) ----------
+
+  // "Edit plan" su una richiesta di permesso ExitPlanMode: il prossimo testo
+  // dell'utente è il nuovo piano. Il messaggio originale (col piano) resta
+  // visibile, con la richiesta in coda.
+  private async permEdit(ctx: Context, parsed: CallbackData): Promise<void> {
+    const info = this.deps.permissionFlow.infoFor(parsed.id);
+    if (!info) { await ctx.answerCallbackQuery({ text: 'Expired request' }); return; }
+    this.pendingPlanEdits.set(info.sessionId, parsed.id);
+    await ctx.answerCallbackQuery({ text: 'Type the new plan' });
+    const msg = ctx.callbackQuery?.message;
+    const original = msg && 'text' in msg ? msg.text : '';
+    await ctx.editMessageText(`${original}\n\n✏️ <b>Type the new plan text.</b> Send it as a message; the session will continue with your edited plan.`, {
+      parse_mode: 'HTML',
+    }).catch(this.logCatch('plan edit'));
+  }
+
+  // Testo libero arrivato da onMessage mentre un "Edit plan" è in attesa.
+  private async answerPlanEdit(sessionId: string, text: string): Promise<void> {
+    const id = this.pendingPlanEdits.get(sessionId);
+    if (!id) return;
+    this.pendingPlanEdits.delete(sessionId);
+    const info = this.deps.permissionFlow.infoFor(id);
+    if (!info) return;
+    const ok = this.deps.permissionFlow.approve(id, { ...info.input, plan: text });
+    if (ok) this.notify('✏️ <b>Plan edited</b> — the session continues with your plan.');
   }
 
   private async onCallback(ctx: Context): Promise<void> {
@@ -966,15 +1516,25 @@ export class TelegramBot {
       const parsed = parseCallbackData(data);
       switch (parsed.action) {
         case 'approve': {
-          const ok = this.deps.permissionFlow.approve(parsed.id);
+          // ExitPlanMode: l'approvazione conferma il piano → updatedInput col
+          // piano originale (il tool lo scrive sul file del piano).
+          const info = this.deps.permissionFlow.infoFor(parsed.id);
+          const updatedInput = info?.toolName === 'ExitPlanMode' ? info.input : undefined;
+          const ok = this.deps.permissionFlow.approve(parsed.id, updatedInput);
           await ctx.answerCallbackQuery({ text: ok ? '✓ Approved' : 'Already resolved' });
           if (ok) await this.editCallbackDecision(ctx, '✅ <b>Approved</b>');
           break;
         }
         case 'deny': {
-          const ok = this.deps.permissionFlow.deny(parsed.id);
+          const info = this.deps.permissionFlow.infoFor(parsed.id);
+          const message = info?.toolName === 'ExitPlanMode' ? 'Plan rejected from Telegram' : undefined;
+          const ok = this.deps.permissionFlow.deny(parsed.id, message);
           await ctx.answerCallbackQuery({ text: ok ? '✗ Rejected' : 'Already resolved' });
           if (ok) await this.editCallbackDecision(ctx, '❌ <b>Rejected</b>');
+          break;
+        }
+        case 'perm-edit': {
+          await this.permEdit(ctx, parsed);
           break;
         }
         case 'select': {
@@ -988,12 +1548,24 @@ export class TelegramBot {
           // una nota (prima mostrava la history della sessione precedente).
           const hist = await this.readHistory(parsed.id);
           if (this.chatId) {
-            void this.bot.api.sendMessage(this.chatId, hist ?? 'Fresh session — no history yet.', { parse_mode: 'HTML' }).catch(this.logCatch('callback send'));
+            this.track(this.sendChunked(this.chatId, hist ?? 'Fresh session — no history yet.'), 'callback send');
           }
           break;
         }
         case 'answer': {
           await this.answerPrompt(ctx, parsed);
+          break;
+        }
+        case 'done': {
+          await this.donePrompt(ctx, parsed);
+          break;
+        }
+        case 'other': {
+          await this.otherPrompt(ctx, parsed);
+          break;
+        }
+        case 'cancel': {
+          await this.cancelPrompt(ctx, parsed);
           break;
         }
         case 'del': {
@@ -1017,6 +1589,14 @@ export class TelegramBot {
         case 'del-no': {
           await ctx.answerCallbackQuery({ text: 'Cancelled' });
           await ctx.editMessageText('Delete cancelled.', { parse_mode: 'HTML' }).catch(this.logCatch('callback send'));
+          break;
+        }
+        case 'dlg-retry': {
+          await this.dlgRetry(ctx, parsed);
+          break;
+        }
+        case 'dlg-skip': {
+          await this.dlgSkip(ctx, parsed);
           break;
         }
       }
@@ -1072,6 +1652,33 @@ export class TelegramBot {
     const active = this.deps.manager.getActive();
     const session = active ? this.deps.manager.get(active) : this.deps.manager.list()[0];
     if (session) this.lastUserText.set(session.id, text);
+    // "Edit plan" in attesa: il testo dell'utente è il nuovo piano.
+    if (session && this.pendingPlanEdits.has(session.id)) {
+      await this.answerPlanEdit(session.id, text);
+      return;
+    }
+    // Flusso domande: testo libero per "Other" o reply numerico come fallback ai
+    // bottoni. Qualsiasi altro testo viene inoltrato alla sessione come sempre.
+    const flow = session ? this.questionFlows.get(session.id) : undefined;
+    if (flow) {
+      if (flow.awaitingOther) {
+        await this.answerOther(flow, text);
+        return;
+      }
+      const nums = parseNumericReply(text);
+      if (nums) {
+        const q = flow.sets[flow.setIndex][flow.qIndex];
+        if (nums.every(n => n >= 1 && n <= q.options.length)) {
+          if (q.multiSelect) {
+            flow.multiSel = nums.map(n => n - 1);
+            await this.doneMultiSelect(flow, flow.qIndex);
+          } else {
+            await this.answerSingle(flow, flow.qIndex, nums[0] - 1);
+          }
+          return;
+        }
+      }
+    }
     // I comandi del bot sono già gestiti da grammy (bot.command). Quelli che
     // arrivano qui (slash command di Claude: /clear, /compact, /exit,
     // /frontend-release, …) vengono inoltrati alla sessione attiva, slash incluso.
@@ -1181,19 +1788,9 @@ export class TelegramBot {
       if (sessionId !== this.deps.manager.getActive()) return;
       this.toolBurst(sessionId).close();
       this.resetSummarize(sessionId);
-      // Fix 2: elenco numerato completo + bottoni con etichetta corta (mai troncati).
-      const token = randomUUID();
-      this.pendingPrompts.set(token, { sessionId, questions, text: promptMessage(questions) });
-      const { options, hint } = promptLayout(questions, token);
-      if (!this.chatId) return;
-      const text = promptMessage(questions) + hint;
-      if (!options.length) {
-        void this.bot.api.sendMessage(this.chatId, text, { parse_mode: 'HTML' }).catch(this.logCatch('prompt send'));
-        return;
-      }
-      const kb = new InlineKeyboard();
-      for (const o of options) kb.text(o.label, o.callback).row();
-      void this.bot.api.sendMessage(this.chatId, text, { parse_mode: 'HTML', reply_markup: kb }).catch(this.logCatch('prompt send'));
+      // Fix 2: flusso domande multiple — accoda il set e mostra una domanda alla
+      // volta (single-select, multi-select con toggle+Done, "Other" a testo libero).
+      this.track(this.onSessionPrompt(sessionId, questions), 'prompt flow');
     });
     bus.on('session.tool', e => {
       if (!this.deps.manager.isArmed()) return;
@@ -1211,12 +1808,16 @@ export class TelegramBot {
       if (!this.deps.manager.isArmed()) return;
       this.toolBurst(permission.sessionId).close();
       this.resetSummarize(permission.sessionId);
-      const kb = new InlineKeyboard()
-        .text('✓ Approve', `perm:approve:${permission.id}`)
-        .text('✗ Reject', `perm:deny:${permission.id}`);
+      const kb = permissionKeyboard(permission);
       if (this.chatId) {
-        void this.bot.api.sendMessage(this.chatId, permissionMessage(permission), { parse_mode: 'HTML', reply_markup: kb }).catch(this.logCatch('permission send'));
+        this.track(this.sendChunked(this.chatId, permissionMessage(permission), { reply_markup: kb }), 'permission send');
       }
+    });
+    bus.on('session.dialog', ({ sessionId, dialog }) => {
+      if (!this.deps.manager.isArmed()) return;
+      this.toolBurst(sessionId).close();
+      this.resetSummarize(sessionId);
+      this.track(this.onSessionDialog(sessionId, dialog), 'dialog send');
     });
     bus.on('session.result', e => {
       if (!this.deps.manager.isArmed() || e.sessionId !== this.deps.manager.getActive()) return;
@@ -1234,6 +1835,9 @@ export class TelegramBot {
       this.typing.stop(); // errore: niente più "sta scrivendo"
       this.toolBurst(e.sessionId).close();
       this.resetSummarize(e.sessionId);
+      const flow = this.questionFlows.get(e.sessionId);
+      if (flow) this.deleteFlow(flow); // errore: niente domande pendenti
+      this.pendingPlanEdits.delete(e.sessionId);
       this.notify(`❌ <b>${htmlEscape(e.message.slice(0, 500))}</b>`);
     });
   }

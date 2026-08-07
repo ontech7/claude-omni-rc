@@ -2,6 +2,57 @@
 
 ## [Unreleased]
 
+### Hardening pass (breaking defaults)
+
+- **Long replies no longer vanish.** Telegram rejects messages over 4096
+  characters and the send was swallowed by a `.catch`, so a long answer never
+  arrived. Text is now split into several messages at line boundaries, reopening
+  any HTML tag left open across the cut.
+- **Permission prompts no longer hang after a daemon restart.** The notification
+  chat is persisted in `state.json`. When no chat is bound, the
+  `PermissionRequest` hook gets no decision (native in-terminal prompt) instead
+  of blocking the session for `PERMISSION_TIMEOUT_SECONDS` and then denying.
+- **Private chats only.** The bot refuses groups, supergroups and channels, and
+  never binds one as a notification target — a group could otherwise receive the
+  full session stream.
+- **BREAKING: `/new` defaults to `--standard`.** Headless sessions ask before
+  every tool call. Automode is now opt-in per session (`--auto`) or globally
+  (`DEFAULT_PERMISSION_MODE=auto`). Sessions restored from an older `state.json`
+  without an explicit mode also ask.
+- **BREAKING: `/new` requires `WORKSPACE_DIRS`.** It no longer falls back to
+  `$HOME`, which rooted an unattended agent at every file you own. The installer
+  now asks for a project root.
+- **`state.json` is written atomically** (temp file + rename). An unreadable
+  state file is kept as `state.json.corrupt-<ts>` and reported, instead of being
+  silently replaced by an empty one — losing sessions and authorized users.
+- **Much lower idle CPU.** Overlapping polls are skipped, the process table is
+  snapshotted once per poll instead of once per session, and a tracked session's
+  real cwd is re-checked every `CWD_REFRESH_MS` (default 10s) rather than on
+  every 500 ms poll.
+- Added [SECURITY.md](SECURITY.md) and a security section in the README, with
+  the known limitations stated rather than omitted.
+- Remaining Italian user-facing strings translated to English.
+- **Multiple-choice questions no longer get stuck.** `AskUserQuestion` is now a
+  proper flow: question sets are queued and shown one at a time, with
+  single-select, multi-select (toggle + Done) and a free-text "Other" option.
+  Answers are delivered per question to terminal sessions (option numbers) and
+  as one message per set to headless sessions, so Claude continues after the
+  last answer instead of leaving the input blocked.
+- **Plan approval and model refusals no longer strand the session.**
+  - **Plan approval** (`ExitPlanMode`, headless sessions) arrives as a 📋
+    message with the plan text and ✓ Approve / ✗ Reject / ✏️ Edit buttons — Edit
+    asks for the new plan text as a message, and the edited plan is sent back
+    via `updatedInput`. Previously the plan was auto-approved in automode or
+    shown as a raw permission JSON in standard mode, with no way to review or
+    edit it. Terminal sessions still show the plan approval as a full-screen
+    terminal UI the bot cannot drive — documented in the README.
+  - **Model refusal** (`refusal_fallback_prompt`, the one `request_user_dialog`
+    kind the CLI emits) offers 🔄 Retry / Skip, answered with the CLI's
+    `retry_fallback` / `cancelled` result. Any unknown dialog kind is shown
+    with a Cancel button instead of being ignored — an ignored dialog parks the
+    turn and blocks the user. Unanswered dialogs time out into the CLI's
+    default behavior, and `/stop`, `/delete` and `/rc off` cancel them.
+
 - **Headless sessions are now provider-agnostic ("omni")** — the daemon spawns
   `claude` with the provider configured in `.env` (`ANTHROPIC_BASE_URL` /
   `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`), falling back to Ollama when

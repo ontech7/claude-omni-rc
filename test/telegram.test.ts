@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseCommand, parseNewFlags, parseCallbackData, permissionMessage, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue } from '../bot/telegram.js';
+import { resolveHeadlessProjectDir, isPrivateChat, splitHtmlMessage, parseCommand, parseNewFlags, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToInjection, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard } from '../bot/telegram.js';
 import type { ToolBurstSink } from '../bot/telegram.js';
 
 describe('parseCommand', () => {
@@ -20,9 +20,9 @@ describe('parseCommand', () => {
 
 describe('parseNewFlags', () => {
   it('parses --model and --auto/--standard in any order', () => {
-    expect(parseNewFlags('write a haiku')).toEqual({ mode: 'auto', text: 'write a haiku' });
+    expect(parseNewFlags('write a haiku')).toEqual({ text: 'write a haiku' }); // nessun flag → decide la config
     expect(parseNewFlags('--standard review this')).toEqual({ mode: 'standard', text: 'review this' });
-    expect(parseNewFlags('--model deepseek-v4-flash:0731-cloud refactor')).toEqual({ mode: 'auto', model: 'deepseek-v4-flash:0731-cloud', text: 'refactor' });
+    expect(parseNewFlags('--model deepseek-v4-flash:0731-cloud refactor')).toEqual({ model: 'deepseek-v4-flash:0731-cloud', text: 'refactor' });
     expect(parseNewFlags('--standard --model claude-sonnet-4-5 fix the bug')).toEqual({ mode: 'standard', model: 'claude-sonnet-4-5', text: 'fix the bug' });
     expect(parseNewFlags('--model m1 --auto go')).toEqual({ mode: 'auto', model: 'm1', text: 'go' });
   });
@@ -43,10 +43,99 @@ describe('parseCallbackData extensions', () => {
   it('parses question answer callbacks', () => {
     expect(parseCallbackData('q:answer:tok1:0:2')).toEqual({ action: 'answer', id: 'tok1', questionIndex: 0, index: 2 });
   });
+  it('parses done/other/cancel callbacks (4 parts)', () => {
+    expect(parseCallbackData('q:done:tok1:0')).toEqual({ action: 'done', id: 'tok1', questionIndex: 0 });
+    expect(parseCallbackData('q:other:tok1:1')).toEqual({ action: 'other', id: 'tok1', questionIndex: 1 });
+    expect(parseCallbackData('q:cancel:tok1:2')).toEqual({ action: 'cancel', id: 'tok1', questionIndex: 2 });
+  });
   it('parses delete callbacks', () => {
     expect(parseCallbackData('sess:del:abc')).toEqual({ action: 'del', id: 'abc' });
     expect(parseCallbackData('sess:del-yes:abc')).toEqual({ action: 'del-yes', id: 'abc' });
     expect(parseCallbackData('sess:del-no:abc')).toEqual({ action: 'del-no', id: 'abc' });
+  });
+  it('parses dialog callbacks', () => {
+    expect(parseCallbackData('dlg:retry:d1')).toEqual({ action: 'dlg-retry', id: 'd1' });
+    expect(parseCallbackData('dlg:skip:d1')).toEqual({ action: 'dlg-skip', id: 'd1' });
+    expect(parseCallbackData('perm:edit:p1')).toEqual({ action: 'perm-edit', id: 'p1' });
+  });
+});
+
+describe('dialog helpers', () => {
+  it('dialogMessage renders a refusal fallback with the model', () => {
+    const dlg = { id: 'd1', dialogKind: 'refusal_fallback_prompt', payload: { fallbackModel: 'claude-haiku-4-5', guidanceText: 'refused' } };
+    const msg = dialogMessage(dlg, { title: 'my-proj' } as any);
+    expect(msg).toContain('Model refused');
+    expect(msg).toContain('my-proj');
+    expect(msg).toContain('claude-haiku-4-5');
+  });
+  it('dialogMessage renders an unknown kind without crashing', () => {
+    const dlg = { id: 'd1', dialogKind: 'brand_new_kind', payload: {} };
+    const msg = dialogMessage(dlg);
+    expect(msg).toContain('brand_new_kind');
+  });
+  it('dialogKeyboard builds the right buttons per kind', () => {
+    const ref = dialogKeyboard({ id: 'd1', dialogKind: 'refusal_fallback_prompt', payload: {} });
+    const refRows = (ref as any).inline_keyboard.flat().map((b: any) => b.text);
+    expect(refRows).toEqual(['🔄 Retry', 'Skip']);
+    const unknown = dialogKeyboard({ id: 'd1', dialogKind: 'other', payload: {} });
+    const unknownRows = (unknown as any).inline_keyboard.flat().map((b: any) => b.text);
+    expect(unknownRows).toEqual(['Cancel']);
+  });
+});
+
+describe('permissionMessage / permissionKeyboard for ExitPlanMode', () => {
+  it('shows the plan text instead of the raw JSON', () => {
+    const req = { id: 'p1', sessionId: 'sess12345678', toolName: 'ExitPlanMode', input: { plan: 'step 1\nstep 2' }, createdAt: '' };
+    const msg = permissionMessage(req);
+    expect(msg).toContain('Plan approval');
+    expect(msg).toContain('step 1');
+    expect(msg).not.toContain('"plan"');
+  });
+  it('adds an Edit button for ExitPlanMode', () => {
+    const req = { id: 'p1', sessionId: 's1', toolName: 'ExitPlanMode', input: { plan: 'p' }, createdAt: '' };
+    const kb = permissionKeyboard(req);
+    const rows = (kb as any).inline_keyboard.flat().map((b: any) => b.text);
+    expect(rows).toEqual(['✓ Approve', '✗ Reject', '✏️ Edit']);
+  });
+  it('keeps Approve/Reject only for other tools', () => {
+    const req = { id: 'p1', sessionId: 's1', toolName: 'Bash', input: { command: 'ls' }, createdAt: '' };
+    const kb = permissionKeyboard(req);
+    const rows = (kb as any).inline_keyboard.flat().map((b: any) => b.text);
+    expect(rows).toEqual(['✓ Approve', '✗ Reject']);
+  });
+});
+
+describe('question flow helpers', () => {
+  const q = { question: 'Pick', options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] };
+
+  it('answerSummary renders option labels and free text', () => {
+    expect(answerSummary({ kind: 'option', labels: ['A', 'C'] })).toBe('A, C');
+    expect(answerSummary({ kind: 'other', text: 'custom' })).toBe('custom');
+  });
+
+  it('answerToInjection maps labels to 1-based numbers, comma-separated for multi', () => {
+    expect(answerToInjection(q, { kind: 'option', labels: ['B'] })).toBe('2');
+    expect(answerToInjection(q, { kind: 'option', labels: ['A', 'C'] })).toBe('1, 3');
+    expect(answerToInjection(q, { kind: 'other', text: 'custom' })).toBe('custom');
+    expect(answerToInjection(q, { kind: 'option', labels: ['unknown'] })).toBe('');
+  });
+
+  it('answersToMessage builds one line per question with the answer summary', () => {
+    const out = answersToMessage(
+      [{ header: 'Lens', question: 'Which?', options: [] }, { question: 'Notes', options: [] }],
+      [{ kind: 'option', labels: ['A'] }, { kind: 'other', text: 'free' }],
+    );
+    expect(out).toContain('Lens: Which? → A');
+    expect(out).toContain('Notes → free');
+  });
+
+  it('parseNumericReply accepts numbers and comma lists, rejects other text', () => {
+    expect(parseNumericReply('2')).toEqual([2]);
+    expect(parseNumericReply('1, 3')).toEqual([1, 3]);
+    expect(parseNumericReply(' 2 , 4 ')).toEqual([2, 4]);
+    expect(parseNumericReply('abc')).toBeUndefined();
+    expect(parseNumericReply('0')).toBeUndefined();
+    expect(parseNumericReply('')).toBeUndefined();
   });
 });
 
@@ -492,5 +581,71 @@ describe('ToolBurstAggregator with throttled sink', () => {
       expect(sends).toHaveLength(1);
       expect(edits).toHaveLength(4);
     } finally { vi.useRealTimers(); }
+  });
+});
+
+describe('splitHtmlMessage', () => {
+  it('returns a single chunk when the text fits', () => {
+    expect(splitHtmlMessage('hello', 100)).toEqual(['hello']);
+  });
+  it('never emits a chunk longer than max', () => {
+    const long = Array.from({ length: 50 }, (_, i) => `line ${i} ${'x'.repeat(40)}`).join('\n');
+    for (const c of splitHtmlMessage(long, 200)) expect(c.length).toBeLessThanOrEqual(200);
+  });
+  it('loses no visible text across the split', () => {
+    const long = Array.from({ length: 50 }, (_, i) => `line ${i}`).join('\n');
+    const joined = splitHtmlMessage(long, 100).join('\n');
+    expect(joined.replace(/\s+/g, ' ')).toBe(long.replace(/\s+/g, ' '));
+  });
+  it('prefers breaking at a newline', () => {
+    const text = `${'a'.repeat(40)}\n${'b'.repeat(40)}`;
+    const parts = splitHtmlMessage(text, 50);
+    expect(parts[0]).toBe('a'.repeat(40));
+    expect(parts[1]).toBe('b'.repeat(40));
+  });
+  it('closes and reopens an open tag across the boundary', () => {
+    const text = `<pre>${'a'.repeat(60)}\n${'b'.repeat(60)}</pre>`;
+    const parts = splitHtmlMessage(text, 80);
+    expect(parts).toHaveLength(2);
+    expect(parts[0].startsWith('<pre>')).toBe(true);
+    expect(parts[0].endsWith('</pre>')).toBe(true);
+    expect(parts[1].startsWith('<pre>')).toBe(true);
+    expect(parts[1].endsWith('</pre>')).toBe(true);
+  });
+  it('never splits inside a tag', () => {
+    const text = `<a href="https://example.com/very/long/path">${'x'.repeat(80)}</a>`;
+    for (const c of splitHtmlMessage(text, 60)) {
+      expect((c.match(/</g) ?? []).length).toBe((c.match(/>/g) ?? []).length);
+    }
+  });
+  it('hard-splits a single word with no break opportunity', () => {
+    const parts = splitHtmlMessage('x'.repeat(250), 100);
+    expect(parts.length).toBeGreaterThan(1);
+    expect(parts.join('')).toBe('x'.repeat(250));
+  });
+});
+
+describe('isPrivateChat', () => {
+  it('accepts a private chat', () => {
+    expect(isPrivateChat({ type: 'private' })).toBe(true);
+  });
+  it('rejects groups, supergroups and channels', () => {
+    expect(isPrivateChat({ type: 'group' })).toBe(false);
+    expect(isPrivateChat({ type: 'supergroup' })).toBe(false);
+    expect(isPrivateChat({ type: 'channel' })).toBe(false);
+  });
+  it('rejects a missing chat', () => {
+    expect(isPrivateChat(undefined)).toBe(false);
+  });
+});
+
+describe('resolveHeadlessProjectDir', () => {
+  it('uses the first configured workspace', () => {
+    expect(resolveHeadlessProjectDir(['/tmp/proj', '/tmp/other'])).toEqual({ dir: '/tmp/proj' });
+  });
+  it('refuses to fall back to the home directory when no workspace is configured', () => {
+    const r = resolveHeadlessProjectDir([]);
+    expect(r.dir).toBeUndefined();
+    expect(r.error).toContain('WORKSPACE_DIRS');
   });
 });

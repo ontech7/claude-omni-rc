@@ -33,11 +33,36 @@ export function createExec(opts: { timeoutMs?: number } = {}): ExecFn {
   return (args, o) => sh('tmux', args, o);
 }
 
+// Fotografia della tabella dei processi: ppid → figli e pid → eseguibile.
+// Costruirla costa uno spawn di `ps`, quindi va presa una volta e riusata per
+// tutte le sessioni dello stesso giro di polling.
+export interface ProcessTree {
+  children: Map<string, string[]>;
+  comms: Map<string, string>;
+}
+
 export class TmuxClient {
   constructor(
     private exec: ExecFn = createExec(),
     private sh: ShExecFn = createShExec(),
   ) {}
+
+  async processTree(): Promise<ProcessTree | undefined> {
+    const ps = await this.sh('ps', ['-o', 'pid=,ppid=,comm=']);
+    if (ps.code !== 0) return undefined;
+    const children = new Map<string, string[]>(); // ppid → [figli]
+    const comms = new Map<string, string>();      // pid → eseguibile
+    for (const line of ps.stdout.split('\n')) {
+      const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/);
+      if (!m) continue;
+      const [, pid, ppid, comm] = m;
+      comms.set(pid, comm);
+      const kids = children.get(ppid) ?? [];
+      kids.push(pid);
+      children.set(ppid, kids);
+    }
+    return { children, comms };
+  }
 
   async listSessions(): Promise<string[]> {
     const r = await this.exec(['list-sessions', '-F', '#{session_name}']);
@@ -109,7 +134,7 @@ export class TmuxClient {
   // Dal pane_pid (la radice del pane) scende nell'albero dei processi fino al
   // primo il cui eseguibile è `claude` e ne legge il cwd con lsof. undefined se
   // il processo non c'è o non è leggibile → il chiamante ripiega sul cwd del pane.
-  async claudeCwd(target: string): Promise<string | undefined> {
+  async claudeCwd(target: string, tree?: ProcessTree): Promise<string | undefined> {
     try {
       const t = await this.resolveTarget(target);
       const pidRes = await this.exec(['display-message', '-p', '-t', t, '#{pane_pid}']);
@@ -117,19 +142,11 @@ export class TmuxClient {
       const root = pidRes.stdout.trim();
       if (!/^\d+$/.test(root)) return undefined;
 
-      const ps = await this.sh('ps', ['-o', 'pid=,ppid=,comm=']);
-      if (ps.code !== 0) return undefined;
-      const children = new Map<string, string[]>(); // ppid → [figli]
-      const comms = new Map<string, string>();      // pid → eseguibile
-      for (const line of ps.stdout.split('\n')) {
-        const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/);
-        if (!m) continue;
-        const [, pid, ppid, comm] = m;
-        comms.set(pid, comm);
-        const kids = children.get(ppid) ?? [];
-        kids.push(pid);
-        children.set(ppid, kids);
-      }
+      // Lo snapshot può arrivare dal chiamante: il watcher ne prende UNO per
+      // poll e lo condivide fra le sessioni, invece di uno `ps` per sessione.
+      const snapshot = tree ?? await this.processTree();
+      if (!snapshot) return undefined;
+      const { children, comms } = snapshot;
 
       // BFS dalla radice: il primo processo con eseguibile `claude` è quello che
       // sta scrivendo il transcript di questa sessione.

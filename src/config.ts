@@ -7,6 +7,10 @@ export interface Config {
   pairingCode?: string;
   ollamaBaseUrl: string;
   defaultModel: string;
+  // Modo permessi delle sessioni headless quando /new non specifica un flag.
+  // Default 'standard' (ogni tool passa dai bottoni): 'auto' significa un agente
+  // non presidiato con accesso a Bash sulla macchina — va scelto, non subìto.
+  defaultPermissionMode: 'auto' | 'standard';
   maxHeadlessSessions: number;
   permissionTimeoutSeconds: number;
   workspaceDirs: string[];
@@ -17,6 +21,10 @@ export interface Config {
   armedOnStart: boolean;
   idleGraceMs: number;
   pollIntervalMs: number;
+  // Ogni quanto ricontrollare il cwd del processo claude di una sessione già
+  // tracciata. Costa `ps` + `lsof`, quindi non va fatto a ogni poll: serve solo
+  // a seguire una sessione che si sposta in un git worktree.
+  cwdRefreshMs: number;
 }
 
 function expandHome(p: string): string {
@@ -41,6 +49,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     pairingCode: env.PAIRING_CODE || undefined,
     ollamaBaseUrl: env.OLLAMA_BASE_URL ?? 'http://127.0.0.1:11434',
     defaultModel: env.DEFAULT_MODEL ?? 'deepseek-v4-flash:0731-cloud',
+    defaultPermissionMode: env.DEFAULT_PERMISSION_MODE === 'auto' ? 'auto' : 'standard',
     maxHeadlessSessions: parseNum(env, 'MAX_HEADLESS_SESSIONS', 2),
     permissionTimeoutSeconds: parseNum(env, 'PERMISSION_TIMEOUT_SECONDS', 120),
     workspaceDirs: (env.WORKSPACE_DIRS ?? '').split(':').map(s => expandHome(s.trim())).filter(Boolean),
@@ -51,5 +60,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     armedOnStart: env.ARMED_ON_START === 'true',
     idleGraceMs: parseNum(env, 'IDLE_GRACE_MS', 3000),
     pollIntervalMs: parseNum(env, 'POLL_INTERVAL_MS', 500),
+    cwdRefreshMs: parseNum(env, 'CWD_REFRESH_MS', 10_000),
   };
 }

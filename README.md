@@ -19,7 +19,7 @@ LLMs, or Claude itself.</p>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/ontech7/claude-omni-rc" alt="License"></a>
 </p>
 
-<p align="center"><sub><a href="https://ontech7.github.io/claude-omni-rc/">Landing page</a> · <a href="AI-GUIDE.md">AI-GUIDE.md</a> — AI agents, start at <a href="AI-GUIDE.md">AI-GUIDE.md</a></sub></p>
+<p align="center"><sub><a href="https://ontech7.github.io/claude-omni-rc/">Landing page</a> · <a href="SECURITY.md">SECURITY.md</a> · <a href="AI-GUIDE.md">AI-GUIDE.md</a> — AI agents, start at <a href="AI-GUIDE.md">AI-GUIDE.md</a></sub></p>
 
 ---
 
@@ -36,27 +36,18 @@ Tool: Bash
 ✅ Ran it: ollama list …
 ```
 
-Headline use case: you leave a long task running (a build, a migration, a
-multi-hour review), arm claude-omni-rc, walk out the door — and keep steering that
-same session, plus any other session you have running, from your phone.
-Starting brand-new conversations is a bonus, not the point.
+Headline use case: you leave a long task running, arm claude-omni-rc, walk out
+the door — and keep steering that session, plus any other you have running,
+from your phone. Starting brand-new conversations is a bonus, not the point.
 
-## Why there is no native remote control
+**Why not the native `/remote-control`?** Since Claude Code v2.1.196 it is
+disabled when `ANTHROPIC_BASE_URL` doesn't point at `api.anthropic.com`, it
+needs a claude.ai account, and it syncs transcripts through Anthropic's
+servers. `claude-omni-rc` is the local replacement: a daemon on your machine
+plus a Telegram bot (long-polling, outbound-only, no open ports), gated by an
+explicit `armed` switch. Unofficial, not affiliated with Anthropic or Ollama.
 
-Claude Code ships a `/remote-control` feature, but it is **architecturally
-incompatible** with a local-Ollama setup: since v2.1.196 it is disabled when
-`ANTHROPIC_BASE_URL` does not point to `api.anthropic.com`, it requires a
-claude.ai account (Pro/Max/Team/Enterprise), and it syncs your transcripts
-through Anthropic's servers.
-
-If you drive Claude Code with an Ollama-served model — `ANTHROPIC_BASE_URL`
-pointing at Ollama, a placeholder `ollama` token, models like
-`deepseek-v4-flash:0731-cloud` — you get none of that. `claude-omni-rc` is a
-**local** replacement: a daemon on your machine plus a Telegram bot
-(long-polling, outbound-only, no open ports), gated by an explicit
-`armed` switch. It is unofficial and not affiliated with Anthropic or Ollama.
-
-## Quick install
+## Install
 
 ```bash
 git clone https://github.com/ontech7/claude-omni-rc
@@ -64,91 +55,64 @@ cd claude-omni-rc
 ./install.sh
 ```
 
-The guided installer asks you the few questions it needs — your Telegram bot
-token, who is allowed to control it, whether to download the models — then
-installs the dependencies and registers the background daemon. It never
-overwrites a value you already set in `.env`. After it finishes: message the
-bot, pair with `/start <code>` (if you chose a pairing code), then `/rc on`.
+The guided installer asks only what it needs — bot token, who may control it,
+where headless sessions may run — then installs dependencies, registers the
+background daemon and adds the Claude Code hooks. It never overwrites a value
+already in `.env`. Then, from Telegram: `/start <code>` if you chose a pairing
+code, and `/rc on`.
 
-Prefer to see what's happening? [Manual install](#manual-install) below.
+`./install.sh --uninstall` removes the launchd agent, the hooks and the
+`omni-rc` shell function, and asks before touching the Ollama model and the
+state dir. Your `.env` is kept.
 
-To remove everything: `./install.sh --uninstall` — it asks before removing the
-Ollama model, then removes the launchd agent, the Claude Code hooks
-(SessionStart + PermissionRequest) and (on confirmation) the state dir. Your
-`.env` is kept so a reinstall is one command.
+| Requirement | Why |
+|---|---|
+| **Node.js 22+** | runtime (required) |
+| **Ollama**, running | the default provider — not needed if you point `ANTHROPIC_BASE_URL` at another one |
+| **tmux** | required for terminal sessions: 1:1 input injection and `/view` |
 
-## Prerequisites
+### Manual install
 
-| Tool | Why | Required |
-|------|-----|----------|
-| **Node.js 22+** | runtime | yes |
-| **Ollama** (running) | serves the models | yes |
-| **tmux** | inject input 1:1 and resolve the project dir for transcripts | for terminal sessions |
+<details>
+<summary>What <code>./install.sh</code> does under the hood, step by step</summary>
 
-Model pulled by the installer (or `ollama pull` yourself):
+**1. Bot token.** Message [@BotFather](https://t.me/BotFather), send `/newbot`,
+copy the token.
 
-- `deepseek-v4-flash:0731-cloud` — the default model for headless sessions
+**2. `.env`.** `cp .env.example .env`, then fill in at least:
 
-## Manual install
+- `TELEGRAM_BOT_TOKEN`
+- one authorization method: `ALLOWED_USER_IDS` (your numeric id, from
+  [@userinfobot](https://t.me/userinfobot)) or `PAIRING_CODE` (a secret; the
+  first `/start <code>` authorizes that account)
+- `WORKSPACE_DIRS` — required by `/new`
 
-This is what `./install.sh` does under the hood, step by step.
-
-**1. Get a bot token.** Message [@BotFather](https://t.me/BotFather) on
-Telegram, send `/newbot`, follow the prompts, and copy the token it gives you.
-
-**2. Configure `.env`.**
-
-```bash
-cp .env.example .env
-```
-
-Fill in at least:
-
-- `TELEGRAM_BOT_TOKEN` — the token from BotFather
-- one authorization method:
-  - `ALLOWED_USER_IDS` — your Telegram numeric id (find it with
-    [@userinfobot](https://t.me/userinfobot)), or
-  - `PAIRING_CODE` — a secret code; the first `/start <code>` authorizes that account
-
-Everything else has a sensible default (see [Configuration](#configuration)).
-
-**3. Install and start.**
+**3. Run.**
 
 ```bash
 npm install
-./scripts/install-launchd.sh   # background daemon that restarts on login
+./scripts/install-launchd.sh   # background daemon, restarts on login
 ```
 
-For a first test in the foreground instead: `npm run dev` (logs to the
-terminal). The launchd logs go to `~/.claude-omni-rc/logs/daemon.log`.
+For a foreground test instead: `npm run dev`. Logs go to
+`~/.claude-omni-rc/logs/daemon.log`.
 
-After code changes, restart the daemon to load the new code (no reinstall):
-`./scripts/restart.sh` (or `./scripts/restart.sh status` to check it).
+| Script | What it does |
+|---|---|
+| `./scripts/start.sh` | installs anything missing, then starts the daemon |
+| `./scripts/stop.sh` | stops the daemon, kills headless sessions, removes the hooks |
+| `./scripts/restart.sh` | reload after code changes (`status` to check) |
 
-Start and stop the whole thing (daemon + headless sessions + hooks):
-
-```bash
-./scripts/start.sh   # checks everything is installed (runs ./install.sh if not), then starts the daemon
-./scripts/stop.sh    # stops the daemon, kills headless sessions, removes the Claude Code hooks
-```
-
-`stop.sh` also removes the SessionStart/PermissionRequest hooks from
+`stop.sh` removes the SessionStart/PermissionRequest hooks from
 `~/.claude/settings.json`, so sessions stop auto-attaching until you run
-`./scripts/start.sh` again. Your own terminal (tmux) sessions are never touched.
+`start.sh` again. Your own tmux sessions are never touched.
 
-## Telegram setup
-
-1. Open the chat with your bot.
-2. If you set a pairing code: send `/start <your-code>`. If you allowlisted
-   your user id, you're already in.
-3. Arm remote control: **`/rc on`**. While disarmed the daemon streams
-   nothing, injects nothing and relays nothing — the bot answers only
-   `/rc`, `/help` and `/start`.
+</details>
 
 ## Usage
 
-Run your interactive Claude Code sessions the usual way, inside tmux. The
-installer adds an `omni-rc` shell function that does it for you:
+Run your interactive sessions inside tmux — the installer adds an `omni-rc`
+shell function that does it for you:
 
 ```bash
 omni-rc my-project                          # tmux session claude:my-project + claude
@@ -157,297 +121,233 @@ omni-rc my-project -p "review the current diff"
 omni-rc -l                                  # list claude:* sessions
 ```
 
-(Equivalent to `tmux new -s claude:my-project` and running `claude` inside;
-`omni-rc --help` lists every option. If the session already exists, `omni-rc`
-just reattaches.)
+It picks the provider the same way headless sessions do: `DEFAULT_MODEL` from
+`.env` by default (Ollama), a `claude-*` model (or the `opus`/`sonnet`/`haiku`/
+`fable` aliases) runs on Anthropic, and an explicit `ANTHROPIC_BASE_URL` wins
+over both. `omni-rc --help` lists every option; an existing session is just
+reattached.
 
-`omni-rc` picks the provider for you, the same way headless sessions do:
-without `-m` it uses `DEFAULT_MODEL` from `.env` (Ollama by default), a model
-that starts with `claude-` (or the `opus`/`sonnet`/`haiku`/`fable` aliases)
-runs on Anthropic, and an explicit `ANTHROPIC_BASE_URL` in `.env` overrides
-both and wins for every model.
+| Command | What it does |
+|---------|--------------|
+| `/start <code>` | pair this Telegram account (first time) |
+| `/rc` · `/rc on` · `/rc off` · `/rc status` | global armed switch — no argument toggles it |
+| `/sessions` | list sessions, switch the active one |
+| `/view` | show the active session's current screen |
+| `/new [--auto\|--standard] [--model <name>] <text>` | headless session + your prompt (standard by default: approve/reject buttons) |
+| `/attach <project>` | attach a `claude:<project>` tmux session |
+| `/stop` | abort the running turn (Ctrl+C for a tmux pane) |
+| `/status` | the active session's status |
+| `/history [id]` | last messages of a session |
+| `/delete [id]` | delete a session (headless: stops it; terminal: untracks only) |
+| `/help` | list the commands |
 
-The daemon tracks `claude:*` tmux sessions (and any session attached via the
-`SessionStart` hook or `/attach`); with `/attach` you can also add one
-explicitly.
+Plain text goes to the active session — a new turn for headless sessions, typed
+input (pasted + Enter) for terminal ones. Slash commands the bot doesn't own
+(`/clear`, `/compact`, `/exit`, …) are forwarded verbatim, so Claude Code's own
+commands work from the phone.
 
 ### How sessions get attached
 
 Only **your sessions** are tracked — nothing scans `~/.claude/projects` on its
-own. A session appears via the `claude:*` tmux discovery, the `SessionStart`
-hook, or `/attach`. Every Claude Code session you start is registered,
-whatever model backs it — Ollama, another provider via `ANTHROPIC_BASE_URL`,
-or Anthropic itself.
+own. A session appears via `claude:*` tmux discovery, the `SessionStart` hook,
+or `/attach`, whatever model backs it.
 
-- **Chat, not screen** — for each tracked session the daemon reads the
-  conversation the CLI itself writes (`~/.claude/projects/<project>/…jsonl`)
-  and streams it to Telegram as a chat: assistant messages rendered from
-  markdown, your prompts echoed, tool calls grouped into a single `🔧` notice
-  per work burst (the first call creates the bubble, the following ones update
-  it). Notifications are event-driven — `❓` questions, permission buttons, `❌`
-  on serious errors — with no status chatter while Claude works. History is
-  never replayed: streaming starts from the moment you select
-  the session with `/sessions`.
-- **Multiple-choice questions** — when the model asks a question, it arrives as
-  a `❓` message with a numbered list of every option (with descriptions), plus
-  one inline button per option as a shortcut — nothing is truncated; tap or
-  reply with the number. `AskUserQuestion` is auto-allowed, so no raw-JSON
-  permission bubble appears.
-- **Interact 1:1** — a message you send is pasted into the session and
-  submitted (Enter). This needs tmux: a session not in tmux streams as chat
-  but is read-only.
-- **Headless sessions** (`/new`) stream their assistant text the same way.
-  They run in **automode by default** (every permission is auto-approved, no
-  prompts); add `--standard` to `/new` to get the remote-permission
-  approve/reject buttons instead. They are **provider-agnostic**: the daemon
-  spawns `claude` with the provider you configured in `.env`
-  (`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`),
-  falling back to Ollama (`OLLAMA_BASE_URL`) when unset. Pick a model per
-  session with `/new --model <name>` (default: `DEFAULT_MODEL`).
-- `/view` still grabs the full current screen of the active session whenever
-  you want the raw terminal.
+- **Chat, not screen** — the daemon tails the conversation the CLI writes and
+  streams it as a chat: markdown-rendered replies, your prompts echoed, tool
+  calls grouped into one `⚙️` bubble per work burst. Notifications are
+  event-driven (`❓` questions, permission buttons, `❌` on serious errors), with
+  no status chatter in between. History is never replayed: streaming starts
+  when you select the session with `/sessions`.
+- **Multiple-choice questions** arrive as a `❓` message, one question at a time
+  (single-select, multi-select with toggle + Done, and a free-text "Other"
+  option). Question sets are queued and shown in sequence; tap an option, or
+  reply with the option number.
+- **Plan approval** (headless sessions) arrives as a 📋 message with the plan
+  text and ✓ Approve / ✗ Reject / ✏️ Edit buttons — Edit asks you to send the
+  new plan text as a message, and the edited plan is sent back to the session.
+  A model refusal offers 🔄 Retry / Skip. Any other blocking dialog the CLI asks
+  for is shown with a Cancel button rather than ignored, so a session never
+  parks waiting for input you can't give. **Terminal sessions are different**:
+  the plan approval is a full-screen interactive UI inside the tmux pane that
+  the bot cannot drive — you can approve/reject the "Exit plan mode?"
+  permission from Telegram, but the plan itself must be approved at the
+  terminal. Start plan-heavy work with `/new` if you need to review plans from
+  your phone.
+- **Interact 1:1** — your message is pasted into the pane and submitted. Needs
+  tmux; a session outside tmux streams as chat but is read-only.
+- **Headless sessions** (`/new`) run in the first `WORKSPACE_DIRS` entry, which
+  must be set — `/new` refuses to start rather than falling back to your home
+  directory. They ask before **every** tool call by default; `--auto` runs them
+  unattended (read [SECURITY.md](SECURITY.md#automode) first), and
+  `DEFAULT_PERMISSION_MODE=auto` makes that the default. They use the provider
+  from `.env`, falling back to Ollama. **In automode the plan is approved
+  automatically** — the model's plan is accepted without a prompt, so you cannot
+  review or edit it from Telegram. Use `--standard` (or `/new` without `--auto`)
+  when you want to approve plans yourself.
+- **`/view`** grabs the raw current screen whenever you want the terminal.
 
-#### "I started claude without tmux — can I move it under tmux?"
+### Remote permissions
 
-No — a running process can't be adopted by tmux. There is no seamless way to
-move an already-started Claude Code session into a tmux pane (`reptyr` exists
-on Linux but is fragile and doesn't work on macOS). What you get instead:
+Permission requests arrive as a message with `✓ Approve` / `✗ Reject`, from
+headless and terminal sessions alike. Unanswered, they time out after
+`PERMISSION_TIMEOUT_SECONDS` (default 120) and are denied. Tools already
+covered by your allowlist rules never generate a notification.
 
-- **Read-only mirroring still works.** A session started outside tmux is
-  registered by the `SessionStart` hook and its transcript is streamed to
-  Telegram as a chat — you can follow it from your phone.
-- **What you lose without tmux:** sending input to the session (it's
-  read-only) and `/view` (there's no pane to capture). Headless `/new`
-  sessions are unaffected.
-- **The fix is to start under tmux from the beginning:** `omni-rc <name>`
-  (or `tmux new -s claude:<name>`). If you're already in a session and know
-  you'll want remote control, restart it with `omni-rc <name>` — the
-  `SessionStart` hook now reminds you with a warning when you start a session
-  outside tmux.
+Headless sessions use the Agent SDK flow (`canUseTool`); terminal sessions go
+through a `PermissionRequest` hook. **The hook fails open**: when the daemon is
+down, disarmed, or has no Telegram chat bound, it returns no decision and
+Claude Code shows its normal in-terminal prompt — a regular session is never
+blocked or auto-denied.
 
-### Auto-attach and remote permissions via hooks
+<details>
+<summary>The two Claude Code hooks, and how to add them by hand</summary>
 
-`./install.sh` also adds two Claude Code **hooks** that make a running session
-behave like the native `/remote-control`:
+`./install.sh` adds both to `~/.claude/settings.json` (idempotently):
 
 - **`SessionStart`** — registers every session with the daemon the moment it
-  starts: it reads the project dir from the working directory, records the
-  tmux session as the injection target if you're inside tmux (any tmux session
-  works, not just `claude:*`), and tells the daemon on
-  `127.0.0.1:${API_PORT}` to attach it. So a session you started without the
-  `claude:` naming convention can still be continued from Telegram.
-- **`PermissionRequest`** — delegates CLI permission decisions to Telegram for
-  terminal (tmux) sessions; see [Remote permissions](#remote-permissions).
-
-To add them manually, merge into `~/.claude/settings.json`:
+  starts, recording the tmux session as the injection target. A session started
+  without the `claude:` naming convention is still continuable from Telegram.
+- **`PermissionRequest`** — delegates CLI permission decisions to Telegram.
 
 ```json
 {
   "hooks": {
     "SessionStart": [
-      {
-        "hooks": [
-          { "type": "command", "command": "/abs/path/to/claude-omni-rc/scripts/attach.sh", "timeout": 10 }
-        ]
-      }
+      { "hooks": [{ "type": "command", "command": "/abs/path/to/claude-omni-rc/scripts/attach.sh", "timeout": 10 }] }
     ],
     "PermissionRequest": [
-      {
-        "hooks": [
-          { "type": "command", "command": "/abs/path/to/claude-omni-rc/scripts/permission-hook.sh", "timeout": 600 }
-        ]
-      }
+      { "hooks": [{ "type": "command", "command": "/abs/path/to/claude-omni-rc/scripts/permission-hook.sh", "timeout": 600 }] }
     ]
   }
 }
 ```
 
-Both hooks are idempotent. When the daemon is down or remote control is
-disarmed, SessionStart does nothing (Claude Code starts normally) and
-PermissionRequest returns no decision — Claude Code shows its native
-in-terminal prompt, so a regular session is never blocked.
+Note that `PermissionRequest` is global: it applies to every Claude Code session
+on the machine. See [SECURITY.md](SECURITY.md) for what that implies.
 
-| Command | What it does |
-|---------|--------------|
-| `/start <code>` | pair this Telegram account (first time) |
-| `/rc` (no arg) / `/rc on` / `/rc off` / `/rc status` | global armed switch — no argument toggles it |
-| `/sessions` | list sessions, switch the active one |
-| `/view` | show the active session's current screen |
-| `/new [--auto\|--standard] [--model <name>] <text>` | create a headless session and send it your prompt (automode by default; `--standard` for approve/reject buttons; `--model` to pick the model for this session) |
-| `/attach <project>` | attach a `claude:<project>` tmux session |
-| `/stop` | stop the active session (aborts the running turn; sends Ctrl+C to a tmux pane); reports whether a turn was actually aborted |
-| `/status` | show the active session's status |
-| `/history [id]` | show the last messages of a session (default: active) |
-| `/delete [id]` | delete a session (headless: stops it; terminal: untracks only) |
-| `/help` | list the commands |
+</details>
 
-Plain text messages go to the active session (default: the most recent one):
-headless sessions receive them as a new turn, terminal sessions receive them
-as typed input (pasted into the pane + Enter). Slash commands the bot doesn't
-own (e.g. `/clear`, `/compact`, `/exit`, `/frontend-release`) are forwarded
-verbatim to the active session too, so Claude Code's own commands work from
-the phone. Up to `MAX_HEADLESS_SESSIONS` headless sessions run concurrently —
-the Ollama Cloud quota is finite.
+### Media
 
-## Remote permissions
+Files and photos are saved to `~/.claude-omni-rc/inbox/` and forwarded to the
+session as a **file-path reference**, which the model reads via its extra
+directories. There is no image-input pipeline: a text-only model cannot *see* a
+picture you send.
 
-Permission requests arrive as a message with two buttons — from headless and
-terminal sessions alike — and you decide from your phone:
+## Security
 
-```
-🔧 Permission requested — session a1b2c3d4
-Tool: Bash
-{"command":"ollama list"}
+`claude-omni-rc` forwards Claude Code's ability to run commands on your machine
+to a Telegram chat. **Whoever can message your bot while remote control is armed
+can run code as your user.** There is no sandbox.
 
-[✓ Approve] [✗ Reject]
-```
+- Authorization is default-deny — set `ALLOWED_USER_IDS` or `PAIRING_CODE`.
+- Everything is gated on the `armed` switch (`/rc off` kills streaming,
+  injection and relay).
+- The bot works **only in a private chat**; it refuses groups and channels.
+- Headless sessions ask before every tool call unless you opt into `--auto`.
+- Your prompts, the model's replies and any file you send pass through
+  Telegram's servers, which are not end-to-end encrypted for bots.
 
-`✓ Approve` lets the tool run; `✗ Reject` blocks it and tells the model.
-An unanswered request times out after `PERMISSION_TIMEOUT_SECONDS` (default
-120) and is denied. Tools already covered by your allowlist rules (e.g. in
-`~/.claude/settings.json`) never generate a notification.
-
-- **Headless sessions** (`/new`) use the Agent SDK permission flow
-  (`canUseTool`).
-- **Terminal sessions** (Claude Code running in tmux) delegate via a
-  `PermissionRequest` hook that `./install.sh` adds to `~/.claude/settings.json`.
-  The hook forwards the request to the bot, waits for your verdict, and returns
-  it to Claude Code. When the daemon is down or remote control is disarmed the
-  hook returns no decision and Claude Code shows its normal in-terminal prompt
-  — claude-omni-rc never blocks or auto-denies a regular session.
-
-## Media
-
-- **Files** — saved to `~/.claude-omni-rc/inbox/` and forwarded to the session as
-  a file-path reference, which the model can read via its extra directories.
-- **Photos** — saved to the inbox the same way and forwarded as a path
-  reference only. The default model is text-only, so it cannot *see* the
-  picture; there is no image-input pipeline. Pick a vision-capable Ollama
-  model if you need that.
-
-## Architecture
-
-```
-claude-omni-rc/
-├── src/
-│   ├── daemon.ts            entry: config, wiring, shutdown, restart
-│   ├── config.ts            .env → typed config
-│   ├── bus.ts               typed pub/sub event bus
-│   ├── state.ts             persistent registry (~/.claude-omni-rc/state.json)
-│   ├── sessions/
-│   │   ├── manager.ts       session registry + armed switch + idle reaping
-│   │   ├── sdk-driver.ts    headless sessions (Claude Agent SDK query+resume)
-│   │   ├── tmux-watcher.ts  discover `claude:*` tmux sessions, prune dead ones
-│   │   ├── tmux-inject.ts   pane cwd, capture-pane (/view), paste-and-Enter input
-│   │   ├── transcript.ts    read the CLI transcripts (~/.claude/projects/…)
-│   │   └── transcript-watcher.ts  tail transcripts → chat events + status
-│   ├── permissions.ts       SDK canUseTool → Approve/Reject flow
-│   ├── api.ts               loopback HTTP API (SessionStart attach, permission hook, sessions)
-│   ├── input.ts             attachments → inbox
-│   └── ollama.ts            /api/show capabilities
-└── bot/
-    └── telegram.ts          grammy bot: commands, keyboards, chat streaming
-```
-
-Data flow: `Telegram ↔ bot ↔ bus ↔ sessions (SDK / tmux) ↔ Ollama`.
-
-- **Headless sessions** are owned by the daemon and driven via the Claude
-  Agent SDK (`query` + `resume`, `canUseTool`), version **0.3.221** (pinned —
-  the SDK is in preview and changes fast). Session ids are persisted, so
-  sessions survive daemon restarts.
-- **Terminal sessions** are discovered from tmux (`claude:*`) and streamed as a
-  chat by tailing the transcript the CLI writes; input is driven 1:1 by pasting
-  into the pane + Enter, and permissions are delegated through a
-  `PermissionRequest` hook. Streaming only runs while armed and follows the
-  session selected in `/sessions`.
-- **State** — the `armed` switch and the session registry — lives in
-  `~/.claude-omni-rc/state.json`.
-- **Concurrency** — at most `MAX_HEADLESS_SESSIONS` headless turns at once.
+Read [SECURITY.md](SECURITY.md) for the full trust boundaries, the caveat about
+the globally-installed `PermissionRequest` hook, and the known limitations
+(unauthenticated loopback API, non-expiring pairing codes).
 
 ## Configuration
 
-`.env` (or environment variables). Everything is optional except the bot
-token and one authorization method.
+`.env` (or environment variables). Everything is optional except the bot token
+and one authorization method — plus `WORKSPACE_DIRS` if you want `/new`.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `TELEGRAM_BOT_TOKEN` | — | bot token from @BotFather (**required**) |
 | `ALLOWED_USER_IDS` | — | comma-separated Telegram ids allowed to control |
 | `PAIRING_CODE` | — | secret code authorizing the first `/start <code>` |
-| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | where Ollama listens; also the fallback provider for headless sessions |
-| `ANTHROPIC_BASE_URL` | — | provider for headless sessions (unset → Ollama); e.g. `https://api.anthropic.com` or a proxy |
-| `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | — | credentials for the headless provider (Ollama uses the placeholder `ollama` token) |
-| `DEFAULT_MODEL` | `deepseek-v4-flash:0731-cloud` | model for headless sessions (override per-session with `/new --model`) |
+| `WORKSPACE_DIRS` | — | `:`-separated project roots for `/attach`; **required by `/new`**, which runs headless sessions in the first one |
+| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | where Ollama listens; also the fallback provider |
+| `ANTHROPIC_BASE_URL` | — | provider for sessions (unset → Ollama); e.g. `https://api.anthropic.com` or a proxy |
+| `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | — | credentials for that provider (Ollama uses the placeholder `ollama` token) |
+| `DEFAULT_MODEL` | `deepseek-v4-flash:0731-cloud` | model for headless sessions (per-session: `/new --model`) |
+| `DEFAULT_PERMISSION_MODE` | `standard` | permission mode for `/new` without a flag; `auto` runs unattended |
 | `MAX_HEADLESS_SESSIONS` | `2` | concurrent headless sessions |
 | `PERMISSION_TIMEOUT_SECONDS` | `120` | unanswered permission → deny |
-| `WORKSPACE_DIRS` | — | `:`-separated project roots for `/attach` |
 | `STATE_DIR` | `~/.claude-omni-rc` | where state, logs and the inbox live |
 | `INBOX_DIR` | `<STATE_DIR>/inbox` | incoming attachments |
 | `PROJECTS_DIR` | `~/.claude/projects` | where Claude Code stores session transcripts |
-| `API_PORT` | `4123` | loopback port for the local API (SessionStart hook, permission hook) |
+| `API_PORT` | `4123` | loopback port for the local API (both hooks) |
 | `ARMED_ON_START` | `false` | arm the remote control on daemon start |
 | `IDLE_GRACE_MS` | `3000` | how long a session must be quiet to count as idle |
 | `POLL_INTERVAL_MS` | `500` | tmux discovery polling interval |
+| `CWD_REFRESH_MS` | `10000` | how often to re-check a session's real cwd (costs a `ps` + `lsof`) |
 
-> Note: `~/.claude-omni-rc/logs/daemon.log` is a plain file without automatic
-> rotation — rotation is left to the OS (`newsyslog`) or to you.
+> `~/.claude-omni-rc/logs/daemon.log` has no automatic rotation — that's left to
+> the OS (`newsyslog`) or to you.
 
 ## Troubleshooting
 
-**"Not authorized. Send /start <pairing code>."**
-You're not allowlisted and haven't paired. Send `/start <code>` with the
-`PAIRING_CODE` from `.env`, or add your id to `ALLOWED_USER_IDS`.
+| Symptom | Fix |
+|---|---|
+| *"Not authorized"* | Send `/start <PAIRING_CODE>`, or add your id to `ALLOWED_USER_IDS`. The bot ignores group chats entirely. |
+| *"Remote control is off"* | The armed switch doing its job: send `/rc on` (or set `ARMED_ON_START=true`). |
+| *"/new refuses to start"* | `WORKSPACE_DIRS` is unset. There is no fallback to `$HOME` on purpose. |
+| The daemon seems dead | Check `~/.claude-omni-rc/logs/daemon.{log,err.log}`, then `npm run dev` to see errors live. |
+| A session is stuck on *running* | `/stop` aborts the turn via `AbortController`. |
+| Text *"can't be injected"* | That session isn't in tmux. Restart it with `omni-rc <name>`. |
+| A session doesn't show up | Sessions come from `claude:*` tmux discovery, the SessionStart hook or `/attach`. Check the hook is in `~/.claude/settings.json`, the daemon is up, and `API_PORT` is free. |
+| The session streams nothing | Only the **active** session streams — select it with `/sessions`. If it has no transcript, use `/view`. Check `PROJECTS_DIR` matches where the CLI writes. |
+| Permission prompts hang in the terminal | The daemon is armed but has no chat bound. Send any message to the bot; the chat is then remembered across restarts. |
+| A terminal session shows a plan I can't approve from the phone | The plan approval is a full-screen terminal UI the bot can't drive. Approve it at the terminal, or start plan-heavy work with `/new` (headless) to review plans from Telegram. |
 
-**The bot says "Remote control is off. Send /rc on."**
-That's the armed switch doing its job — everything is gated on it. Send
-`/rc on` from Telegram (or restart the daemon with `ARMED_ON_START=true`).
+**Can I move a running session into tmux?** No — a running process can't be
+adopted by tmux. A session started outside tmux is still mirrored read-only
+(you can follow it from your phone), but you lose input injection and `/view`.
+Start it with `omni-rc <name>` from the beginning; the SessionStart hook warns
+you when you don't.
 
-**The daemon doesn't seem to be running.**
-Check `~/.claude-omni-rc/logs/daemon.log` (and `daemon.err.log`), then re-run
-`./scripts/install-launchd.sh` or `npm run dev` to see errors in the terminal.
+**Where is my data?** State in `~/.claude-omni-rc/state.json`, attachments in
+`inbox/`, logs in `logs/`. Override the root with `STATE_DIR`.
 
-**Ollama is not reachable.**
-Start Ollama (the app or `ollama serve`). The daemon needs it at
-`OLLAMA_BASE_URL`.
+<details>
+<summary><b>Architecture</b></summary>
 
-**A headless session is stuck on "running".**
-Send `/stop` — it aborts the current turn via an `AbortController` and marks
-the session stopped.
+```
+src/
+├── daemon.ts            entry: config, wiring, shutdown
+├── config.ts            .env → typed config
+├── bus.ts               typed pub/sub event bus
+├── state.ts             persistent registry (atomic writes)
+├── permissions.ts       canUseTool / hook → Approve/Reject flow
+├── api.ts               loopback HTTP API (both hooks, session list)
+├── input.ts             attachments → inbox
+├── ollama.ts            capabilities, context length, tool-call summaries
+└── sessions/
+    ├── manager.ts       session registry + armed switch + idle reaping
+    ├── sdk-driver.ts    headless sessions (Agent SDK query + resume)
+    ├── tmux-watcher.ts  discover `claude:*` sessions, prune dead ones
+    ├── tmux-inject.ts   pane cwd, capture-pane, paste-and-Enter input
+    ├── transcript.ts    read the CLI transcripts
+    └── transcript-watcher.ts  tail transcripts → chat events + status
+bot/telegram.ts          grammy bot: commands, keyboards, chat streaming
+```
 
-**The bot says text "can't be injected" into a session.**
-That session isn't running inside tmux. Restart it with `tmux new -s
-claude:<project>` and it becomes continuable from Telegram.
+Data flow: `Telegram ↔ bot ↔ bus ↔ sessions (SDK / tmux) ↔ provider`.
 
-**A session I started outside tmux doesn't show up.**
-Sessions are tracked via tmux (`claude:*`), the SessionStart hook or `/attach`.
-A session attached by the hook but started outside tmux streams as chat but is
-read-only (there's no pane to inject into). To make it fully continuable, start
-Claude Code inside tmux: `tmux new -s claude:<project>`.
+- **Headless sessions** are owned by the daemon and driven via the Claude Agent
+  SDK (`query` + `resume`, `canUseTool`), version **0.3.221** (pinned — the SDK
+  is in preview and changes fast). Session ids are persisted, so they survive
+  daemon restarts.
+- **Terminal sessions** are discovered from tmux and streamed by tailing the
+  transcript the CLI writes; input is driven 1:1 by pasting into the pane.
+  Streaming runs only while armed, and follows the session selected in
+  `/sessions`.
+- **State** — the armed switch, the session registry and the bound chat — lives
+  in `~/.claude-omni-rc/state.json`.
 
-**The session streams nothing.**
-Make sure you've selected it with `/sessions` — only the active session is
-streamed. A session without a transcript (or a non-Ollama one) is read-only:
-use `/view` for its raw screen. If a real Ollama session still shows nothing,
-check `PROJECTS_DIR` matches where Claude Code writes its transcripts
-(`~/.claude/projects`).
+</details>
 
-**Sessions aren't auto-attaching on start.**
-Check `~/.claude/settings.json` contains the SessionStart hook (re-run
-`./install.sh` to add it), the daemon is running, and `API_PORT` isn't taken
-by something else.
-
-**Where is my data stored?**
-State (`armed`, sessions) in `~/.claude-omni-rc/state.json`, attachments in
-`~/.claude-omni-rc/inbox/`, logs in `~/.claude-omni-rc/logs/`. Override with
-`STATE_DIR`.
-
-## Disclaimer
-
-This is an **unofficial** project. It talks to your local Ollama instance
-and to the Telegram Bot API only; nothing leaves your machine otherwise.
-The Claude Agent SDK is a preview and may change — the version is pinned for
-a reason. Not affiliated with Anthropic or Ollama.
-
-## License
+## License & disclaimer
 
 MIT — see [LICENSE](LICENSE). Copyright (c) 2026.
+
+An **unofficial** project: it talks to your configured provider and the Telegram
+Bot API, nothing else. The Claude Agent SDK is a preview and may change — the
+version is pinned for a reason. Not affiliated with Anthropic or Ollama.

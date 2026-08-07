@@ -379,6 +379,8 @@
     <nav class="nav-links">
       <a href="https://github.com/ontech7/claude-omni-rc#readme">Docs</a>
       <span class="sep optional" aria-hidden="true">·</span>
+      <a class="optional" href="https://github.com/ontech7/claude-omni-rc/blob/main/SECURITY.md">Security</a>
+      <span class="sep optional" aria-hidden="true">·</span>
       <a class="optional" href="https://github.com/ontech7/claude-omni-rc/blob/main/AI-GUIDE.md">AI-GUIDE.md</a>
       <span class="sep" aria-hidden="true">·</span>
       <a class="icon-link" href="https://github.com/ontech7/claude-omni-rc" aria-label="GitHub">
@@ -453,8 +455,8 @@
         <span class="step-n">1</span>
         <h3>Run <code>./install.sh</code></h3>
         <p>The guided installer checks prerequisites, walks you through your
-        bot token and permissions, downloads the models, and registers the
-        background daemon.</p>
+        bot token, who may control it and where headless sessions may run, then
+        registers the background daemon.</p>
       </li>
       <li>
         <span class="step-n">2</span>
@@ -493,9 +495,10 @@ Tool: Bash
       <h2>Ongoing sessions stream as chat</h2>
       <p class="lede">
         A session running in tmux mirrors into Telegram as a conversation —
-        assistant messages, tool calls grouped into one <code>🔧</code> notice
-        per work burst, and <code>❓</code> multiple-choice questions you answer
-        with the option number. No screen-scraping.
+        assistant messages, tool calls summarised in plain language and grouped
+        into one <code>⚙️</code> bubble per work burst, and <code>❓</code>
+        multiple-choice questions you answer with the option number. No
+        screen-scraping.
       </p>
     </header>
 
@@ -503,8 +506,8 @@ Tool: Bash
       <div class="term-bar"><i></i><i></i><i></i><span>Telegram</span></div>
       <pre><span class="prompt">/sessions</span>
 <span class="dim">▸</span> claude:my-project
-🔧 Bash — {"command":"npm test"}
-🔧 Read — {"path":"README.md"}
+⚙️ Running the test suite
+⚙️ Reading README.md
 12 tests pass, coverage 94%
 <span class="b">❓ Which approach do you prefer?</span>
 1) Refactor the parser
@@ -553,9 +556,11 @@ Tool: Bash
       <li>
         <h3>🤖 Headless — <code>/new</code> from Telegram</h3>
         <p><em>No terminal at all.</em> The daemon owns the session and drives it
-        through the Claude Agent SDK. Automode by default (every permission
-        auto-approved); <code>/new --standard</code> turns on approve/reject
-        buttons. It runs on the same machine, in the background.</p>
+        through the Claude Agent SDK, in the background on the same machine. It
+        asks before <strong>every</strong> tool call by default;
+        <code>/new --auto</code> runs it unattended. Headless sessions run in
+        <code>WORKSPACE_DIRS</code>, which you set at install time — there is no
+        fallback to your home directory.</p>
       </li>
     </ul>
 
@@ -605,6 +610,8 @@ Tool: Bash
 
   <footer>
     session continuity · chat streaming · remote permissions · file attachments<br>
+    An armed bot can run code on your machine as you — read the
+    <a href="https://github.com/ontech7/claude-omni-rc/blob/main/SECURITY.md">security notes</a><br>
     Unofficial, not affiliated with <a href="https://anthropic.com">Anthropic</a> or <a href="https://ollama.com">Ollama</a> ·
     <a href="https://github.com/ontech7/claude-omni-rc/blob/main/LICENSE">MIT</a>
   </footer>

@@ -9,7 +9,7 @@ import { SessionManager } from '../src/sessions/manager.js';
 import { PermissionFlow } from '../src/permissions.js';
 import { startApi, type ApiHandle } from '../src/api.js';
 
-function makeApi(env: Record<string, string> = {}) {
+function makeApi(env: Record<string, string> = {}, flowOpts: { canNotify?: () => boolean } = {}) {
   const bus = new Bus();
   const dir = mkdtempSync(join(tmpdir(), 'orc-api-'));
   const config = loadConfig({ STATE_DIR: dir, ...env });
@@ -18,6 +18,7 @@ function makeApi(env: Record<string, string> = {}) {
   const permissionFlow = new PermissionFlow({
     bus, config,
     setStatus: (id, s) => manager.setStatus(id, s),
+    ...flowOpts,
   });
   const api = startApi(0, { manager, permissionFlow, config });
   return { manager, permissionFlow, api, dir, bus };
@@ -118,6 +119,22 @@ describe('startApi', () => {
     });
     expect(await res.text()).toBe('deny');
     expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+  });
+
+  it('answers ask when armed but no Telegram chat is connected', async () => {
+    const { manager, api } = makeApi({ PERMISSION_TIMEOUT_SECONDS: '120' }, { canNotify: () => false });
+    open.push(api);
+    await api.ready;
+    manager.setArmed(true);
+    const started = Date.now();
+    const res = await fetch(`http://127.0.0.1:${api.port()}/api/permission`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ toolName: 'Bash', input: { command: 'ls' }, sessionId: 'claude:proj' }),
+    });
+    // niente destinazione → prompt nativo nel terminale, subito: non un'attesa
+    // di 120s che finisce in deny automatico.
+    expect(await res.text()).toBe('ask');
+    expect(Date.now() - started).toBeLessThan(2000);
   });
 
   it('auto-allows AskUserQuestion without a permission request', async () => {

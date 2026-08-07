@@ -33,6 +33,10 @@ export function startApi(port: number, deps: ApiDeps): ApiHandle {
       req.on('end', async () => {
         // da disattivo o con richiesta malformata: fallback al prompt nativo.
         if (!deps.manager.isArmed()) { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ask'); return; }
+        // armed ma senza chat collegata (es. daemon appena riavviato): nessuno
+        // vedrebbe i bottoni. Il prompt nativo nel terminale è la risposta
+        // giusta — non un'attesa di 120s che finisce in deny.
+        if (!deps.permissionFlow.canNotify()) { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ask'); return; }
         let input: { toolName?: string; input?: unknown; sessionId?: string };
         try { input = JSON.parse(body); } catch { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ask'); return; }
         const toolName = input.toolName ?? 'tool';

@@ -131,6 +131,41 @@ describe('TmuxClient.claudeCwd', () => {
   });
 });
 
+describe('TmuxClient.processTree', () => {
+  it('parses the process table once into a reusable snapshot', async () => {
+    let psCalls = 0;
+    const exec: any = async () => ({ code: 0, stdout: '', stderr: '' });
+    const sh: any = async (cmd: string) => {
+      if (cmd === 'ps') { psCalls++; return { code: 0, stdout: '100 1 -zsh\n200 100 ollama\n300 200 /Users/u/.local/bin/claude\n', stderr: '' }; }
+      throw new Error('unexpected sh call: ' + cmd);
+    };
+    const tree = await new TmuxClient(exec, sh).processTree();
+    expect(psCalls).toBe(1);
+    expect(tree?.comms.get('300')).toBe('/Users/u/.local/bin/claude');
+    expect(tree?.children.get('200')).toEqual(['300']);
+  });
+});
+
+describe('TmuxClient.claudeCwd with a shared snapshot', () => {
+  it('does not spawn ps again when given a snapshot', async () => {
+    const exec: any = async (args: string[]) => {
+      if (args[0] === 'list-sessions') return { code: 0, stdout: '$0 claude:proj\n', stderr: '' };
+      if (args[0] === 'display-message') return { code: 0, stdout: '100\n', stderr: '' };
+      throw new Error('unexpected');
+    };
+    const sh: any = async (cmd: string) => {
+      if (cmd === 'ps') throw new Error('ps must not be spawned again');
+      if (cmd === 'lsof') return { code: 0, stdout: 'p300\nfcwd\nn/Users/u/proj/wt\n', stderr: '' };
+      throw new Error('unexpected sh call: ' + cmd);
+    };
+    const tree = {
+      comms: new Map([['100', '-zsh'], ['200', 'ollama'], ['300', '/Users/u/.local/bin/claude']]),
+      children: new Map([['1', ['100']], ['100', ['200']], ['200', ['300']]]),
+    };
+    await expect(new TmuxClient(exec, sh).claudeCwd('claude:proj', tree)).resolves.toBe('/Users/u/proj/wt');
+  });
+});
+
 function fakeChild(): any {
   const child = new EventEmitter() as any;
   child.stdout = new EventEmitter() as any;

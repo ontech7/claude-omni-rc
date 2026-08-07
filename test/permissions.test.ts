@@ -50,12 +50,49 @@ describe('PermissionFlow', () => {
     const p = flow.request('s1', 'Bash', {}, ac.signal);
     onPerm.mock.calls[0][0].permission;
     ac.abort();
-    await expect(p).resolves.toEqual({ behavior: 'deny', message: 'Interrotto' });
+    await expect(p).resolves.toEqual({ behavior: 'deny', message: 'Interrupted' });
   });
   it('cancels all pending requests for a session', async () => {
     const { flow, onPerm } = makeFlow();
     const p = flow.request('s1', 'Bash', {});
     flow.cancelAllForSession('s1');
-    await expect(p).resolves.toEqual({ behavior: 'deny', message: 'Sessione fermata' });
+    await expect(p).resolves.toEqual({ behavior: 'deny', message: 'Session stopped' });
+  });
+  it('approve with updatedInput (ExitPlanMode) resolves with it', async () => {
+    const { flow, onPerm } = makeFlow();
+    const p = flow.request('s1', 'ExitPlanMode', { plan: 'original' });
+    const req = onPerm.mock.calls[0][0].permission;
+    expect(flow.infoFor(req.id)).toEqual({ sessionId: 's1', toolName: 'ExitPlanMode', input: { plan: 'original' } });
+    expect(flow.approve(req.id, { plan: 'edited' })).toBe(true);
+    await expect(p).resolves.toEqual({ behavior: 'allow', updatedInput: { plan: 'edited' } });
+    expect(flow.infoFor(req.id)).toBeUndefined(); // risolta
+  });
+  it('approve without updatedInput stays a plain allow', async () => {
+    const { flow, onPerm } = makeFlow();
+    const p = flow.request('s1', 'Bash', { command: 'ls' });
+    const req = onPerm.mock.calls[0][0].permission;
+    expect(flow.approve(req.id)).toBe(true);
+    await expect(p).resolves.toEqual({ behavior: 'allow' });
+  });
+});
+
+describe('PermissionFlow without a Telegram destination', () => {
+  it('denies immediately instead of hanging until the timeout', async () => {
+    const bus = new Bus();
+    const onPerm = vi.fn();
+    bus.on('session.permission', onPerm);
+    const config = loadConfig({ PERMISSION_TIMEOUT_SECONDS: '120' });
+    const flow = new PermissionFlow({ bus, config, canNotify: () => false });
+    const decision = await flow.request('s1', 'Bash', { command: 'ls' });
+    expect(decision.behavior).toBe('deny');
+    expect(onPerm).not.toHaveBeenCalled(); // nessuno leggerebbe la notifica
+  });
+  it('reports that it cannot notify', () => {
+    const config = loadConfig({});
+    expect(new PermissionFlow({ bus: new Bus(), config, canNotify: () => false }).canNotify()).toBe(false);
+  });
+  it('can notify by default (no predicate configured)', () => {
+    const config = loadConfig({});
+    expect(new PermissionFlow({ bus: new Bus(), config }).canNotify()).toBe(true);
   });
 });

@@ -43,7 +43,7 @@ export class SessionManager {
   createHeadless(input: { title: string; projectDir: string; model?: string; permissionMode?: 'auto' | 'standard' }): Session {
     const s = this.makeSession('headless', input.title, input.projectDir);
     if (input.model) s.model = input.model;
-    s.permissionMode = input.permissionMode ?? 'auto';
+    s.permissionMode = input.permissionMode ?? 'standard';
     this.state.sessions.push(s);
     this.emitUpdated(s.id);
     return s;
@@ -99,6 +99,13 @@ export class SessionManager {
   touch(id: string): void {
     const s = this.get(id);
     if (s) s.lastActivity = new Date().toISOString();
+  }
+
+  getChatId(): number | undefined { return this.state.chatId; }
+  setChatId(chatId: number): void {
+    if (this.state.chatId === chatId) return;
+    this.state.chatId = chatId;
+    this.persist();
   }
 
   isArmed(): boolean { return this.state.armed; }

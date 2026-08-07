@@ -94,12 +94,12 @@ describe('SessionManager', () => {
       expect(manager.get(s.id)!.status).toBe('running');
     } finally { vi.useRealTimers(); }
   });
-  it('defaults headless sessions to automode and stores the requested mode', () => {
+  it('defaults headless sessions to standard mode and stores the requested mode', () => {
     const { manager } = makeManager();
-    const auto = manager.createHeadless({ title: 'a', projectDir: '/tmp/a' });
-    expect(auto.permissionMode).toBe('auto');
-    const std = manager.createHeadless({ title: 's', projectDir: '/tmp/s', permissionMode: 'standard' });
+    const std = manager.createHeadless({ title: 's', projectDir: '/tmp/s' });
     expect(std.permissionMode).toBe('standard');
+    const auto = manager.createHeadless({ title: 'a', projectDir: '/tmp/a', permissionMode: 'auto' });
+    expect(auto.permissionMode).toBe('auto');
     expect(manager.get(auto.id)!.permissionMode).toBe('auto');
   });
   it('persists the active session id across reloads', () => {
@@ -119,5 +119,25 @@ describe('SessionManager', () => {
   it('returns undefined when no session is active', () => {
     const { manager } = makeManager();
     expect(manager.getActive()).toBeUndefined();
+  });
+});
+
+describe('SessionManager chat id', () => {
+  it('persists the Telegram chat id across a restart', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orc-chat-'));
+    const store = new StateStore(join(dir, 'state.json'));
+    const first = new SessionManager({ bus: new Bus(), state: store, idleGraceMs: 3000, armedOnStart: false });
+    first.setChatId(4242);
+    const second = new SessionManager({ bus: new Bus(), state: store, idleGraceMs: 3000, armedOnStart: false });
+    expect(second.getChatId()).toBe(4242);
+  });
+});
+
+describe('SessionManager headless defaults', () => {
+  it('creates a headless session in standard permission mode by default', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orc-mode-'));
+    const store = new StateStore(join(dir, 'state.json'));
+    const m = new SessionManager({ bus: new Bus(), state: store, idleGraceMs: 3000, armedOnStart: false });
+    expect(m.createHeadless({ title: 't', projectDir: '/tmp/x' }).permissionMode).toBe('standard');
   });
 });

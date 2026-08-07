@@ -127,7 +127,8 @@ check_optional_tools() {
 check_ollama() {
   local base="${OLLAMA_BASE_URL:-$DEFAULT_OLLAMA_URL}"
   if ! have ollama; then
-    warn "Ollama is not installed. It must be running for anything to work."
+    warn "Ollama is not installed. It is the default provider; skip this if you"
+    warn "configured another one via ANTHROPIC_BASE_URL in .env."
     hint "  Install it from https://ollama.com/download and start it."
     return
   fi
@@ -202,6 +203,34 @@ prepare_env() {
   [ -n "$pair" ] || pair="$(LC_ALL=C tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 8)"
   set_env PAIRING_CODE "$pair"
   ok "PAIRING_CODE saved. From Telegram, send:  /start $pair"
+}
+
+# Headless sessions (/new) run in the first WORKSPACE_DIRS entry. There is no
+# fallback to $HOME on purpose: an unattended agent should not be rooted at your
+# whole home directory. The interactive default is the state dir, which the
+# installer creates anyway — so pressing Enter gives a working /new right away.
+prepare_workspace() {
+  local ws default_ws
+  ws="$(get_env WORKSPACE_DIRS)"
+  if [ -n "$ws" ]; then
+    ok "WORKSPACE_DIRS already set ($ws)."
+    return
+  fi
+  if [ "$INTERACTIVE" -eq 0 ]; then
+    warn "WORKSPACE_DIRS not set — /new will refuse to start until you set it in $ENV_FILE."
+    return
+  fi
+  default_ws="$STATE_DIR"
+  info "Where may headless (/new) sessions run?"
+  echo "  This is the project root a session started from Telegram works in."
+  echo "  Several roots can be separated by ':'. Press Enter to use the default."
+  printf '%b' "${c_bold}Project root${c_reset} [default: $default_ws]: "
+  read -r ws
+  ws="$(printf '%s' "$ws" | tr -d '[:space:]')"
+  [ -n "$ws" ] || ws="$default_ws"
+  mkdir -p "${ws%%:*}"
+  set_env WORKSPACE_DIRS "$ws"
+  ok "WORKSPACE_DIRS set to $ws."
 }
 
 ensure_model() {
@@ -373,6 +402,7 @@ ${c_bold}${c_green}✓ claude-omni-rc is installed.${c_reset} ${c_bold}Next step
 
   ${c_yellow}Logs:${c_reset}   $STATE_DIR/logs/daemon.log
   ${c_yellow}Docs:${c_reset}   https://github.com/ontech7/claude-omni-rc#readme
+  ${c_red}Read SECURITY.md: an armed bot can run code on this machine as you.${c_reset}
   ${c_red}Your $ENV_FILE holds secrets — keep it private, never commit it.${c_reset}
 EOF
 }
@@ -394,6 +424,7 @@ main() {
   check_ollama
   install_deps
   prepare_env
+  prepare_workspace
   local default_model
   default_model="$(get_env DEFAULT_MODEL)"; [ -n "$default_model" ] || default_model="$DEFAULT_MODEL_FALLBACK"
   ensure_model "$default_model" "used for headless sessions"

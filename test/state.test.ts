@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { StateStore, emptyState } from '../src/state.js';
@@ -42,6 +43,22 @@ describe('StateStore', () => {
     expect(state.armed).toBe(true);
     expect(state.sessions).toEqual([]);
     expect(state.mirrorOffsets).toEqual({});
+  });
+  it('leaves no temporary file behind after a save', () => {
+    const { store, path } = tmpState();
+    const { state } = store.load();
+    state.armed = true;
+    store.save(state);
+    const leftovers = readdirSync(dirname(path)).filter(f => f !== 'state.json');
+    expect(leftovers).toEqual([]);
+  });
+  it('preserves a corrupt state file instead of silently discarding it', () => {
+    const { store, path } = tmpState();
+    writeFileSync(path, '{"armed":true,"sessi');
+    store.load();
+    const backups = readdirSync(dirname(path)).filter(f => f.startsWith('state.json.corrupt-'));
+    expect(backups).toHaveLength(1);
+    expect(readFileSync(join(dirname(path), backups[0]), 'utf8')).toBe('{"armed":true,"sessi');
   });
   it('keeps an optional activeSessionId through a round-trip', () => {
     const { store } = tmpState();

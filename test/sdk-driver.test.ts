@@ -7,6 +7,7 @@ import { loadConfig } from '../src/config.js';
 import { StateStore } from '../src/state.js';
 import { SessionManager } from '../src/sessions/manager.js';
 import { PermissionFlow } from '../src/permissions.js';
+import { DialogFlow } from '../src/dialogs.js';
 import { SdkDriver } from '../src/sessions/sdk-driver.js';
 
 const queryMock = vi.fn();
@@ -22,10 +23,11 @@ function makeDriver() {
   const state = new StateStore(join(mkdtempSync(join(tmpdir(), 'orc-sdk-')), 'state.json'));
   const manager = new SessionManager({ bus, state, idleGraceMs: 3000, armedOnStart: false });
   const permissionFlow = new PermissionFlow({ bus, config, setStatus: (id, s) => manager.setStatus(id, s) });
+  const dialogFlow = new DialogFlow({ bus, config, setStatus: (id, s) => manager.setStatus(id, s) });
   const ollama = { modelContext: vi.fn(async () => 1048576) };
-  const sdk = new SdkDriver({ bus, manager, config, permissionFlow, ollama: ollama as any });
+  const sdk = new SdkDriver({ bus, manager, config, permissionFlow, dialogFlow, ollama: ollama as any });
   const session = manager.createHeadless({ title: 'test', projectDir: '/tmp/x' });
-  return { bus, events, manager, sdk, session, ollama, permissionFlow };
+  return { bus, events, manager, sdk, session, ollama, permissionFlow, dialogFlow };
 }
 
 function assistantText(sessionId: string, text: string) {
@@ -137,16 +139,29 @@ describe('SdkDriver', () => {
     expect(decision).toEqual({ behavior: 'allow' });
   });
 
-  it('automode (default): canUseTool auto-allows without a permission request', async () => {
-    const { sdk, session, bus } = makeDriver();
+  it('automode (explicit --auto): canUseTool auto-allows without a permission request', async () => {
+    const { sdk, bus, manager } = makeDriver();
+    const auto = manager.createHeadless({ title: 'auto', projectDir: '/tmp/a', permissionMode: 'auto' });
+    const perms: unknown[] = [];
+    bus.on('session.permission', e => perms.push(e));
+    queryMock.mockImplementationOnce(async function* () { yield resultMsg(auto.id, 'ok'); });
+    await sdk.runTurn(auto.id, 'x');
+    const opts = queryMock.mock.calls[0][0].options;
+    const decision = await opts.canUseTool('Bash', { command: 'ls' }, {});
+    expect(decision).toEqual({ behavior: 'allow' });
+    expect(perms).toHaveLength(0); // nessuna notifica di permesso
+  });
+
+  it('a session with no explicit mode asks for permission (never silently auto-allows)', async () => {
+    const { sdk, session, bus, manager } = makeDriver();
+    manager.get(session.id)!.permissionMode = undefined; // stato vecchio, pre-upgrade
     const perms: unknown[] = [];
     bus.on('session.permission', e => perms.push(e));
     queryMock.mockImplementationOnce(async function* () { yield resultMsg(session.id, 'ok'); });
     await sdk.runTurn(session.id, 'x');
     const opts = queryMock.mock.calls[0][0].options;
-    const decision = await opts.canUseTool('Bash', { command: 'ls' }, {});
-    expect(decision).toEqual({ behavior: 'allow' });
-    expect(perms).toHaveLength(0); // nessuna notifica di permesso
+    void opts.canUseTool('Bash', { command: 'ls' }, {});
+    expect(perms).toHaveLength(1);
   });
 
   it('standard mode: canUseTool routes to the permission flow', async () => {
@@ -161,6 +176,40 @@ describe('SdkDriver', () => {
     expect(perms).toHaveLength(1); // la richiesta arriva al flusso permessi
     permissionFlow.approve((perms[0] as any).permission.id);
     await expect(pending).resolves.toEqual({ behavior: 'allow' });
+  });
+
+  it('routes ExitPlanMode to the permission flow and approves with updatedInput', async () => {
+    const { sdk, bus, manager, permissionFlow } = makeDriver();
+    const std = manager.createHeadless({ title: 'std', projectDir: '/tmp/s', permissionMode: 'standard' });
+    const perms: unknown[] = [];
+    bus.on('session.permission', e => perms.push(e));
+    queryMock.mockImplementationOnce(async function* () { yield resultMsg(std.id, 'ok'); });
+    await sdk.runTurn(std.id, 'x');
+    const opts = queryMock.mock.calls[0][0].options;
+    const pending = opts.canUseTool('ExitPlanMode', { plan: 'do it' }, {});
+    expect(perms).toHaveLength(1);
+    const req = (perms[0] as any).permission;
+    expect(req.toolName).toBe('ExitPlanMode');
+    // l'approvazione conferma il piano originale come updatedInput
+    expect(permissionFlow.approve(req.id, { plan: 'do it' })).toBe(true);
+    await expect(pending).resolves.toEqual({ behavior: 'allow', updatedInput: { plan: 'do it' } });
+  });
+
+  it('routes request_user_dialog to the DialogFlow and declares supported kinds', async () => {
+    const { sdk, session, bus, dialogFlow } = makeDriver();
+    const dialogs: unknown[] = [];
+    bus.on('session.dialog', e => dialogs.push(e));
+    queryMock.mockImplementationOnce(async function* () { yield resultMsg(session.id, 'ok'); });
+    await sdk.runTurn(session.id, 'x');
+    const opts = queryMock.mock.calls[0][0].options;
+    expect(opts.supportedDialogKinds).toEqual(['refusal_fallback_prompt']);
+    const pending = opts.onUserDialog({ dialogKind: 'refusal_fallback_prompt', payload: { fallbackModel: 'm' } }, { signal: new AbortController().signal });
+    expect(dialogs).toHaveLength(1);
+    const dlg = (dialogs[0] as any).dialog;
+    expect(dlg.dialogKind).toBe('refusal_fallback_prompt');
+    expect(dlg.payload.fallbackModel).toBe('m');
+    expect(dialogFlow.complete(dlg.id, 'retry_fallback')).toBe(true);
+    await expect(pending).resolves.toEqual({ behavior: 'completed', result: 'retry_fallback' });
   });
 
   it('emits session.prompt for AskUserQuestion tool_use instead of a tool bubble', async () => {

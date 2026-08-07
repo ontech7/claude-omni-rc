@@ -8,10 +8,10 @@ import { StateStore } from '../src/state.js';
 import { SessionManager } from '../src/sessions/manager.js';
 import { TmuxWatcher } from '../src/sessions/tmux-watcher.js';
 
-function makeWatcher(tmuxSessions: string[] = [], serverUp = true) {
+function makeWatcher(tmuxSessions: string[] = [], serverUp = true, env: Record<string, string> = {}) {
   const bus = new Bus();
   const dir = mkdtempSync(join(tmpdir(), 'orc-watch-'));
-  const config = loadConfig({ STATE_DIR: dir });
+  const config = loadConfig({ STATE_DIR: dir, ...env });
   const state = new StateStore(join(dir, 'state.json'));
   const manager = new SessionManager({ bus, state, idleGraceMs: 3000, armedOnStart: false });
   const tmux = {
@@ -19,7 +19,8 @@ function makeWatcher(tmuxSessions: string[] = [], serverUp = true) {
     listSessions: vi.fn(async () => tmuxSessions),
     paneCwd: vi.fn(async (t: string) => `/home/user/${t.replace('claude:', '')}`),
     paneCommand: vi.fn(async () => 'ollama'), // default: claude attivo nel pane
-    claudeCwd: vi.fn(async (_t: string): Promise<string | undefined> => undefined), // default: nessun processo claude distinguibile
+    claudeCwd: vi.fn(async (_t: string, _tree?: unknown): Promise<string | undefined> => undefined), // default: nessun processo claude distinguibile
+    processTree: vi.fn(async () => ({ children: new Map<string, string[]>(), comms: new Map<string, string>() })),
   };
   const watcher = new TmuxWatcher({ config, manager, tmux: tmux as any });
   return { manager, watcher, tmux };
@@ -117,7 +118,8 @@ describe('TmuxWatcher', () => {
   it('refreshes projectDir when the pane cwd changes (worktree relocation)', async () => {
     const bus = new Bus();
     const dir = mkdtempSync(join(tmpdir(), 'orc-watch-'));
-    const config = loadConfig({ STATE_DIR: dir });
+    // CWD_REFRESH_MS=0: qui interessa CHE il refresh avvenga, non ogni quanto
+    const config = loadConfig({ STATE_DIR: dir, CWD_REFRESH_MS: '0' });
     const state = new StateStore(join(dir, 'state.json'));
     const manager = new SessionManager({ bus, state, idleGraceMs: 3000, armedOnStart: false });
     let cwd = '/home/user/proj1';
@@ -167,5 +169,44 @@ describe('TmuxWatcher', () => {
     (watcher as any).exitedSince.set('claude:proj1', Date.now() - 130_000);
     await (watcher as any).poll();
     expect(manager.list()).toHaveLength(1); // conservativo: non rimuove se non può leggere il pane
+  });
+  it('skips a poll that overlaps a slow one still in flight', async () => {
+    const { manager, watcher, tmux } = makeWatcher(['claude:proj1']);
+    manager.setArmed(true);
+    let release: (() => void) | undefined;
+    tmux.serverRunning.mockImplementation(() => new Promise<boolean>(r => { release = () => r(true); }));
+    const first = (watcher as any).poll();
+    const second = (watcher as any).poll(); // deve tornare subito, senza ri-entrare
+    await second;
+    release!();
+    await first;
+    expect(tmux.serverRunning).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes one process-tree snapshot per poll and shares it', async () => {
+    const { manager, watcher, tmux } = makeWatcher(['claude:proj1', 'claude:proj2']);
+    manager.setArmed(true);
+    await (watcher as any).poll();
+    expect(tmux.processTree).toHaveBeenCalledTimes(1);
+    for (const call of tmux.claudeCwd.mock.calls) expect(call[1]).toBeDefined();
+  });
+
+  it('does not re-check the claude cwd on every poll', async () => {
+    const { manager, watcher, tmux } = makeWatcher(['claude:proj1']);
+    manager.setArmed(true);
+    await (watcher as any).poll();
+    const afterFirst = tmux.claudeCwd.mock.calls.length;
+    await (watcher as any).poll();
+    await (watcher as any).poll();
+    expect(tmux.claudeCwd.mock.calls.length).toBe(afterFirst); // throttlato
+  });
+
+  it('re-checks the claude cwd once the refresh interval has elapsed', async () => {
+    const { manager, watcher, tmux } = makeWatcher(['claude:proj1'], true, { CWD_REFRESH_MS: '0' });
+    manager.setArmed(true);
+    await (watcher as any).poll();
+    const afterFirst = tmux.claudeCwd.mock.calls.length;
+    await (watcher as any).poll();
+    expect(tmux.claudeCwd.mock.calls.length).toBeGreaterThan(afterFirst);
   });
 });

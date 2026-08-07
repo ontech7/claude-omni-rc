@@ -5,6 +5,7 @@ import { StateStore } from './state.js';
 import { Bus } from './bus.js';
 import { SessionManager } from './sessions/manager.js';
 import { PermissionFlow } from './permissions.js';
+import { DialogFlow } from './dialogs.js';
 import { OllamaClient } from './ollama.js';
 import { SdkDriver } from './sessions/sdk-driver.js';
 import { TmuxWatcher } from './sessions/tmux-watcher.js';
@@ -23,17 +24,28 @@ export function createDaemon(
   const state = new StateStore(join(config.stateDir, 'state.json'));
   const bus = new Bus();
   const manager = new SessionManager({ bus, state, idleGraceMs: config.idleGraceMs, armedOnStart: config.armedOnStart });
+  // Il bot nasce dopo il flusso permessi (gli serve), ma il flusso deve poter
+  // chiedere al bot se esiste una chat di notifica → riferimento tardivo.
+  // Con un bot iniettato dai test (senza canNotify) si assume che possa notificare.
+  let botRef: Pick<TelegramBot, 'start' | 'stop'> & { canNotify?: () => boolean };
   const permissionFlow = new PermissionFlow({
     bus, config,
     setStatus: (id, s) => manager.setStatus(id, s),
+    canNotify: () => botRef?.canNotify?.() ?? true,
+  });
+  const dialogFlow = new DialogFlow({
+    bus, config,
+    setStatus: (id, s) => manager.setStatus(id, s),
+    canNotify: () => botRef?.canNotify?.() ?? true,
   });
   const ollama = new OllamaClient({ baseUrl: config.ollamaBaseUrl });
-  const sdk = new SdkDriver({ bus, manager, config, permissionFlow, ollama });
+  const sdk = new SdkDriver({ bus, manager, config, permissionFlow, dialogFlow, ollama });
   const tmux = new TmuxClient();
   const watcher = new TmuxWatcher({ config, manager, tmux });
   const transcriptWatcher = new TranscriptWatcher({ config, manager, bus });
   const inbox = new Inbox({ dir: config.inboxDir });
-  const bot = overrides.bot ?? new TelegramBot({ config, bus, manager, permissionFlow, sdk, tmux, inbox, ollama });
+  const bot = overrides.bot ?? new TelegramBot({ config, bus, manager, permissionFlow, dialogFlow, sdk, tmux, inbox, ollama });
+  botRef = bot;
 
   const reaper = setInterval(() => manager.reapIdle(), 1000);
   reaper.unref();

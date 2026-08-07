@@ -11,6 +11,8 @@ describe('loadConfig', () => {
     expect(c.maxHeadlessSessions).toBe(2);
     expect(c.permissionTimeoutSeconds).toBe(120);
     expect(c.armedOnStart).toBe(false);
+    expect(c.defaultPermissionMode).toBe('standard'); // safe-by-default: /new chiede
+
     expect(c.stateDir).toBe(`${process.env.HOME}/.claude-omni-rc`);
     expect(c.inboxDir).toBe(`${process.env.HOME}/.claude-omni-rc/inbox`);
   });
@@ -30,6 +32,12 @@ describe('loadConfig', () => {
     expect(c.permissionTimeoutSeconds).toBe(30);
     expect(c.armedOnStart).toBe(true);
     expect(c.workspaceDirs).toEqual([`${process.env.HOME}/proj1`, '/tmp/proj2']);
+  });
+  it('accepts an explicit automode default', () => {
+    expect(loadConfig({ DEFAULT_PERMISSION_MODE: 'auto' }).defaultPermissionMode).toBe('auto');
+  });
+  it('ignores a bogus permission mode and stays on standard', () => {
+    expect(loadConfig({ DEFAULT_PERMISSION_MODE: 'yolo' }).defaultPermissionMode).toBe('standard');
   });
   it('falls back on malformed numbers', () => {
     expect(loadConfig({ MAX_HEADLESS_SESSIONS: 'nope' }).maxHeadlessSessions).toBe(2);

@@ -1,11 +1,12 @@
 import type { Config } from '../config.js';
 import type { SessionManager } from './manager.js';
-import type { TmuxClient } from './tmux-inject.js';
+import type { TmuxClient, ProcessTree } from './tmux-inject.js';
 
 export interface WatcherDeps {
   config: Config;
   manager: SessionManager;
-  tmux: Pick<TmuxClient, 'listSessions' | 'serverRunning' | 'paneCwd' | 'paneCommand' | 'claudeCwd'>;
+  tmux: Pick<TmuxClient, 'listSessions' | 'serverRunning' | 'paneCwd' | 'paneCommand' | 'claudeCwd'>
+    & Partial<Pick<TmuxClient, 'processTree'>>;
 }
 
 // Grace prima di rimuovere una sessione terminale il cui target tmux è sparito:
@@ -32,6 +33,10 @@ export class TmuxWatcher {
   private timer?: NodeJS.Timeout;
   private missingSince = new Map<string, number>();
   private exitedSince = new Map<string, number>();
+  // Un poll che dura più dell'intervallo (ps/lsof non sono gratis) non deve
+  // accavallarsi con il successivo: gli spawn si sommerebbero senza limite.
+  private polling = false;
+  private cwdCheckedAt = new Map<string, number>();
 
   constructor(private deps: WatcherDeps) {}
 
@@ -45,6 +50,16 @@ export class TmuxWatcher {
 
   async poll(): Promise<void> {
     if (!this.deps.manager.isArmed()) return;
+    if (this.polling) return;
+    this.polling = true;
+    try {
+      await this.pollOnce();
+    } finally {
+      this.polling = false;
+    }
+  }
+
+  private async pollOnce(): Promise<void> {
     let sessions: string[];
     try {
       if (!(await this.deps.tmux.serverRunning())) return;
@@ -52,6 +67,9 @@ export class TmuxWatcher {
     } catch { return; }
     this.prune(sessions);
     await this.checkExited(sessions);
+    // Uno snapshot dei processi per tutto il giro: senza, ogni claudeCwd()
+    // spawnerebbe il suo `ps` — per ogni sessione, a ogni poll.
+    const tree = await this.deps.tmux.processTree?.().catch(() => undefined);
     for (const target of sessions) {
       if (!target.startsWith('claude:')) continue;
       if (this.deps.manager.findByTmuxTarget(target)) continue;
@@ -66,8 +84,9 @@ export class TmuxWatcher {
         // Il cwd del PROCESSO claude è la verità per il transcript (la sessione
         // può essersi spostata in un git worktree mentre il pane resta dov'era);
         // il cwd del pane è il fallback se claude non è ancora rintracciabile.
-        projectDir = (await this.deps.tmux.claudeCwd(target)) ?? ((await this.deps.tmux.paneCwd(target)) || projectDir);
+        projectDir = (await this.deps.tmux.claudeCwd(target, tree)) ?? ((await this.deps.tmux.paneCwd(target)) || projectDir);
       } catch { /* tmux in mezzo a un restart: fallback al project dir di default */ }
+      this.cwdCheckedAt.set(target, Date.now());
       this.deps.manager.registerTerminal({ title: name, projectDir, tmuxTarget: target });
       this.deps.manager.persist();
     }
@@ -75,10 +94,17 @@ export class TmuxWatcher {
     // in un git worktree) mentre il pane resta dov'era. Senza aggiornare
     // projectDir, il transcript verrebbe risolto nella dir sbagliata e la chat
     // resterebbe muta.
+    // Il refresh è throttlato: una sessione si sposta in un worktree una volta
+    // ogni tanto, mentre `ps` + `lsof` per sessione ogni pollIntervalMs sono un
+    // costo continuo (CPU e batteria) per un evento raro.
+    const now = Date.now();
     for (const s of this.deps.manager.list()) {
       if (s.kind !== 'terminal' || !s.tmuxTarget || !sessions.includes(s.tmuxTarget)) continue;
+      const checkedAt = this.cwdCheckedAt.get(s.tmuxTarget);
+      if (checkedAt !== undefined && now - checkedAt < this.deps.config.cwdRefreshMs) continue;
+      this.cwdCheckedAt.set(s.tmuxTarget, now);
       try {
-        const claudeCwd = await this.deps.tmux.claudeCwd(s.tmuxTarget);
+        const claudeCwd = await this.deps.tmux.claudeCwd(s.tmuxTarget, tree);
         if (claudeCwd) {
           if (claudeCwd !== s.projectDir) {
             this.deps.manager.setProjectDir(s.id, claudeCwd);

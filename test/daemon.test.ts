@@ -10,6 +10,7 @@ describe('createDaemon', () => {
     const dir = mkdtempSync(join(tmpdir(), 'orc-daemon-'));
     const config = loadConfig({
       STATE_DIR: dir,
+      API_PORT: '0', // porta effimera: il test non deve collidere col daemon vero
       TELEGRAM_BOT_TOKEN: 'test-token',
       ARMED_ON_START: 'true',
       WORKSPACE_DIRS: '/tmp',
@@ -28,7 +29,7 @@ describe('createDaemon', () => {
 
   it('starts disarmed by default (no mirror, no relay)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'orc-daemon2-'));
-    const config = loadConfig({ STATE_DIR: dir, TELEGRAM_BOT_TOKEN: 't' });
+    const config = loadConfig({ STATE_DIR: dir, API_PORT: '0', TELEGRAM_BOT_TOKEN: 't' });
     const bot = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
     const daemon = createDaemon(config, { bot: bot as any });
     await daemon.start();

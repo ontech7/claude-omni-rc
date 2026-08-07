@@ -33,6 +33,22 @@ export interface PromptQuestion {
   options: { label: string; description?: string }[];
 }
 
+// Risposta dell'utente a una domanda: una o più opzioni selezionate, oppure
+// testo libero (l'opzione "Other" che il CLI aggiunge sempre automaticamente).
+export type PromptAnswer =
+  | { kind: 'option'; labels: string[] }
+  | { kind: 'other'; text: string };
+
+// Dialogo bloccante che il CLI chiede di renderizzare (request_user_dialog).
+// `dialogKind` è una string union aperta: il CLI può aggiungerne di nuove senza
+// bump di protocollo, quindi un kind sconosciuto va risposto con 'cancelled'.
+export interface UserDialog {
+  id: string;
+  dialogKind: string;
+  payload: Record<string, unknown>;
+  toolUseID?: string;
+}
+
 export type BusEvent =
   | { type: 'session.updated'; sessionId: string }
   | { type: 'session.text'; sessionId: string; role: 'user' | 'assistant'; text: string }
@@ -48,5 +64,6 @@ export type BusEvent =
       isError?: boolean;
     }
   | { type: 'session.permission'; permission: PermissionRequest }
+  | { type: 'session.dialog'; sessionId: string; dialog: UserDialog }
   | { type: 'session.result'; sessionId: string; result: string; isError: boolean }
   | { type: 'session.error'; sessionId: string; message: string };
