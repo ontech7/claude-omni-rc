@@ -1,6 +1,6 @@
 ---
 name: editing-the-landing-page
-description: How to change index.html, the GitHub Pages landing page of claude-omni-rc, without breaking it. Use this skill for ANY edit to index.html or assets/*.svg — copy tweaks, a new section, restyling, a new screenshot/terminal mock, changing the install command, updating the nav or footer — and also when the user says "the site", "the landing", "the page", "the hero", "la landing", or asks to promote a new feature on the homepage. The page has no build step and no reviewer, so mistakes ship straight to production; read this before touching the file.
+description: How to change index.html, the GitHub Pages landing page of claude-omni-rc, without breaking it. Use this skill for ANY edit to index.html or assets/*.svg — copy tweaks, a new section, restyling, a new screenshot/terminal mock, changing the install command, updating the nav or footer — and also when the user says "the site", "the landing", "the page", "the hero", or asks to promote a new feature on the homepage. The page has no build step and no reviewer, so mistakes ship straight to production; read this before touching the file.
 ---
 
 # Editing the landing page

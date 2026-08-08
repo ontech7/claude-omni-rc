@@ -1,6 +1,6 @@
 ---
 name: writing-tests
-description: How to write and run tests for claude-omni-rc with Vitest — file layout, the pure-helper + injected-dependency pattern, fake timers for the timeout/polling code, and what must never touch a test (real Telegram, real tmux, real Ollama, the real home directory). Use this skill whenever you add or change a test in test/, whenever you add behaviour to src/ or bot/ that needs covering, when a test is flaky or hangs, and when the user says "write a test", "add coverage", "the tests fail", "scrivi i test". Every change to this repo ships behind `npm test`, so read this before writing the first `it(...)`.
+description: How to write and run tests for claude-omni-rc with Vitest — file layout, the pure-helper + injected-dependency pattern, fake timers for the timeout/polling code, and what must never touch a test (real Telegram, real tmux, real Ollama, the real home directory). Use this skill whenever you add or change a test in test/, whenever you add behaviour to src/ or bot/ that needs covering, when a test is flaky or hangs, and when the user says "write a test", "add coverage", "the tests fail", "cover this case". Every change to this repo ships behind `npm test`, so read this before writing the first `it(...)`.
 ---
 
 # Writing tests
@@ -122,9 +122,10 @@ Write the assertion so the failure message tells you what broke —
 when the reason silently changes.
 
 Short inline comments explaining *why* an assertion exists are welcome and
-already present in the suite (`// already resolved`, `// nessuno leggerebbe la
-notifica`). They're the cheapest defence against someone "fixing" a test by
-deleting it.
+already present in the suite (`// already resolved`, `// nobody would read the
+notification`). They're the cheapest defence against someone "fixing" a test by
+deleting it. Write them in English, even where the surrounding file still has
+older Italian ones.
 
 ## Running
 

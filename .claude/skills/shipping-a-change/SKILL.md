@@ -1,6 +1,6 @@
 ---
 name: shipping-a-change
-description: The definition of done for claude-omni-rc — the gate to run (typecheck + tests), the docs that must move with the code (README, AI-GUIDE, .env.example, CHANGELOG, index.html), commit message conventions, the security questions to ask before committing, and how a release is cut. Use this skill whenever you are about to commit, push, open a PR, or when the user says "ship it", "commit", "è pronto?", "rilascia", "bump the version", or asks whether a change is finished. Anything merged here becomes a daemon with shell access on someone's machine, so run through this before calling work done.
+description: The definition of done for claude-omni-rc — the gate to run (typecheck + tests), the docs that must move with the code (README, AI-GUIDE, .env.example, CHANGELOG, index.html), commit message conventions, the security questions to ask before committing, and how a release is cut. Use this skill whenever you are about to commit, push, open a PR, or when the user says "ship it", "commit", "is this ready?", "cut a release", "bump the version", or asks whether a change is finished. Anything merged here becomes a daemon with shell access on someone's machine, so run through this before calling work done.
 ---
 
 # Shipping a change

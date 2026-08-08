@@ -1,6 +1,6 @@
 ---
 name: adding-a-config-option
-description: The five-file checklist for adding, renaming, or changing the default of a claude-omni-rc setting — src/config.ts, .env.example, the README configuration table, install.sh, and the config tests — plus how to pick a safe default and how to change one without breaking existing installs. Use this skill whenever the user wants a new environment variable or knob, wants to change a default (timeout, poll interval, permission mode, model, workspace dirs), mentions .env or "make it configurable", or says "aggiungi una variabile". A setting that exists in only three of the five places is a support ticket, so read this first.
+description: The five-file checklist for adding, renaming, or changing the default of a claude-omni-rc setting — src/config.ts, .env.example, the README configuration table, install.sh, and the config tests — plus how to pick a safe default and how to change one without breaking existing installs. Use this skill whenever the user wants a new environment variable or knob, wants to change a default (timeout, poll interval, permission mode, model, workspace dirs), mentions .env or says "make it configurable", "add an env var", "expose a setting". A setting that exists in only three of the five places is a support ticket, so read this first.
 ---
 
 # Adding a config option
