@@ -6,7 +6,7 @@ describe('loadConfig', () => {
     const c = loadConfig({});
     expect(c.telegramBotToken).toBe('');
     expect(c.ollamaBaseUrl).toBe('http://127.0.0.1:11434');
-    expect(c.defaultModel).toBe('deepseek-v4-flash:0731-cloud');
+    expect(c.defaultModel).toBe('deepseek-v4-flash:cloud');
     expect(c.apiPort).toBe(4123);
     expect(c.maxHeadlessSessions).toBe(2);
     expect(c.permissionTimeoutSeconds).toBe(120);

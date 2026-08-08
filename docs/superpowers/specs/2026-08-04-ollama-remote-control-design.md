@@ -6,7 +6,7 @@
 
 ## 1. Obiettivo
 
-Mimare il comportamento di `/remote-control` di Claude Code (Anthropic) quando i modelli sono serviti da **Ollama** (cloud o locale), senza dipendere dall'infrastruttura Anthropic. L'utente usa Claude Code come harness con `ANTHROPIC_BASE_URL=http://127.0.0.1:11434` (token fittizio `ollama`) e modelli `:cloud` come `deepseek-v4-flash:0731-cloud` o `kimi-k3:cloud`.
+Mimare il comportamento di `/remote-control` di Claude Code (Anthropic) quando i modelli sono serviti da **Ollama** (cloud o locale), senza dipendere dall'infrastruttura Anthropic. L'utente usa Claude Code come harness con `ANTHROPIC_BASE_URL=http://127.0.0.1:11434` (token fittizio `ollama`) e modelli `:cloud` come `deepseek-v4-flash:cloud` o `kimi-k3:cloud`.
 
 Il remote control nativo è **architetturalmente incompatibile** con questa configurazione: dal v2.1.196 è disabilitato quando `ANTHROPIC_BASE_URL` non punta a `api.anthropic.com`, richiede un account claude.ai (piani Pro/Max/Team/Enterprise) e sincronizza i transcript sui server Anthropic.
 
@@ -16,7 +16,7 @@ Il remote control nativo è **architetturalmente incompatibile** con questa conf
 
 1. **Niente infrastruttura Anthropic**: solo harness locale + Ollama.
 2. **Niente plugin Channels ufficiale**: richiede auth Anthropic, è un bridge single-session senza lista sessioni (verificato su doc ufficiali).
-3. **Driver: Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`) — **validato da spike** sul Mac dell'utente (04/08/2026): funziona con `ANTHROPIC_BASE_URL` → Ollama per chat, tool call (Bash) **e flusso permessi** (`canUseTool`, percorsi allow e deny), con `deepseek-v4-flash:0731-cloud`, senza identità Anthropic reale. Versione testata: **0.3.221** (da congelare).
+3. **Driver: Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`) — **validato da spike** sul Mac dell'utente (04/08/2026): funziona con `ANTHROPIC_BASE_URL` → Ollama per chat, tool call (Bash) **e flusso permessi** (`canUseTool`, percorsi allow e deny), con `deepseek-v4-flash:cloud`, senza identità Anthropic reale. Versione testata: **0.3.221** (da congelare).
 4. **Due classi di sessione**:
    - **headless**: possedute dal daemon, controllabili al 100% (chat, media, permessi), via SDK con `resume` per `session_id`.
    - **terminale**: sessioni interattive dell'utente lanciate in tmux; **mirror** in lettura (tail dei JSONL) + **iniezione testo** via tmux.
@@ -117,7 +117,7 @@ interface Session {
 
 ## 11. Configurazione
 
-`.env` (o variabili ambiente): `TELEGRAM_BOT_TOKEN` · `ALLOWED_USER_IDS` · `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`) · `DEFAULT_MODEL` (default `deepseek-v4-flash:0731-cloud`) · `WHISPER_MODEL` · `MAX_HEADLESS_SESSIONS` (2) · `PERMISSION_TIMEOUT_SECONDS` (120) · `WORKSPACE_DIRS` · `STATE_DIR` (`~/.ollama-rc`) · `ARMED_ON_START` (default `false`).
+`.env` (o variabili ambiente): `TELEGRAM_BOT_TOKEN` · `ALLOWED_USER_IDS` · `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`) · `DEFAULT_MODEL` (default `deepseek-v4-flash:cloud`) · `WHISPER_MODEL` · `MAX_HEADLESS_SESSIONS` (2) · `PERMISSION_TIMEOUT_SECONDS` (120) · `WORKSPACE_DIRS` · `STATE_DIR` (`~/.ollama-rc`) · `ARMED_ON_START` (default `false`).
 
 ## 12. Errori e casi limite
 
@@ -151,7 +151,7 @@ interface Session {
 
 ## 16. Rischi aperti
 
-- ~~Flusso permessi via SDK (`canUseTool`) con Ollama~~ — **RISOLTO**: validato da spike (04/08/2026), percorsi allow e deny con `deepseek-v4-flash:0731-cloud`. Nota operativa: con `permissionMode: 'default'` il callback copre le decisioni "ask"; per hard-deny headless esiste `dontAsk` (non usato, il design vuole l'approvazione remota).
+- ~~Flusso permessi via SDK (`canUseTool`) con Ollama~~ — **RISOLTO**: validato da spike (04/08/2026), percorsi allow e deny con `deepseek-v4-flash:cloud`. Nota operativa: con `permissionMode: 'default'` il callback copre le decisioni "ask"; per hard-deny headless esiste `dontAsk` (non usato, il design vuole l'approvazione remota).
 - **Affidabilità iniezione tmux**: l'euristica "idle" va tarata in E2E.
 - **Modello whisper da scaricare** su Ollama locale (la dimensione dipende dalla variante: large ~1.5GB+, small ~50MB).
 - **Churn API SDK** (feature in preview): congelare la versione 0.3.221 validata dallo spike.

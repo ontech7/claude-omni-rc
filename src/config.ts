@@ -50,7 +50,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       .split(',').map(s => s.trim()).filter(Boolean).map(Number),
     pairingCode: env.PAIRING_CODE || undefined,
     ollamaBaseUrl: env.OLLAMA_BASE_URL ?? 'http://127.0.0.1:11434',
-    defaultModel: env.DEFAULT_MODEL ?? 'deepseek-v4-flash:0731-cloud',
+    defaultModel: env.DEFAULT_MODEL ?? 'deepseek-v4-flash:cloud',
     defaultPermissionMode: env.DEFAULT_PERMISSION_MODE === 'auto' ? 'auto' : 'standard',
     maxHeadlessSessions: parseNum(env, 'MAX_HEADLESS_SESSIONS', 2),
     permissionTimeoutSeconds: parseNum(env, 'PERMISSION_TIMEOUT_SECONDS', 120),

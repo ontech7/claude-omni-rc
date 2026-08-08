@@ -28,7 +28,7 @@
 #
 # Examples:
 #   omni-rc myproject                                     # Ollama (DEFAULT_MODEL)
-#   omni-rc myproject -c ~/code/myproject -m deepseek-v4-flash:0731-cloud
+#   omni-rc myproject -c ~/code/myproject -m deepseek-v4-flash:cloud
 #   omni-rc myproject -m claude-opus-5                    # Anthropic
 #   omni-rc myproject -p "review the current diff"
 #   omni-rc -l
@@ -154,7 +154,7 @@ pick() {
 }
 
 OLLAMA_BASE_URL="$(pick OLLAMA_BASE_URL 'http://127.0.0.1:11434')"
-DEFAULT_MODEL="$(pick DEFAULT_MODEL 'deepseek-v4-flash:0731-cloud')"
+DEFAULT_MODEL="$(pick DEFAULT_MODEL 'deepseek-v4-flash:cloud')"
 ANTHROPIC_BASE_URL="$(pick ANTHROPIC_BASE_URL '')"
 ANTHROPIC_AUTH_TOKEN="$(pick ANTHROPIC_AUTH_TOKEN '')"
 ANTHROPIC_API_KEY="$(pick ANTHROPIC_API_KEY '')"

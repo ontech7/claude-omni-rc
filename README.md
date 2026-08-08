@@ -116,7 +116,7 @@ shell function that does it for you:
 
 ```bash
 omni-rc my-project                          # tmux session claude:my-project + claude
-omni-rc my-project -c ~/code/my-project -m deepseek-v4-flash:0731-cloud
+omni-rc my-project -c ~/code/my-project -m deepseek-v4-flash:cloud
 omni-rc my-project -p "review the current diff"
 omni-rc -l                                  # list claude:* sessions
 ```
@@ -283,7 +283,7 @@ and one authorization method — plus `WORKSPACE_DIRS` if you want `/new`.
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | where Ollama listens; also the fallback provider |
 | `ANTHROPIC_BASE_URL` | — | provider for sessions (unset → Ollama); e.g. `https://api.anthropic.com` or a proxy |
 | `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | — | credentials for that provider (Ollama uses the placeholder `ollama` token) |
-| `DEFAULT_MODEL` | `deepseek-v4-flash:0731-cloud` | model for headless sessions (per-session: `/new --model`) |
+| `DEFAULT_MODEL` | `deepseek-v4-flash:cloud` | model for headless sessions (per-session: `/new --model`) |
 | `DEFAULT_PERMISSION_MODE` | `standard` | permission mode for `/new` without a flag; `auto` runs unattended |
 | `MAX_HEADLESS_SESSIONS` | `2` | concurrent headless sessions |
 | `PERMISSION_TIMEOUT_SECONDS` | `120` | unanswered permission → deny |
