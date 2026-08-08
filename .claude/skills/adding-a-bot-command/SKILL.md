@@ -1,6 +1,6 @@
 ---
 name: adding-a-bot-command
-description: The end-to-end checklist for adding, renaming, or changing a Telegram command or inline button in bot/telegram.ts — registration, the authorize + requireArmed gate, HTML escaping, message splitting, callback data, tests, and the four places the command list is duplicated (setMyCommands, /help, README, AI-GUIDE). Use this skill whenever the user asks for a new bot command or flag, wants an existing one to behave differently, mentions "/new", "/rc", "/sessions", "/usage", inline buttons, or says "add a command to the bot". Half a command shipped is a command that lies to the user in /help, so read this first.
+description: The end-to-end checklist for adding, renaming, or changing a Telegram command or inline button in bot/telegram.ts — registration, the authorize + requireArmed gate, HTML escaping, message splitting, callback data, tests, and the four places the command list is duplicated (setMyCommands, /help, README, AI-GUIDE). Use this skill whenever the user asks for a new bot command or flag, wants an existing one to behave differently, mentions "/new", "/rc", "/sessions", "/usage", inline buttons, or says "add a command to the bot" or the Italian equivalents ("aggiungi un comando", "aggiungi un bottone", "cambia il comando"). Half a command shipped is a command that lies to the user in /help, so read this first.
 ---
 
 # Adding a bot command

@@ -1,6 +1,6 @@
 ---
 name: writing-tests
-description: How to write and run tests for claude-omni-rc with Vitest — file layout, the pure-helper + injected-dependency pattern, fake timers for the timeout/polling code, and what must never touch a test (real Telegram, real tmux, real Ollama, the real home directory). Use this skill whenever you add or change a test in test/, whenever you add behaviour to src/ or bot/ that needs covering, when a test is flaky or hangs, and when the user says "write a test", "add coverage", "the tests fail", "cover this case". Every change to this repo ships behind `npm test`, so read this before writing the first `it(...)`.
+description: How to write and run tests for claude-omni-rc with Vitest — file layout, the pure-helper + injected-dependency pattern, fake timers for the timeout/polling code, and what must never touch a test (real Telegram, real tmux, real Ollama, the real home directory). Use this skill whenever you add or change a test in test/, whenever you add behaviour to src/ or bot/ that needs covering, when a test is flaky or hangs, and when the user says "write a test", "add coverage", "the tests fail", "cover this case", or the Italian equivalents ("scrivi i test", "aggiungi i test", "i test falliscono", "copri questo caso"). Every change to this repo ships behind `npm test`, so read this before writing the first `it(...)`.
 ---
 
 # Writing tests
