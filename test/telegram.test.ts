@@ -36,7 +36,7 @@ describe('parseNewFlags', () => {
   it('parses --model and --auto/--standard in any order', () => {
     expect(parseNewFlags('write a haiku')).toEqual({ text: 'write a haiku' }); // nessun flag → decide la config
     expect(parseNewFlags('--standard review this')).toEqual({ mode: 'standard', text: 'review this' });
-    expect(parseNewFlags('--model deepseek-v4-flash:0731-cloud refactor')).toEqual({ model: 'deepseek-v4-flash:0731-cloud', text: 'refactor' });
+    expect(parseNewFlags('--model deepseek-v4-flash:cloud refactor')).toEqual({ model: 'deepseek-v4-flash:cloud', text: 'refactor' });
     expect(parseNewFlags('--standard --model claude-sonnet-4-5 fix the bug')).toEqual({ mode: 'standard', model: 'claude-sonnet-4-5', text: 'fix the bug' });
     expect(parseNewFlags('--model m1 --auto go')).toEqual({ mode: 'auto', model: 'm1', text: 'go' });
   });
@@ -190,14 +190,14 @@ describe('permissionMessage / sessionListText', () => {
   });
   it('marks the active session and shows identifying details', () => {
     const sessions = [
-      { id: 'aaa', kind: 'headless', title: 't1', projectDir: '/x', model: 'deepseek-v4-flash:0731-cloud', status: 'idle', lastActivity: '2026-08-05T12:00:00.000Z', createdAt: '' },
+      { id: 'aaa', kind: 'headless', title: 't1', projectDir: '/x', model: 'deepseek-v4-flash:cloud', status: 'idle', lastActivity: '2026-08-05T12:00:00.000Z', createdAt: '' },
       { id: 'bbb', kind: 'terminal', title: 't2', projectDir: '/y', tmuxTarget: 'claude:my-branch', status: 'running', lastActivity: new Date().toISOString(), createdAt: '' },
     ] as any;
     const txt = sessionListText(sessions, 'bbb');
     expect(txt).toContain('▸');
     expect(txt).toContain('running');
     expect(txt).toContain('claude:my-branch'); // per le terminali il target tmux
-    expect(txt).toContain('deepseek-v4-flash:0731-cloud'); // per le headless il modello
+    expect(txt).toContain('deepseek-v4-flash:cloud'); // per le headless il modello
     expect(txt).toContain('just now');
   });
   it('formats relative time', () => {

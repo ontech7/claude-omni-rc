@@ -21,7 +21,7 @@ ENV_FILE="$REPO_DIR/.env"
 ENV_EXAMPLE="$REPO_DIR/.env.example"
 STATE_DIR="${STATE_DIR:-$HOME/.claude-omni-rc}"
 DEFAULT_OLLAMA_URL="http://127.0.0.1:11434"
-DEFAULT_MODEL_FALLBACK="deepseek-v4-flash:0731-cloud"
+DEFAULT_MODEL_FALLBACK="deepseek-v4-flash:cloud"
 
 if [ -t 1 ]; then
   c_reset='\033[0m'; c_bold='\033[1m'; c_dim='\033[2m'; c_green='\033[32m'

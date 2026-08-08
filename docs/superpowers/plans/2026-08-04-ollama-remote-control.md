@@ -21,7 +21,7 @@ Copied verbatim from the spec (`docs/superpowers/specs/2026-08-04-ollama-remote-
 7. **Concorrenza limitata**: default **2** sessioni headless attive (`MAX_HEADLESS_SESSIONS`).
 8. **Interruttore globale `armed`**: persistito in `~/.ollama-rc/state.json`, default `false`. Da disattivo: **nessun mirroring, nessuna iniezione, nessun relay** — il bot risponde solo ai comandi di controllo (`/rc`, `/help` e `/start` per il pairing, necessario anche da disattivo). Il daemon gira sempre (launchd) ma inerte finché non armato.
 9. **Registry sessioni** persistito in `~/.ollama-rc/state.json`.
-10. **Modello default**: `deepseek-v4-flash:0731-cloud` (`DEFAULT_MODEL`).
+10. **Modello default**: `deepseek-v4-flash:cloud` (`DEFAULT_MODEL`).
 11. **Whisper** (Ollama): modello configurabile, default `whisper-large-v3`; endpoint nativo `/api/transcribe` con fallback `/v1/audio/transcriptions` (OpenAI-compat), multipart `file`+`model`.
 12. **Timeout permessi**: `PERMISSION_TIMEOUT_SECONDS` default **120** → deny.
 13. **Convenzione sessioni terminale**: `tmux new -s claude:<progetto>`.
@@ -33,7 +33,7 @@ Copied verbatim from the spec (`docs/superpowers/specs/2026-08-04-ollama-remote-
 
 - **tmux NON installato** → `brew install tmux` prima dell'E2E (i test lo mockano).
 - **ffmpeg** richiesto per la voce → `brew install ffmpeg`.
-- Ollama attivo con `kimi-k3:cloud`; `deepseek-v4-flash:0731-cloud` (default) e `whisper-large-v3` da pullare quando servono (`ollama pull <name>`).
+- Ollama attivo con `kimi-k3:cloud`; `deepseek-v4-flash:cloud` (default) e `whisper-large-v3` da pullare quando servono (`ollama pull <name>`).
 
 ---
 
@@ -121,7 +121,7 @@ describe('loadConfig', () => {
     const c = loadConfig({});
     expect(c.telegramBotToken).toBe('');
     expect(c.ollamaBaseUrl).toBe('http://127.0.0.1:11434');
-    expect(c.defaultModel).toBe('deepseek-v4-flash:0731-cloud');
+    expect(c.defaultModel).toBe('deepseek-v4-flash:cloud');
     expect(c.whisperModel).toBe('whisper-large-v3');
     expect(c.maxHeadlessSessions).toBe(2);
     expect(c.permissionTimeoutSeconds).toBe(120);
@@ -203,7 +203,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       .split(',').map(s => s.trim()).filter(Boolean).map(Number),
     pairingCode: env.PAIRING_CODE || undefined,
     ollamaBaseUrl: env.OLLAMA_BASE_URL ?? 'http://127.0.0.1:11434',
-    defaultModel: env.DEFAULT_MODEL ?? 'deepseek-v4-flash:0731-cloud',
+    defaultModel: env.DEFAULT_MODEL ?? 'deepseek-v4-flash:cloud',
     whisperModel: env.WHISPER_MODEL ?? 'whisper-large-v3',
     maxHeadlessSessions: parseNum(env, 'MAX_HEADLESS_SESSIONS', 2),
     permissionTimeoutSeconds: parseNum(env, 'PERMISSION_TIMEOUT_SECONDS', 120),
@@ -230,7 +230,7 @@ ALLOWED_USER_IDS=
 PAIRING_CODE=
 # Ollama
 OLLAMA_BASE_URL=http://127.0.0.1:11434
-DEFAULT_MODEL=deepseek-v4-flash:0731-cloud
+DEFAULT_MODEL=deepseek-v4-flash:cloud
 WHISPER_MODEL=whisper-large-v3
 # Limiti
 MAX_HEADLESS_SESSIONS=2
@@ -2820,7 +2820,7 @@ Mima `/remote-control` di Claude Code senza infrastruttura Anthropic.
 
 ## Prerequisiti
 - Node 22, Ollama attivo, `tmux` (`brew install tmux`), `ffmpeg` (`brew install ffmpeg`)
-- Modelli: `ollama pull deepseek-v4-flash:0731-cloud` (default) e `ollama pull whisper-large-v3` (voce)
+- Modelli: `ollama pull deepseek-v4-flash:cloud` (default) e `ollama pull whisper-large-v3` (voce)
 
 ## Setup
 1. `cp .env.example .env` e compila i segreti (token da @BotFather, ALLOWED_USER_IDS o PAIRING_CODE)

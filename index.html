@@ -576,7 +576,7 @@ Tool: Bash
         <ul>
           <li><code>omni-rc my-project</code> — no <code>-m</code>: uses <code>DEFAULT_MODEL</code> from <code>.env</code>, Ollama by default</li>
           <li><code>/new &lt;prompt&gt;</code> — headless uses the <code>.env</code> provider, Ollama by default</li>
-          <li>per-session: <code>omni-rc … -m deepseek-v4-flash:0731-cloud</code> or <code>/new --model …</code></li>
+          <li>per-session: <code>omni-rc … -m deepseek-v4-flash:cloud</code> or <code>/new --model …</code></li>
         </ul>
       </div>
       <div>
@@ -595,7 +595,7 @@ Tool: Bash
     <div class="term">
       <div class="term-bar"><i></i><i></i><i></i><span>Terminal</span></div>
       <pre><span class="prompt">$</span> omni-rc my-project                  <span class="dim"># Ollama — DEFAULT_MODEL</span>
-<span class="prompt">$</span> omni-rc my-project -m deepseek-v4-flash:0731-cloud
+<span class="prompt">$</span> omni-rc my-project -m deepseek-v4-flash:cloud
 <span class="prompt">$</span> omni-rc my-project -m claude-opus-5 <span class="dim"># Anthropic</span>
 <span class="prompt">$</span> omni-rc -l                            <span class="dim"># list claude:* sessions</span></pre>
     </div>

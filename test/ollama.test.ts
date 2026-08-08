@@ -36,7 +36,7 @@ describe('OllamaClient', () => {
       { url: '/api/show', ok: true, body: { model_info: { 'deepseek4.context_length': 1048576 } } },
     ]);
     const client = new OllamaClient({ baseUrl: 'http://127.0.0.1:11434', fetchImpl });
-    await expect(client.modelContext('deepseek-v4-flash:0731-cloud')).resolves.toBe(1048576);
+    await expect(client.modelContext('deepseek-v4-flash:cloud')).resolves.toBe(1048576);
   });
   it('returns undefined when the context length is missing', async () => {
     const { fetchImpl } = fakeFetch([

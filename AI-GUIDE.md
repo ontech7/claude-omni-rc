@@ -116,7 +116,7 @@ Terminal sessions must run inside tmux (`claude:<project>`) to receive text.
 - `node -v` is 22+; `./install.sh` finishes with the summary screen.
 - `.env` contains `TELEGRAM_BOT_TOKEN` and one of `ALLOWED_USER_IDS` /
   `PAIRING_CODE`.
-- `ollama list` shows `deepseek-v4-flash:0731-cloud`.
+- `ollama list` shows `deepseek-v4-flash:cloud`.
 - From Telegram: `/rc on` replies "🔓 Remote control ARMED"; `/new hello`
   creates a session; a permission request shows `✓ Approve / ✗ Reject`.
 

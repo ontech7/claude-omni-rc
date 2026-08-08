@@ -108,7 +108,7 @@ check_model() {
   fi
   local model
   model="$(grep '^DEFAULT_MODEL=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
-  [ -n "$model" ] || model='deepseek-v4-flash:0731-cloud'
+  [ -n "$model" ] || model='deepseek-v4-flash:cloud'
   if ollama list 2>/dev/null | awk '{print $1}' | grep -qx "$model"; then
     note '✓' "Ollama model $model present"
   else
