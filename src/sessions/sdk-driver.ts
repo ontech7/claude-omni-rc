@@ -108,7 +108,9 @@ export class SdkDriver {
             .join('\n');
           if (text.trim()) {
             const eventId = newEventId();
-            log().info('event emitted', { eventId, sessionId, source: 'sdk', kind: 'text' });
+            // stesso schema del watcher per 'text': role e chars, non solo l'id —
+            // altrimenti un filtro su questi campi salterebbe in silenzio gli eventi sdk.
+            log().info('event emitted', { eventId, sessionId, source: 'sdk', kind: 'text', role: 'assistant', chars: text.length });
             bus.emit({ type: 'session.text', sessionId, role: 'assistant', text, eventId });
           }
           for (const block of msg.message.content) {
@@ -138,7 +140,10 @@ export class SdkDriver {
           for (const block of msg.message.content) {
             if (typeof block !== 'string' && block.type === 'tool_result') {
               const eventId = newEventId();
-              log().debug('event emitted', { eventId, sessionId, source: 'sdk', kind: 'tool_result', toolUseId: block.tool_use_id, isError: block.is_error });
+              // stesso schema del watcher per 'tool_result': la chiave toolName c'è
+              // sempre, qui vuota perché l'SDK non lo riporta sul blocco tool_result
+              // (lo stesso motivo per cui l'evento emesso sotto ha toolName: '').
+              log().debug('event emitted', { eventId, sessionId, source: 'sdk', kind: 'tool_result', toolName: '', toolUseId: block.tool_use_id, isError: block.is_error });
               bus.emit({
                 type: 'session.tool', sessionId, toolName: '', kind: 'tool_result',
                 toolUseId: block.tool_use_id, result: block.content, isError: block.is_error, eventId,
