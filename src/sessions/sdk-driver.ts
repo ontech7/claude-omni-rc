@@ -1,5 +1,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Bus } from '../bus.js';
+import { newEventId } from '../bus.js';
+import { log } from '../log.js';
 import type { Config } from '../config.js';
 import type { OllamaClient } from '../ollama.js';
 import type { PermissionFlow } from '../permissions.js';
@@ -104,28 +106,42 @@ export class SdkDriver {
             .filter(b => b.type === 'text')
             .map(b => (b as { text: string }).text)
             .join('\n');
-          if (text.trim()) bus.emit({ type: 'session.text', sessionId, role: 'assistant', text });
+          if (text.trim()) {
+            const eventId = newEventId();
+            log().info('event emitted', { eventId, sessionId, source: 'sdk', kind: 'text' });
+            bus.emit({ type: 'session.text', sessionId, role: 'assistant', text, eventId });
+          }
           for (const block of msg.message.content) {
             if (block.type === 'tool_use') {
               if (block.name === 'AskUserQuestion') {
                 // il menu a scelta multipla diventa una domanda ❓ con bottoni
                 // (stesso percorso delle terminali), non una bubble di tool col JSON.
                 const questions = parseAskUserQuestions(block.input);
-                if (questions.length) bus.emit({ type: 'session.prompt', sessionId, questions });
+                if (questions.length) {
+                  const eventId = newEventId();
+                  log().info('event emitted', { eventId, sessionId, source: 'sdk', kind: 'prompt', questions: questions.length });
+                  bus.emit({ type: 'session.prompt', sessionId, questions, eventId });
+                }
                 continue;
               }
-              bus.emit({
-                type: 'session.tool', sessionId, toolName: block.name, kind: 'tool_use',
-                toolUseId: block.id, input: block.input as Record<string, unknown>,
-              });
+              {
+                const eventId = newEventId();
+                log().info('event emitted', { eventId, sessionId, source: 'sdk', kind: 'tool_use', toolName: block.name, toolUseId: block.id });
+                bus.emit({
+                  type: 'session.tool', sessionId, toolName: block.name, kind: 'tool_use',
+                  toolUseId: block.id, input: block.input as Record<string, unknown>, eventId,
+                });
+              }
             }
           }
         } else if (msg.type === 'user') {
           for (const block of msg.message.content) {
             if (typeof block !== 'string' && block.type === 'tool_result') {
+              const eventId = newEventId();
+              log().debug('event emitted', { eventId, sessionId, source: 'sdk', kind: 'tool_result', toolUseId: block.tool_use_id, isError: block.is_error });
               bus.emit({
                 type: 'session.tool', sessionId, toolName: '', kind: 'tool_result',
-                toolUseId: block.tool_use_id, result: block.content, isError: block.is_error,
+                toolUseId: block.tool_use_id, result: block.content, isError: block.is_error, eventId,
               });
             }
           }
@@ -135,7 +151,10 @@ export class SdkDriver {
             bus.emit({ type: 'session.result', sessionId, result: msg.result, isError: false });
             manager.setStatus(sessionId, 'idle');
           } else {
-            bus.emit({ type: 'session.error', sessionId, message: msg.errors.join('\n') });
+            const eventId = newEventId();
+            const message = msg.errors.join('\n');
+            log().warn('event emitted', { eventId, sessionId, source: 'sdk', kind: 'error', message });
+            bus.emit({ type: 'session.error', sessionId, message, eventId });
             manager.setStatus(sessionId, 'error');
           }
         }
@@ -143,11 +162,15 @@ export class SdkDriver {
       if (!finished) manager.setStatus(sessionId, 'idle');
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') {
-        bus.emit({ type: 'session.error', sessionId, message: 'Stopped by the user' });
+        const eventId = newEventId();
+        log().warn('event emitted', { eventId, sessionId, source: 'sdk', kind: 'error', message: 'Stopped by the user' });
+        bus.emit({ type: 'session.error', sessionId, message: 'Stopped by the user', eventId });
         manager.setStatus(sessionId, 'stopped');
       } else {
         const message = err instanceof Error ? err.message : String(err);
-        bus.emit({ type: 'session.error', sessionId, message });
+        const eventId = newEventId();
+        log().warn('event emitted', { eventId, sessionId, source: 'sdk', kind: 'error', message });
+        bus.emit({ type: 'session.error', sessionId, message, eventId });
         manager.setStatus(sessionId, 'error');
       }
     } finally {

@@ -51,8 +51,8 @@ export interface UserDialog {
 
 export type BusEvent =
   | { type: 'session.updated'; sessionId: string }
-  | { type: 'session.text'; sessionId: string; role: 'user' | 'assistant'; text: string }
-  | { type: 'session.prompt'; sessionId: string; questions: PromptQuestion[] }
+  | { type: 'session.text'; sessionId: string; role: 'user' | 'assistant'; text: string; eventId?: string }
+  | { type: 'session.prompt'; sessionId: string; questions: PromptQuestion[]; eventId?: string }
   | {
       type: 'session.tool';
       sessionId: string;
@@ -62,8 +62,9 @@ export type BusEvent =
       input?: Record<string, unknown>;
       result?: unknown;
       isError?: boolean;
+      eventId?: string;
     }
   | { type: 'session.permission'; permission: PermissionRequest }
   | { type: 'session.dialog'; sessionId: string; dialog: UserDialog }
   | { type: 'session.result'; sessionId: string; result: string; isError: boolean }
-  | { type: 'session.error'; sessionId: string; message: string };
+  | { type: 'session.error'; sessionId: string; message: string; eventId?: string };

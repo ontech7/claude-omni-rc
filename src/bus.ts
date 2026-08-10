@@ -1,4 +1,12 @@
+import { randomBytes } from 'node:crypto';
 import type { BusEvent } from './types.js';
+
+// Identità di un evento diretto a Telegram: lo accompagna dalla riga di
+// transcript (o dallo stream dell'SDK) fino al messaggio consegnato, così un
+// evento che non arriva si può cercare nel log invece di essere dedotto.
+export function newEventId(): string {
+  return randomBytes(4).toString('hex');
+}
 
 type Handler<T extends BusEvent['type']> = (e: Extract<BusEvent, { type: T }>) => void;
 

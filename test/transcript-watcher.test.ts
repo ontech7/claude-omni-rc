@@ -28,7 +28,7 @@ describe('TranscriptWatcher', () => {
     const s = manager.registerTerminal({ title: 'p', projectDir: '/tmp/p', tmuxTarget: 'claude:p' });
     const msg = 'Claude hit the output limit (max_tokens). Ask it to continue.';
     (watcher as any).emit(s, { type: 'error', message: msg });
-    expect(onError).toHaveBeenCalledWith({ type: 'session.error', sessionId: s.id, message: msg });
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ type: 'session.error', sessionId: s.id, message: msg }));
     // spec §4.3: nessun setStatus('error') — lo stato resta gestito da applyState
     expect(setStatus).not.toHaveBeenCalled();
   });
@@ -72,7 +72,7 @@ describe('TranscriptWatcher (worktree relocation)', () => {
     // il tail parte da EOF: le righe nuove del worktree arrivano in chat
     appendFileSync(wtFile, JSON.stringify({ type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'ciao' }], stop_reason: 'end_turn' } }) + '\n');
     await (watcher as any).pollSession(s);
-    expect(onText).toHaveBeenCalledWith({ type: 'session.text', sessionId: s.id, role: 'assistant', text: 'ciao' });
+    expect(onText).toHaveBeenCalledWith(expect.objectContaining({ type: 'session.text', sessionId: s.id, role: 'assistant', text: 'ciao' }));
   });
 
   it('does NOT adopt the newest transcript of another session when its own is gone', async () => {
@@ -127,7 +127,7 @@ describe('TranscriptWatcher (Ollama-launched Claude models + binding)', () => {
 
     appendFileSync(tf, JSON.stringify({ type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'ciao' }], stop_reason: 'end_turn' } }) + '\n');
     await (watcher as any).pollSession(s);
-    expect(onText).toHaveBeenCalledWith({ type: 'session.text', sessionId: s.id, role: 'assistant', text: 'ciao' });
+    expect(onText).toHaveBeenCalledWith(expect.objectContaining({ type: 'session.text', sessionId: s.id, role: 'assistant', text: 'ciao' }));
   });
 
   // Al riavvio il transcript-watcher può adottare il transcript di un'ALTRA
@@ -174,5 +174,29 @@ describe('TranscriptWatcher (Ollama-launched Claude models + binding)', () => {
     await (watcher as any).pollSession(s);
     const saved = JSON.parse(readFileSync(join(stateDir, 'state.json'), 'utf8'));
     expect(saved.sessions.find((x: any) => x.id === s.id)?.transcriptFile).toBe(tf);
+  });
+});
+
+describe('TranscriptWatcher — identità degli eventi', () => {
+  it('stamps every emitted event with an eventId', () => {
+    const { manager, watcher, bus } = makeWatcher();
+    const seen: unknown[] = [];
+    bus.on('session.text', e => seen.push(e.eventId));
+    bus.on('session.prompt', e => seen.push(e.eventId));
+    const s = manager.registerTerminal({ title: 'p', projectDir: '/tmp/p', tmuxTarget: 'claude:p' });
+    (watcher as any).emit(s, { type: 'text', role: 'assistant', text: 'ciao' });
+    (watcher as any).emit(s, { type: 'prompt', questions: [{ question: 'q', options: [{ label: 'a' }] }] });
+    expect(seen).toHaveLength(2);
+    for (const id of seen) expect(id).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it('gives a different id to each event', () => {
+    const { manager, watcher, bus } = makeWatcher();
+    const ids: unknown[] = [];
+    bus.on('session.text', e => ids.push(e.eventId));
+    const s = manager.registerTerminal({ title: 'p', projectDir: '/tmp/p', tmuxTarget: 'claude:p' });
+    (watcher as any).emit(s, { type: 'text', role: 'assistant', text: 'uno' });
+    (watcher as any).emit(s, { type: 'text', role: 'assistant', text: 'due' });
+    expect(ids[0]).not.toBe(ids[1]);
   });
 });

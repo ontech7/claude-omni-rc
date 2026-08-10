@@ -1,6 +1,8 @@
 import { existsSync, statSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import type { Bus } from '../bus.js';
+import { newEventId } from '../bus.js';
+import { log } from '../log.js';
 import type { Config } from '../config.js';
 import type { Session, SessionStatus } from '../types.js';
 import type { SessionManager } from './manager.js';
@@ -146,35 +148,38 @@ export class TranscriptWatcher {
 
   private emit(s: Session, ev: TranscriptEvent): void {
     const { bus, manager } = this.deps;
+    const eventId = newEventId();
+    manager.touch(s.id);
     if (ev.type === 'prompt') {
-      manager.touch(s.id);
       manager.setStatus(s.id, 'awaiting-input');
-      bus.emit({ type: 'session.prompt', sessionId: s.id, questions: ev.questions });
+      log().info('event emitted', { eventId, sessionId: s.id, source: 'transcript', kind: 'prompt', questions: ev.questions.length });
+      bus.emit({ type: 'session.prompt', sessionId: s.id, questions: ev.questions, eventId });
       return;
     }
     if (ev.type === 'error') {
-      manager.touch(s.id);
-      bus.emit({ type: 'session.error', sessionId: s.id, message: ev.message });
+      log().warn('event emitted', { eventId, sessionId: s.id, source: 'transcript', kind: 'error', message: ev.message });
+      bus.emit({ type: 'session.error', sessionId: s.id, message: ev.message, eventId });
       return;
     }
     if (ev.type === 'text') {
-      manager.touch(s.id);
-      bus.emit({ type: 'session.text', sessionId: s.id, role: ev.role, text: ev.text });
-    } else if (ev.kind === 'tool_use') {
-      manager.touch(s.id);
-      manager.setStatus(s.id, 'running');
+      log().info('event emitted', { eventId, sessionId: s.id, source: 'transcript', kind: 'text', role: ev.role, chars: ev.text.length });
+      bus.emit({ type: 'session.text', sessionId: s.id, role: ev.role, text: ev.text, eventId });
+      return;
+    }
+    manager.setStatus(s.id, 'running');
+    if (ev.kind === 'tool_use') {
+      log().info('event emitted', { eventId, sessionId: s.id, source: 'transcript', kind: 'tool_use', toolName: ev.name, toolUseId: ev.id });
       bus.emit({
         type: 'session.tool', sessionId: s.id, toolName: ev.name, kind: 'tool_use',
-        toolUseId: ev.id, input: (ev.input ?? {}) as Record<string, unknown>,
+        toolUseId: ev.id, input: (ev.input ?? {}) as Record<string, unknown>, eventId,
       });
-    } else {
-      manager.touch(s.id);
-      manager.setStatus(s.id, 'running');
-      bus.emit({
-        type: 'session.tool', sessionId: s.id, toolName: ev.name, kind: 'tool_result',
-        toolUseId: ev.id, result: ev.result, isError: ev.isError,
-      });
+      return;
     }
+    log().debug('event emitted', { eventId, sessionId: s.id, source: 'transcript', kind: 'tool_result', toolName: ev.name, toolUseId: ev.id, isError: ev.isError });
+    bus.emit({
+      type: 'session.tool', sessionId: s.id, toolName: ev.name, kind: 'tool_result',
+      toolUseId: ev.id, result: ev.result, isError: ev.isError, eventId,
+    });
   }
 
   private applyState(s: Session, state: string): void {
