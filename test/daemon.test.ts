@@ -38,4 +38,26 @@ describe('createDaemon', () => {
     const state = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'));
     expect(state.armed).toBe(false);
   });
+
+  it('writes a startup record to the configured structured log', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orc-daemon-log-'));
+    const config = loadConfig({
+      STATE_DIR: dir,
+      API_PORT: '0',
+      TELEGRAM_BOT_TOKEN: 't',
+      CLAUDE_OMNI_RC_NO_UPDATE_CHECK: '1',
+    });
+    const bot = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}), notify: vi.fn() };
+    const daemon = createDaemon(config, { bot: bot as any });
+    await daemon.start();
+    await daemon.stop();
+    const file = join(dir, 'logs', 'daemon.jsonl');
+    expect(existsSync(file)).toBe(true);
+    const records = readFileSync(file, 'utf8').trim().split('\n').map(l => JSON.parse(l));
+    const startup = records.find(r => r.msg === 'daemon starting');
+    expect(startup).toBeDefined();
+    expect(startup.level).toBe('info');
+    expect(startup.pid).toBe(process.pid);
+    expect(typeof startup.version).toBe('string');
+  });
 });

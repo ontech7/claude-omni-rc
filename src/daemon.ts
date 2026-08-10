@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { join } from 'node:path';
 import { loadConfig, type Config } from './config.js';
+import { initLogger, log } from './log.js';
 import { StateStore } from './state.js';
 import { Bus } from './bus.js';
 import { SessionManager } from './sessions/manager.js';
@@ -22,6 +23,22 @@ export function createDaemon(
   config: Config,
   overrides: { bot?: Pick<TelegramBot, 'start' | 'stop' | 'notify'> } = {},
 ): Daemon {
+  // Prima di ogni altra cosa: da qui in poi qualunque modulo può chiamare log()
+  // e finire nel file configurato, incluso ciò che fallisce durante il cablaggio.
+  initLogger({
+    file: config.logFile,
+    level: config.logLevel,
+    maxBytes: config.logMaxBytes,
+    keep: config.logKeep,
+  });
+  log().info('daemon starting', {
+    version: CURRENT_VERSION,
+    pid: process.pid,
+    apiPort: config.apiPort,
+    armedOnStart: config.armedOnStart,
+    stateDir: config.stateDir,
+  });
+
   const state = new StateStore(join(config.stateDir, 'state.json'));
   const bus = new Bus();
   const manager = new SessionManager({ bus, state, idleGraceMs: config.idleGraceMs, armedOnStart: config.armedOnStart });
@@ -59,7 +76,7 @@ export function createDaemon(
     const latest = await checkForUpdate({ statePath: updateStatePath, disabled: config.noUpdateCheck });
     if (!latest) return;
     const message = `⬆️ New version available: claude-omni-rc ${latest} (you have ${CURRENT_VERSION}) — ${RELEASES_URL}`;
-    console.error(message);
+    log().info('update available', { latest, current: CURRENT_VERSION });
     bot.notify(message);
     markNotified(updateStatePath, latest);
   }
@@ -86,6 +103,7 @@ export function createDaemon(
       await api.close();
       await bot.stop();
       manager.persist();
+      log().info('daemon stopped');
     },
   };
 }
@@ -93,12 +111,12 @@ export function createDaemon(
 const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
   // rete di sicurezza: anche un fire-and-forget sfuggito non deve uccidere il daemon.
-  process.on('unhandledRejection', err => { console.error('claude-omni-rc unhandledRejection:', err); });
+  process.on('unhandledRejection', err => { log().error('unhandledRejection', { err }); });
   const daemon = createDaemon(loadConfig());
   const shutdown = (): void => {
     void daemon.stop().then(() => process.exit(0)).catch(() => process.exit(1));
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
-  daemon.start().catch(err => { console.error('daemon start failed:', err); process.exit(1); });
+  daemon.start().catch(err => { log().error('daemon start failed', { err }); process.exit(1); });
 }
