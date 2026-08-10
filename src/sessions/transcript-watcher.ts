@@ -22,6 +22,14 @@ export interface TranscriptWatcherDeps {
   bus: Bus;
 }
 
+// Finestra di grazia per il ramo "cambio di file" di un binding già vivo: un
+// transcript diverso, comparso nella stessa dir, soppianta quello legato solo
+// se la sua mtime lo supera di ALMENO questo margine. Sotto la finestra è
+// rumore (un subagent che scrive nella stessa dir di progetto mentre la nostra
+// sessione lavora ancora); oltre, è una rotazione vera — la sessione CLI è
+// ripartita in un file nuovo e quello vecchio ha smesso di crescere.
+export const TRANSCRIPT_SWITCH_GRACE_MS = 60_000;
+
 // Per ogni sessione terminale tracciata risolve il transcript del CLI
 // (`~/.claude/projects/<progetto>/<sessione>.jsonl`), ne fa tail e re-emette i
 // messaggi assistant/user come chat sul bus — lo stesso percorso usato dalle
@@ -69,7 +77,9 @@ export class TranscriptWatcher {
     if (file && !existsSync(file)) {
       const relocated = findTranscriptFile(config.projectsDir, basename(file));
       if (relocated) {
+        const previous = file;
         file = relocated;
+        log().info('transcript bound', { sessionId: s.id, previous, next: file, reason: 'relocated-missing-file' });
         manager.setTranscriptFile(s.id, file);
         manager.persist();
       } else {
@@ -84,6 +94,7 @@ export class TranscriptWatcher {
     // sessioni condividono legittimamente la stessa dir di progetto.
     const resolvedDir = resolveTranscriptDir(config.projectsDir, s.projectDir);
     if (file && existsSync(file) && resolvedDir && dirname(file) !== resolvedDir && s.projectDir.includes('.claude/worktrees')) {
+      log().info('transcript bound', { sessionId: s.id, previous: file, next: undefined, reason: 'stale-worktree-binding' });
       manager.setTranscriptFile(s.id, undefined);
       file = undefined;
     }
@@ -114,18 +125,46 @@ export class TranscriptWatcher {
         const nid = transcriptSessionId(newest);
         if (nid && nid !== expectedId) return;
       }
+      log().info('transcript bound', { sessionId: s.id, previous: undefined, next: newest, reason: 'first-adoption' });
       file = newest;
       manager.setTranscriptFile(s.id, file);
       manager.persist(); // il binding sopravvive al riavvio del daemon
     } else {
-      // Transcript valido: se nella SUA dir è comparso un file più recente (nuova
-      // sessione nello stesso progetto) lo seguiamo — rotazione storica, senza
-      // guardia: il vecchio file esiste ancora, quindi non è l'adozione sbagliata.
+      // Transcript valido: se nella SUA dir è comparso un file più recente NON lo
+      // seguiamo ciecamente — quella dir contiene anche i transcript dei subagent
+      // (Task, review, …), che sono sessioni diverse scritte nello stesso istante
+      // in cui la nostra sta lavorando: seguirli è come inseguire rumore.
+      // Una rotazione VERA (la sessione CLI riparte in un file nuovo, es. dopo
+      // /clear) si riconosce perché il vecchio file smette di crescere: quindi il
+      // nuovo prevale solo se la sua mtime supera quella del legato di almeno la
+      // finestra di grazia (o se il legato non è più leggibile, cioè è sparito).
       const newest = newestTranscriptFile(dirname(file));
       if (newest && newest !== file) {
-        file = newest;
-        manager.setTranscriptFile(s.id, file);
-        manager.persist();
+        let currentMtime: number | undefined;
+        try { currentMtime = statSync(file).mtimeMs; } catch { currentMtime = undefined; }
+        let newestMtime: number | undefined;
+        try { newestMtime = statSync(newest).mtimeMs; } catch { newestMtime = undefined; }
+        const supplants = newestMtime !== undefined && (currentMtime === undefined || newestMtime - currentMtime >= TRANSCRIPT_SWITCH_GRACE_MS);
+        if (supplants) {
+          const previous = file;
+          // Cambio di file legittimo: prima di spostare il tail sul file nuovo,
+          // svuotiamo quello vecchio ed emettiamo i suoi eventi residui — altrimenti
+          // la coda non ancora letta del file precedente andrebbe persa in silenzio
+          // (è esattamente così che la AskUserQuestion riprodotta è sparita).
+          // L'emissione avviene qui, PRIMA di sostituire `file`/il binding: gli
+          // eventi del file vecchio raggiungono il bus prima di quelli del nuovo,
+          // così la cronologia arriva in ordine su Telegram.
+          const oldTail = this.tails.get(s.id);
+          if (oldTail && oldTail.file === previous && oldTail.hasChanges()) {
+            const { events, state } = oldTail.poll();
+            for (const ev of events) this.emit(s, ev);
+            this.applyState(s, state);
+          }
+          file = newest;
+          log().info('transcript bound', { sessionId: s.id, previous, next: file, reason: 'file-switch' });
+          manager.setTranscriptFile(s.id, file);
+          manager.persist();
+        }
       }
     }
 
