@@ -108,11 +108,12 @@ export class LogSink {
     }
     if (level === 'error') this.stderr(line);
     if (this.fd === undefined) return;
-    if (this.size + line.length > this.maxBytes) this.rotate();
+    const lineBytes = Buffer.byteLength(line);
+    if (this.size + lineBytes > this.maxBytes) this.rotate();
     if (this.fd === undefined) return;
     try {
       writeSync(this.fd, line);
-      this.size += line.length;
+      this.size += lineBytes;
     } catch {
       // disco pieno o descrittore invalidato: il daemon continua a funzionare.
     }
