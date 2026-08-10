@@ -889,11 +889,18 @@ const STREAM_KINDS: ReadonlySet<GateKind> = new Set<GateKind>(['text', 'tool', '
 // `no-chat-bound` non compare qui di proposito: la mancanza di una chat collegata
 // non ferma i gestori (che continuano a chiudere la bolla e a ripulire i flow),
 // ferma l'invio — quindi va registrata dove l'invio avviene davvero, non qui.
+//
+// L'ordine dei controlli è vincolante: `not-active-session` PRIMA di
+// `injected-echo`. Il gestore del testo esegue i suoi effetti collaterali solo
+// quando il motivo è davvero l'eco, e prima di questo task quel ramo era
+// raggiungibile unicamente dopo aver superato armato e sessione selezionata.
+// Invertire i due controlli farebbe scattare quegli effetti anche da disarmato
+// o su una sessione non selezionata — un cambiamento di comportamento.
 export function gateSessionEvent(input: GateInput): DeliveryGate {
   if (!input.armed) return { deliver: false, reason: 'not-armed' };
   if (!STREAM_KINDS.has(input.kind)) return { deliver: true };
-  if (input.isInjectedEcho) return { deliver: false, reason: 'injected-echo' };
   if (input.sessionId !== input.activeSessionId) return { deliver: false, reason: 'not-active-session' };
+  if (input.isInjectedEcho) return { deliver: false, reason: 'injected-echo' };
   return { deliver: true };
 }
 ```
@@ -901,8 +908,10 @@ export function gateSessionEvent(input: GateInput): DeliveryGate {
 Aggiungi il metodo privato di supporto nella classe `TelegramBot`, accanto a `logCatch` (riga ~860 circa):
 
 ```ts
-  // Applica il gate e registra l'esito. Restituisce true se l'evento va avanti.
-  private passes(kind: GateKind, sessionId: string, eventId: string | undefined, isInjectedEcho = false): boolean {
+  // Applica il gate e registra l'esito. Restituisce l'esito completo, non un
+  // booleano: il gestore del testo deve poter distinguere il MOTIVO dello
+  // scarto, perché solo l'eco autorizza i suoi effetti collaterali.
+  private gate(kind: GateKind, sessionId: string, eventId: string | undefined, isInjectedEcho = false): DeliveryGate {
     const gate = gateSessionEvent({
       kind,
       armed: this.deps.manager.isArmed(),
@@ -910,11 +919,12 @@ Aggiungi il metodo privato di supporto nella classe `TelegramBot`, accanto a `lo
       activeSessionId: this.deps.manager.getActive(),
       isInjectedEcho,
     });
-    if (gate.deliver) return true;
-    log().info('event dropped', { eventId, sessionId, kind, reason: gate.reason });
-    return false;
+    if (!gate.deliver) log().info('event dropped', { eventId, sessionId, kind, reason: gate.reason });
+    return gate;
   }
 ```
+
+Gli altri gestori, che non hanno effetti collaterali da distinguere, testano `.deliver`: `if (!this.gate('prompt', sessionId, eventId).deliver) return;`
 
 Registra poi lo scarto per chat non collegata nei tre punti in cui avviene per davvero, sostituendo il `return` muto.
 
@@ -965,14 +975,19 @@ con
 ```ts
     bus.on('session.text', e => {
       const echo = e.role === 'user' && this.isInjectedEcho(e.sessionId, e.text);
-      if (!this.passes('text', e.sessionId, e.eventId, echo)) {
-        if (echo) { this.toolBurst(e.sessionId).close(); this.resetSummarize(e.sessionId); }
+      const gate = this.gate('text', e.sessionId, e.eventId, echo);
+      if (!gate.deliver) {
+        // Solo quando il motivo è davvero l'eco: prima di questo task il ramo
+        // era raggiungibile unicamente dopo armato + sessione selezionata, e
+        // farlo scattare su ogni scarto butterebbe via summary in volo che
+        // finivano ancora nella bolla di quella sessione.
+        if (gate.reason === 'injected-echo') { this.toolBurst(e.sessionId).close(); this.resetSummarize(e.sessionId); }
         return;
       }
       if (e.role === 'assistant') this.typing.stop();
 ```
 
-> Il comportamento resta identico: l'eco continua a chiudere la bolla e a scartare le summary pendenti, semplicemente ora lo scarto è registrato con il suo motivo.
+> Il comportamento resta identico in ogni cella della tabella armato × selezionata × eco × ruolo, ma **solo** grazie a due scelte accoppiate: l'ordine dei controlli nel gate (`not-active-session` prima di `injected-echo`) e la condizione sul motivo qui sopra. Cambiarne una sola reintroduce il difetto.
 
 Nello stesso gestore, subito prima di `void this.forwardText(...)`, aggiungi:
 
@@ -989,7 +1004,7 @@ e, nel ramo di fusione nella bolla (subito prima di `void burst.push(mdToHtml(e.
 `session.prompt` — sostituisci `if (!this.deps.manager.isArmed()) return;` con:
 
 ```ts
-      if (!this.passes('prompt', sessionId, eventId)) return;
+      if (!this.gate('prompt', sessionId, eventId).deliver) return;
 ```
 
 e adegua la firma del gestore a `({ sessionId, questions, eventId })`. Subito prima di `this.track(this.onSessionPrompt(...))` aggiungi:
@@ -1001,7 +1016,7 @@ e adegua la firma del gestore a `({ sessionId, questions, eventId })`. Subito pr
 `session.tool` — sostituisci `if (!this.deps.manager.isArmed()) return;` con:
 
 ```ts
-      if (!this.passes('tool', e.sessionId, e.eventId)) return;
+      if (!this.gate('tool', e.sessionId, e.eventId).deliver) return;
 ```
 
 > Attenzione: il corpo attuale contiene già `e.sessionId === this.deps.manager.getActive()` dentro la condizione del ramo `tool_use`. Poiché il gate ora copre quel controllo per il tipo `tool`, la condizione del ramo si riduce a `if (e.kind === 'tool_use' && e.input)`.
@@ -1009,7 +1024,7 @@ e adegua la firma del gestore a `({ sessionId, questions, eventId })`. Subito pr
 `session.permission` — sostituisci `if (!this.deps.manager.isArmed()) return;` con:
 
 ```ts
-      if (!this.passes('permission', permission.sessionId, undefined)) return;
+      if (!this.gate('permission', permission.sessionId, undefined).deliver) return;
 ```
 
 `session.dialog` (gestore alla riga ~1973) e `session.result` / `session.error` (righe ~1987-1999) — stessa sostituzione, rispettivamente con `'dialog'`, `'result'` ed `'error'` come `kind`, passando `e.eventId` dove l'evento ce l'ha (`session.error`) e `undefined` dove non ce l'ha (`session.dialog`, `session.result`).
