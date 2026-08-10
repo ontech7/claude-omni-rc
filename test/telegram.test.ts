@@ -608,6 +608,11 @@ describe('gateSessionEvent', () => {
     expect(gateSessionEvent({ ...base, armed: false, sessionId: 's2', isInjectedEcho: true }))
       .toEqual({ deliver: false, reason: 'not-armed' });
   });
+
+  it('reports not-active-session over injected-echo — the echo reason must only ever describe the selected session', () => {
+    expect(gateSessionEvent({ ...base, sessionId: 's2', isInjectedEcho: true }))
+      .toEqual({ deliver: false, reason: 'not-active-session' });
+  });
 });
 
 describe('ToolBurstAggregator with throttled sink', () => {

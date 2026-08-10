@@ -568,11 +568,23 @@ const STREAM_KINDS: ReadonlySet<GateKind> = new Set<GateKind>(['text', 'tool', '
 // `no-chat-bound` non compare qui di proposito: la mancanza di una chat collegata
 // non ferma i gestori (che continuano a chiudere la bolla e a ripulire i flow),
 // ferma l'invio — quindi va registrata dove l'invio avviene davvero, non qui.
+//
+// `not-active-session` è testato PRIMA di `injected-echo` di proposito: il
+// gestore di `session.text` chiude la bolla tool e scarta le summary pendenti
+// solo quando il motivo riportato è proprio l'echo, non per qualunque scarto.
+// Se l'echo vincesse anche su una sessione non selezionata, quell'evento
+// riporterebbe 'injected-echo' e il gestore chiuderebbe/ripulirebbe una
+// sessione che non è quella dell'iniezione in corso (es. injection instradata
+// su list()[0] o sul flow di una domanda, che non è detto siano la sessione
+// selezionata) — un vero side effect su dati di un'altra sessione, non un
+// semplice mancato inoltro. Riportare 'injected-echo' solo per la sessione che
+// sarebbe stata comunque consegnata tiene il motivo allineato all'unico caso
+// in cui il gestore deve intervenire.
 export function gateSessionEvent(input: GateInput): DeliveryGate {
   if (!input.armed) return { deliver: false, reason: 'not-armed' };
   if (!STREAM_KINDS.has(input.kind)) return { deliver: true };
-  if (input.isInjectedEcho) return { deliver: false, reason: 'injected-echo' };
   if (input.sessionId !== input.activeSessionId) return { deliver: false, reason: 'not-active-session' };
+  if (input.isInjectedEcho) return { deliver: false, reason: 'injected-echo' };
   return { deliver: true };
 }
 
@@ -907,8 +919,10 @@ export class TelegramBot {
     return err => console.error(label, err);
   }
 
-  // Applica il gate e registra l'esito. Restituisce true se l'evento va avanti.
-  private passes(kind: GateKind, sessionId: string, eventId: string | undefined, isInjectedEcho = false): boolean {
+  // Applica il gate e registra l'esito. Restituisce il gate stesso: i
+  // chiamanti che devono distinguere il motivo (es. session.text con l'echo)
+  // guardano `.reason`, gli altri si limitano a `.deliver`.
+  private passes(kind: GateKind, sessionId: string, eventId: string | undefined, isInjectedEcho = false): DeliveryGate {
     const gate = gateSessionEvent({
       kind,
       armed: this.deps.manager.isArmed(),
@@ -916,9 +930,8 @@ export class TelegramBot {
       activeSessionId: this.deps.manager.getActive(),
       isInjectedEcho,
     });
-    if (gate.deliver) return true;
-    log().info('event dropped', { eventId, sessionId, kind, reason: gate.reason });
-    return false;
+    if (!gate.deliver) log().info('event dropped', { eventId, sessionId, kind, reason: gate.reason });
+    return gate;
   }
   private async forwardText(sessionId: string, text: string, role: 'user' | 'assistant'): Promise<void> {
     const chatId = this.chatId;
@@ -1947,11 +1960,15 @@ export class TelegramBot {
     });
     bus.on('session.text', e => {
       const echo = e.role === 'user' && this.isInjectedEcho(e.sessionId, e.text);
-      if (!this.passes('text', e.sessionId, e.eventId, echo)) {
-        // Fix 1: l'echo di un testo iniettato dal bot non viene reinoltrato, ma
-        // la bolla tool va comunque chiusa e le summary pendenti scartate: il
-        // gate registra il motivo, ma l'effetto collaterale resta lo stesso.
-        if (echo) { this.toolBurst(e.sessionId).close(); this.resetSummarize(e.sessionId); }
+      const gate = this.passes('text', e.sessionId, e.eventId, echo);
+      if (!gate.deliver) {
+        // Fix 1: l'echo di un testo iniettato dal bot non viene reinoltrato, e
+        // solo in quel caso (motivo == 'injected-echo', non un qualunque
+        // scarto) la bolla tool va chiusa e le summary pendenti scartate — per
+        // un evento scartato per altro motivo (disarmato, sessione non
+        // selezionata) questa sessione potrebbe non essere quella in cui
+        // l'iniezione sta effettivamente avvenendo.
+        if (gate.reason === 'injected-echo') { this.toolBurst(e.sessionId).close(); this.resetSummarize(e.sessionId); }
         return;
       }
       if (e.role === 'assistant') this.typing.stop(); // il testo è già l'indicatore
@@ -1971,7 +1988,7 @@ export class TelegramBot {
       void this.forwardText(e.sessionId, mdToHtml(e.text), e.role);
     });
     bus.on('session.prompt', ({ sessionId, questions, eventId }) => {
-      if (!this.passes('prompt', sessionId, eventId)) return;
+      if (!this.passes('prompt', sessionId, eventId).deliver) return;
       // L'evento va SEMPRE registrato (mai scartato, a differenza di
       // session.text/session.tool che restano solo sulla sessione attiva): a
       // differenza dei permessi/dialoghi, AskUserQuestion non ha timeout, quindi
@@ -1988,7 +2005,7 @@ export class TelegramBot {
       this.track(this.onSessionPrompt(sessionId, questions), 'prompt flow');
     });
     bus.on('session.tool', e => {
-      if (!this.passes('tool', e.sessionId, e.eventId)) return;
+      if (!this.passes('tool', e.sessionId, e.eventId).deliver) return;
       if (e.kind === 'tool_use' && e.input) {
         this.typing.start(); // il modello sta lavorando di nuovo
         // riassunto leggibile via LLM nella lingua della conversazione (niente
@@ -2000,7 +2017,7 @@ export class TelegramBot {
       }
     });
     bus.on('session.permission', ({ permission }) => {
-      if (!this.passes('permission', permission.sessionId, undefined)) return;
+      if (!this.passes('permission', permission.sessionId, undefined).deliver) return;
       this.toolBurst(permission.sessionId).close();
       this.resetSummarize(permission.sessionId);
       // Stessa logica delle domande (onSessionPrompt): mostrata subito solo se
@@ -2020,7 +2037,7 @@ export class TelegramBot {
       }
     });
     bus.on('session.dialog', ({ sessionId, dialog }) => {
-      if (!this.passes('dialog', sessionId, undefined)) return;
+      if (!this.passes('dialog', sessionId, undefined).deliver) return;
       this.toolBurst(sessionId).close();
       this.resetSummarize(sessionId);
       const known = this.deps.manager.get(sessionId);
@@ -2033,7 +2050,7 @@ export class TelegramBot {
       }
     });
     bus.on('session.result', e => {
-      if (!this.passes('result', e.sessionId, undefined)) return;
+      if (!this.passes('result', e.sessionId, undefined).deliver) return;
       this.typing.stop(); // fine turno: niente più "sta scrivendo"
       this.toolBurst(e.sessionId).close(); // fine turno headless: chiude la raffica di tool
       this.resetSummarize(e.sessionId); // scarta le summary pendenti
@@ -2044,7 +2061,7 @@ export class TelegramBot {
       this.notify('✅ Turn complete.');
     });
     bus.on('session.error', e => {
-      if (!this.passes('error', e.sessionId, e.eventId)) return;
+      if (!this.passes('error', e.sessionId, e.eventId).deliver) return;
       this.typing.stop(); // errore: niente più "sta scrivendo"
       this.toolBurst(e.sessionId).close();
       this.resetSummarize(e.sessionId);
