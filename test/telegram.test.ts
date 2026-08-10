@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { resolveHeadlessProjectDir, isPrivateChat, splitHtmlMessage, parseCommand, parseNewFlags, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToInjection, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt } from '../bot/telegram.js';
+import { resolveHeadlessProjectDir, isPrivateChat, splitHtmlMessage, parseCommand, parseNewFlags, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToInjection, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent } from '../bot/telegram.js';
 import type { ToolBurstSink } from '../bot/telegram.js';
 
 describe('formatPct / formatResetAt', () => {
@@ -572,6 +572,41 @@ describe('narrationPlan', () => {
     expect(narrationPlan('assistant', 'x'.repeat(150), true)).toBe('separate');
     expect(narrationPlan('assistant', 'Ora leggo X', false)).toBe('separate');
     expect(narrationPlan('user', 'Ora leggo X', true)).toBe('separate');
+  });
+});
+
+describe('gateSessionEvent', () => {
+  const base = { kind: 'text' as const, armed: true, sessionId: 's1', activeSessionId: 's1' };
+
+  it('delivers a text event for the selected session', () => {
+    expect(gateSessionEvent(base)).toEqual({ deliver: true });
+  });
+
+  it('drops everything while disarmed, whatever the kind', () => {
+    for (const kind of ['text', 'tool', 'error', 'result', 'prompt', 'permission', 'dialog'] as const) {
+      expect(gateSessionEvent({ ...base, kind, armed: false })).toEqual({ deliver: false, reason: 'not-armed' });
+    }
+  });
+
+  it('drops stream events belonging to a session that is not selected', () => {
+    expect(gateSessionEvent({ ...base, sessionId: 's2' }))
+      .toEqual({ deliver: false, reason: 'not-active-session' });
+  });
+
+  it('never drops a blocking interaction for being unselected — it would wedge that session', () => {
+    for (const kind of ['prompt', 'permission', 'dialog'] as const) {
+      expect(gateSessionEvent({ ...base, kind, sessionId: 's2' })).toEqual({ deliver: true });
+    }
+  });
+
+  it('drops the echo of text the bot itself injected', () => {
+    expect(gateSessionEvent({ ...base, isInjectedEcho: true }))
+      .toEqual({ deliver: false, reason: 'injected-echo' });
+  });
+
+  it('reports the first applicable reason: disarmed wins over everything', () => {
+    expect(gateSessionEvent({ ...base, armed: false, sessionId: 's2', isInjectedEcho: true }))
+      .toEqual({ deliver: false, reason: 'not-armed' });
   });
 });
 
