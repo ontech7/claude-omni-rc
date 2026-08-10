@@ -88,6 +88,15 @@ describe('Logger', () => {
     expect(JSON.parse(seen[0]).msg).toBe('loud');
   });
 
+  it('survives a synchronous throw from stderr (EPIPE/EBADF) instead of propagating it', () => {
+    const file = join(tmpDir(), 'daemon.jsonl');
+    const logger = createLogger({ file, level: 'info', stderr: () => { throw new Error('EPIPE'); } });
+    expect(() => logger.error('loud')).not.toThrow();
+    logger.close();
+    // il record va comunque sul file: solo lo specchio su stderr è saltato.
+    expect(lines(file).map(r => r.msg)).toEqual(['loud']);
+  });
+
   it('rotates past maxBytes and keeps at most `keep` older files', () => {
     const dir = tmpDir();
     const file = join(dir, 'daemon.jsonl');

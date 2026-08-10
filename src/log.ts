@@ -106,7 +106,14 @@ export class LogSink {
       this.recent.push(line.trimEnd());
       if (this.recent.length > RECENT_MAX) this.recent.shift();
     }
-    if (level === 'error') this.stderr(line);
+    if (level === 'error') {
+      // Il logging non deve MAI poter uccidere il daemon: una write su stderr
+      // può lanciare in sincrono (EPIPE/EBADF su un descrittore staccato), e
+      // senza questo try/catch l'eccezione risalirebbe fino a chi ha chiamato
+      // log().error() — incluso l'handler di unhandledRejection in daemon.ts,
+      // dove diventerebbe un'eccezione non gestita.
+      try { this.stderr(line); } catch { /* vedi sopra: non deve propagare */ }
+    }
     if (this.fd === undefined) return;
     const lineBytes = Buffer.byteLength(line);
     if (this.size + lineBytes > this.maxBytes) this.rotate();

@@ -763,4 +763,17 @@ describe('diagReport', () => {
     expect(out).toContain('no sessions');
     expect(out).toContain('no recent errors');
   });
+
+  // M3: un record JSON con stack trace espansa può superare largamente 300
+  // caratteri — venti di questi sfondano il limite di un messaggio Telegram e
+  // spaccano /diag in dieci-più chunk per un solo comando.
+  it('truncates a long recent-error line with a visible marker instead of rendering it verbatim', () => {
+    const longLine = JSON.stringify({ level: 'error', msg: 'boom', stack: 'x'.repeat(500) });
+    const out = diagReport({ ...snapshot, recentErrors: [longLine] });
+    expect(out).not.toContain(longLine);
+    expect(out).toContain('(truncated)');
+    // il ring stesso (recentErrors passato in input) non è quello che si tronca:
+    // solo la resa — la stringa originale resta quella lunga in input, sopra.
+    expect(longLine.length).toBeGreaterThan(300);
+  });
 });

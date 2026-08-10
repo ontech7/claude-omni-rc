@@ -168,14 +168,18 @@ export class TranscriptWatcher {
     }
     manager.setStatus(s.id, 'running');
     if (ev.kind === 'tool_use') {
-      log().info('event emitted', { eventId, sessionId: s.id, source: 'transcript', kind: 'tool_use', toolName: ev.name, toolUseId: ev.id });
+      // kind: 'tool' allinea il campo log al vocabolario del bot (GateKind): un
+      // solo eventId, un solo `kind`, per legare l'emissione allo scarto/consegna
+      // nel filtro dei log senza dover interrogare due valori diversi. toolUseId
+      // e isError (sotto) distinguono comunque una tool_use da un tool_result.
+      log().info('event emitted', { eventId, sessionId: s.id, source: 'transcript', kind: 'tool', toolName: ev.name, toolUseId: ev.id });
       bus.emit({
         type: 'session.tool', sessionId: s.id, toolName: ev.name, kind: 'tool_use',
         toolUseId: ev.id, input: (ev.input ?? {}) as Record<string, unknown>, eventId,
       });
       return;
     }
-    log().debug('event emitted', { eventId, sessionId: s.id, source: 'transcript', kind: 'tool_result', toolName: ev.name, toolUseId: ev.id, isError: ev.isError });
+    log().debug('event emitted', { eventId, sessionId: s.id, source: 'transcript', kind: 'tool', toolName: ev.name, toolUseId: ev.id, isError: ev.isError });
     bus.emit({
       type: 'session.tool', sessionId: s.id, toolName: ev.name, kind: 'tool_result',
       toolUseId: ev.id, result: ev.result, isError: ev.isError, eventId,

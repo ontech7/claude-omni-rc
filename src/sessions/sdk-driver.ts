@@ -128,7 +128,10 @@ export class SdkDriver {
               }
               {
                 const eventId = newEventId();
-                log().info('event emitted', { eventId, sessionId, source: 'sdk', kind: 'tool_use', toolName: block.name, toolUseId: block.id });
+                // kind: 'tool' allinea il campo log al vocabolario del bot (GateKind),
+                // lo stesso usato dal transcript-watcher: toolUseId distingue comunque
+                // una tool_use da un tool_result senza bisogno di due valori diversi.
+                log().info('event emitted', { eventId, sessionId, source: 'sdk', kind: 'tool', toolName: block.name, toolUseId: block.id });
                 bus.emit({
                   type: 'session.tool', sessionId, toolName: block.name, kind: 'tool_use',
                   toolUseId: block.id, input: block.input as Record<string, unknown>, eventId,
@@ -143,7 +146,7 @@ export class SdkDriver {
               // stesso schema del watcher per 'tool_result': la chiave toolName c'è
               // sempre, qui vuota perché l'SDK non lo riporta sul blocco tool_result
               // (lo stesso motivo per cui l'evento emesso sotto ha toolName: '').
-              log().debug('event emitted', { eventId, sessionId, source: 'sdk', kind: 'tool_result', toolName: '', toolUseId: block.tool_use_id, isError: block.is_error });
+              log().debug('event emitted', { eventId, sessionId, source: 'sdk', kind: 'tool', toolName: '', toolUseId: block.tool_use_id, isError: block.is_error });
               bus.emit({
                 type: 'session.tool', sessionId, toolName: '', kind: 'tool_result',
                 toolUseId: block.tool_use_id, result: block.content, isError: block.is_error, eventId,

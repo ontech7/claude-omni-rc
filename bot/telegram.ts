@@ -390,6 +390,10 @@ export function promptLayout(questions: PromptQuestion[], token: string, maxButt
 export interface QuestionFlow {
   sessionId: string;
   sets: PromptQuestion[][];   // coda dei set
+  // I2/C2: eventId del session.prompt che ha generato ciascun set, parallelo a
+  // `sets` — permette a showQuestion() di loggare la consegna con lo stesso
+  // eventId della riga 'event queued'/'event emitted' che l'ha preceduta.
+  eventIds: (string | undefined)[];
   setIndex: number;           // set corrente
   qIndex: number;             // domanda corrente nel set
   answers: (PromptAnswer | undefined)[][];  // risposte per set, per domanda (undefined = non risposta)
@@ -680,8 +684,12 @@ export function diagReport(s: DiagSnapshot): string {
 
   const pending = `permissions ${s.pending.permissions} · dialogs ${s.pending.dialogs} · questions ${s.pending.questionFlows}`;
 
+  // M3: ogni riga è un record JSON completo con stack trace espansa — senza
+  // troncamento venti di queste bastano a spaccare /diag in dieci-più messaggi
+  // Telegram per un solo comando. Il ring in log().recentErrors() resta intatto:
+  // si tronca solo la resa qui, col marcatore esplicito di truncateAtWord.
   const errors = s.recentErrors.length
-    ? s.recentErrors.map(l => `<code>${htmlEscape(l)}</code>`).join('\n')
+    ? s.recentErrors.map(l => `<code>${htmlEscape(truncateAtWord(l, 300))}</code>`).join('\n')
     : 'no recent errors';
 
   return `${head}\n\n<b>Sessions</b>\n${sessions}\n\n<b>Pending</b>\n${htmlEscape(pending)}\n\n<b>Recent errors</b>\n${errors}`;
@@ -831,6 +839,11 @@ export class SummarizeQueue {
 
 // ---------- bot ----------
 
+// I2: correlazione opzionale per gli invii — non ogni chiamante ha un eventId
+// (es. le notifiche di livello daemon), quindi entrambi i campi restano
+// opzionali invece di forzare un valore inventato.
+interface SendCorrelation { eventId?: string; sessionId?: string }
+
 export interface BotDeps {
   config: Config;
   bus: Bus;
@@ -892,7 +905,9 @@ export class TelegramBot {
     this.bot = new Bot(deps.config.telegramBotToken, { client: { timeoutSeconds: 35 } });
     // senza bot.catch, grammy STOPPA il bot al primo errore di middleware non
     // gestito → il daemon moriva (spec §3.1). Ora logghiamo e si va avanti.
-    this.bot.catch(err => { console.error('claude-omni-rc bot error:', (err as { error?: unknown })?.error ?? err); });
+    // I4: console.error non raggiunge daemon.jsonl né /diag — solo daemon.err.log.
+    // Stesso catch, stesso momento: cambia solo dove finisce il report.
+    this.bot.catch(err => { log().error('telegram bot error', { err: (err as { error?: unknown })?.error ?? err }); });
     this.register();
     this.subscribeBus();
   }
@@ -928,12 +943,18 @@ export class TelegramBot {
 
   // Invio sequenziale dei chunk (l'ordine conta) con gli extra — tastiera
   // inclusa — solo sull'ultimo. Ritorna l'id dell'ultimo messaggio inviato.
-  private async sendChunked(chatId: number, text: string, extra: Record<string, unknown> = {}): Promise<number | undefined> {
+  // I2: `correlation` propaga eventId/sessionId fin qui quando il chiamante li
+  // ha — così 'telegram send failed' (l'ultimo anello della catena) resta
+  // agganciabile allo stesso eventId della riga 'event delivering' che l'ha
+  // preceduto. Un chiamante senza quei valori (es. notify per un avviso di
+  // daemon) non li propaga: il record dice onestamente che non c'erano,
+  // invece di inventarli.
+  private async sendChunked(chatId: number, text: string, extra: Record<string, unknown> = {}, correlation: SendCorrelation = {}): Promise<number | undefined> {
     const parts = splitHtmlMessage(text);
     let lastId: number | undefined;
     for (let i = 0; i < parts.length; i++) {
       const opts = { parse_mode: 'HTML' as const, ...(i === parts.length - 1 ? extra : {}) };
-      const msg = await this.bot.api.sendMessage(chatId, parts[i], opts).catch(err => { log().error('telegram send failed', { chatId, part: i, of: parts.length, err }); return undefined; });
+      const msg = await this.bot.api.sendMessage(chatId, parts[i], opts).catch(err => { log().error('telegram send failed', { ...correlation, chatId, part: i, of: parts.length, err }); return undefined; });
       if (msg) lastId = msg.message_id;
     }
     return lastId;
@@ -950,7 +971,9 @@ export class TelegramBot {
   // risale al middleware di grammy (che senza bot.catch fermerebbe la coda).
   private safe(ctx: Context, label: string, fn: () => Promise<unknown>): Promise<unknown> {
     return Promise.resolve().then(fn).catch(err => {
-      console.error(`handler ${label} failed:`, err);
+      // I4: instradato su log().error (prima console.error, invisibile a
+      // daemon.jsonl e /diag) — stesso catch, stesso momento.
+      log().error('handler failed', { label, err });
       return this.send(ctx, '❌ Something went wrong. Check the daemon log.').catch(() => undefined);
     });
   }
@@ -958,11 +981,14 @@ export class TelegramBot {
   // Aggiunge il log a un'operazione fire-and-forget: niente unhandled rejection
   // (in Node 22 una promise rifiutata non gestita uccide il processo).
   private track(p: Promise<unknown>, label: string): void {
-    void p.catch(err => console.error(`background ${label} failed:`, err));
+    // I4: idem — il flusso domande (session.prompt) passa proprio da qui
+    // (this.track(this.onSessionPrompt(...), 'prompt flow')), quindi un throw
+    // dentro il flow era invisibile sia al log strutturato che a /diag.
+    void p.catch(err => log().error('background task failed', { label, err }));
   }
 
   private logCatch(label: string): (err: unknown) => void {
-    return err => console.error(label, err);
+    return err => log().error(label, { err });
   }
 
   // Applica il gate e registra l'esito. Restituisce il gate stesso: i
@@ -979,7 +1005,7 @@ export class TelegramBot {
     if (!gate.deliver) log().info('event dropped', { eventId, sessionId, kind, reason: gate.reason });
     return gate;
   }
-  private async forwardText(sessionId: string, text: string, role: 'user' | 'assistant'): Promise<void> {
+  private async forwardText(sessionId: string, text: string, role: 'user' | 'assistant', eventId?: string): Promise<void> {
     const chatId = this.chatId;
     if (!chatId) { log().warn('send skipped', { sessionId, kind: 'text', reason: 'no-chat-bound' }); return; }
     const last = this.lastMsg.get(sessionId);
@@ -992,14 +1018,25 @@ export class TelegramBot {
     if (last && last.role === role && now - last.at < 10_000 && merged.length <= SEND_MAX_CHARS) {
       const ok = await this.throttler.throttled(() =>
         this.bot.api.editMessageText(chatId, last.messageId, merged, { parse_mode: 'HTML' }).then(() => true).catch(() => false));
-      if (ok) { last.text = merged; last.at = now; return; }
+      if (ok) {
+        last.text = merged; last.at = now;
+        // I3: chiude la catena — l'edit è andato a buon fine, quindi l'evento è
+        // stato DAVVERO consegnato (non solo tentato). messageId è quello esteso,
+        // lo stesso di prima dell'edit.
+        log().info('event delivered', { eventId, sessionId, kind: 'text', messageId: last.messageId });
+        return;
+      }
     }
     // testo lungo → più messaggi; il tracking punta all'ultimo, che è quello
     // che eventuali blocchi successivi dello stesso turno estenderanno.
     const parts = splitHtmlMessage(text);
-    const messageId = await this.sendChunked(chatId, text);
+    const messageId = await this.sendChunked(chatId, text, {}, { eventId, sessionId });
     if (messageId !== undefined) {
       this.lastMsg.set(sessionId, { messageId, text: parts[parts.length - 1], at: now, role });
+      // I3: idem, per il path "nuovo messaggio" — un fallimento qui è già
+      // loggato dentro sendChunked (I2), quindi il silenzio in questo punto
+      // significa davvero successo, non un'assenza di segnale.
+      log().info('event delivered', { eventId, sessionId, kind: 'text', messageId });
     }
   }
 
@@ -1016,15 +1053,25 @@ export class TelegramBot {
           const ok = await this.throttler.throttled(() =>
             this.bot.api.editMessageText(chatId, messageId, text, { parse_mode: 'HTML' })
               .then(() => true)
-              .catch(err => { console.error('claude-omni-rc tool edit failed:', err); return false; }));
+              // C1: il sink non ha l'eventId (non è instradato dentro push(), fuori
+              // scope per questa fase) — sessionId + kind bastano a legare questo
+              // fallimento alla riga 'event merged into tool bubble' che lo precede.
+              // Il valore di ritorno resta false: nessun cambio di comportamento.
+              .catch(err => { log().error('tool bubble edit failed', { sessionId, kind: 'tool', err }); return false; }));
           return ok ?? false;
         },
         send: async text => {
           const chatId = this.chatId;
           if (!chatId) { log().warn('send skipped', { sessionId, kind: 'tool', reason: 'no-chat-bound' }); return undefined; }
           // anche il send passa dal throttler: massimo 1 op/sec per chat (niente 429).
+          // C1: prima questo fallimento era doppiamente inghiottito (qui e dentro
+          // EditThrottler.throttled) senza lasciare traccia — un testo fuso nella
+          // bubble tool spariva senza nessuna riga di log dopo 'event merged into
+          // tool bubble'. Il valore di ritorno resta undefined: nessun cambio di
+          // comportamento, solo il record in più.
           const msg = await this.throttler.throttled(() =>
-            this.bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' }).catch(() => undefined));
+            this.bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' })
+              .catch(err => { log().error('tool bubble send failed', { sessionId, kind: 'tool', err }); return undefined; }));
           return msg?.message_id;
         },
       });
@@ -1442,13 +1489,14 @@ export class TelegramBot {
 
   // Un nuovo set di domande (una chiamata AskUserQuestion) arriva dal bus:
   // accodato al flow della sessione; se il flow è idle, mostra la prima domanda.
-  private async onSessionPrompt(sessionId: string, questions: PromptQuestion[]): Promise<void> {
+  private async onSessionPrompt(sessionId: string, questions: PromptQuestion[], eventId: string | undefined): Promise<void> {
     let flow = this.questionFlows.get(sessionId);
     if (!flow) {
-      flow = { sessionId, sets: [], setIndex: 0, qIndex: 0, answers: [], token: randomUUID(), multiSel: [] };
+      flow = { sessionId, sets: [], eventIds: [], setIndex: 0, qIndex: 0, answers: [], token: randomUUID(), multiSel: [] };
       this.setFlow(flow);
     }
     flow.sets.push(questions);
+    flow.eventIds.push(eventId);
     flow.answers.push(questions.map(() => undefined));
     // La prima domanda di un flow nuovo si mostra subito solo se questa
     // sessione è quella selezionata — altrimenti resta in pending: niente
@@ -1456,6 +1504,15 @@ export class TelegramBot {
     // il recupero quando l'utente ci passa sopra).
     if (sessionId === this.deps.manager.getActive() && flow.setIndex === 0 && flow.qIndex === 0 && !flow.messageId) {
       await this.showQuestion(flow);
+    } else {
+      // C2: prima qui non c'era nessun record — il set resta accodato invece di
+      // essere mostrato, e senza questa riga un operatore che segue l'eventId
+      // vedrebbe la catena finire nel nulla dopo 'event emitted'/'event queued'.
+      // Due cause distinte, nominate esplicitamente (non un generico "queued"):
+      // la sessione non è quella selezionata, oppure questo stesso flow ha già
+      // una domanda a schermo (nuovo set in coda dietro quella corrente).
+      const reason = sessionId !== this.deps.manager.getActive() ? 'not-active-session' : 'question-on-screen';
+      log().info('event queued', { eventId, sessionId, kind: 'prompt', reason });
     }
   }
 
@@ -1500,12 +1557,29 @@ export class TelegramBot {
 
   // Invia un nuovo messaggio per la domanda corrente.
   private async showQuestion(flow: QuestionFlow): Promise<void> {
-    if (!this.chatId) return;
+    // C2: prima questo `return` silenzioso era l'unico sito di invio del file
+    // senza il record 'send skipped' aggiunto altrove in questo branch —
+    // stesso motivo ('no-chat-bound'), stessa forma degli altri.
+    if (!this.chatId) { log().warn('send skipped', { sessionId: flow.sessionId, kind: 'prompt', reason: 'no-chat-bound' }); return; }
+    const eventId = flow.eventIds[flow.setIndex];
     const q = flow.sets[flow.setIndex][flow.qIndex];
     const text = this.renderQuestion(flow, q);
     const kb = this.buildQuestionKeyboard(flow, q);
-    const id = await this.sendChunked(this.chatId, text, { reply_markup: kb });
-    if (id) flow.messageId = id;
+    // C2: 'event delivering' è stato spostato qui da subscribeBus — questo è il
+    // solo punto in cui una domanda viene DAVVERO mostrata (chiamato dal ramo
+    // "flow idle" di onSessionPrompt, da advance() per la domanda/set successivo,
+    // e dal recupero di una domanda in pending su sess:select). Prima veniva
+    // loggato incondizionatamente all'arrivo dell'evento, anche quando il set
+    // finiva solo accodato — un operatore avrebbe letto "delivering" per
+    // qualcosa che non era ancora successo.
+    log().info('event delivering', { eventId, sessionId: flow.sessionId, kind: 'prompt', setIndex: flow.setIndex, qIndex: flow.qIndex });
+    const id = await this.sendChunked(this.chatId, text, { reply_markup: kb }, { eventId, sessionId: flow.sessionId });
+    if (id) {
+      flow.messageId = id;
+      // I3: chiude la catena per questa domanda — consegna riuscita, con l'id
+      // del messaggio Telegram risultante.
+      log().info('event delivered', { eventId, sessionId: flow.sessionId, kind: 'prompt', messageId: id });
+    }
   }
 
   // Edita il messaggio corrente (toggle multi-select, cancel Other).
@@ -1663,7 +1737,8 @@ export class TelegramBot {
       await this.deps.tmux.injectText(session.tmuxTarget, text);
       this.recordInjected(session.id, text);
     } catch (e) {
-      console.error('deliverAnswer failed:', e);
+      // I4: instradato su log().error — stesso catch, stesso momento.
+      log().error('deliverAnswer failed', { sessionId: session.id, err: e });
     }
   }
 
@@ -1719,7 +1794,9 @@ export class TelegramBot {
     this.deps.permissionFlow.arm(permission.id);
     const kb = permissionKeyboard(permission);
     if (this.chatId) {
-      this.track(this.sendChunked(this.chatId, permissionMessage(permission), { reply_markup: kb }), 'permission send');
+      // I2: session.permission non porta ancora un eventId (Fase 2) — si propaga
+      // solo il sessionId, quel che c'è.
+      this.track(this.sendChunked(this.chatId, permissionMessage(permission), { reply_markup: kb }, { sessionId: permission.sessionId }), 'permission send');
     }
   }
 
@@ -2024,6 +2101,12 @@ export class TelegramBot {
     const bus = this.deps.bus;
     // constraint 8: da disattivo nessun relay — ogni handler del bus è gated su armed.
     bus.on('session.updated', ({ sessionId }) => {
+      // Esente di proposito dal gate/log di questo branch: non è instradato verso
+      // Telegram (l'unico effetto è l'indicatore "sta scrivendo…"), ed è l'evento
+      // a frequenza più alta sul bus — gatarlo e loggarlo raddoppierebbe il
+      // volume dei log senza aggiungere nulla alla diagnosi. I due `return` qui
+      // sotto assomigliano a quelli che questo branch esiste per eliminare, ma
+      // non lo sono: non c'è consegna da tracciare.
       if (!this.deps.manager.isArmed()) return;
       if (sessionId !== this.deps.manager.getActive()) return;
       this.syncTyping();
@@ -2055,7 +2138,7 @@ export class TelegramBot {
       this.resetSummarize(e.sessionId);
       log().info('event delivering', { eventId: e.eventId, sessionId: e.sessionId, kind: 'text', role: e.role });
       // sia le headless che i transcript delle terminali arrivano come markdown.
-      void this.forwardText(e.sessionId, mdToHtml(e.text), e.role);
+      void this.forwardText(e.sessionId, mdToHtml(e.text), e.role, e.eventId);
     });
     bus.on('session.prompt', ({ sessionId, questions, eventId }) => {
       if (!this.passes('prompt', sessionId, eventId).deliver) return;
@@ -2069,10 +2152,15 @@ export class TelegramBot {
       // (mostrata quando l'utente ci seleziona sopra, vedi sess:select).
       this.toolBurst(sessionId).close();
       this.resetSummarize(sessionId);
-      log().info('event delivering', { eventId, sessionId, kind: 'prompt', questions: questions.length });
+      // C2: 'event delivering' NON viene più loggato qui — a questo punto non è
+      // ancora vero: onSessionPrompt può accodare il set invece di mostrarlo
+      // (sessione non selezionata, o un'altra domanda già a schermo). Il log
+      // onesto per questo bivio è dentro onSessionPrompt stesso: 'event
+      // delivering' (via showQuestion, solo quando la domanda è DAVVERO mostrata)
+      // oppure 'event queued' con il motivo.
       // Fix 2: flusso domande multiple — accoda il set e mostra una domanda alla
       // volta (single-select, multi-select con toggle+Done, "Other" a testo libero).
-      this.track(this.onSessionPrompt(sessionId, questions), 'prompt flow');
+      this.track(this.onSessionPrompt(sessionId, questions, eventId), 'prompt flow');
     });
     bus.on('session.tool', e => {
       if (!this.passes('tool', e.sessionId, e.eventId).deliver) return;
