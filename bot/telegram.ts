@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { existsSync } from 'node:fs';
 import { Bot, Context, InlineKeyboard } from 'grammy';
 import type { Bus } from '../src/bus.js';
@@ -12,11 +12,12 @@ import type { TmuxClient } from '../src/sessions/tmux-inject.js';
 import { createShExec } from '../src/sessions/tmux-inject.js';
 import type { OllamaClient } from '../src/ollama.js';
 import type { Inbox } from '../src/input.js';
-import type { Session, PermissionRequest, PromptQuestion, PromptAnswer, UserDialog } from '../src/types.js';
+import type { Session, SessionKind, SessionStatus, PermissionRequest, PromptQuestion, PromptAnswer, UserDialog } from '../src/types.js';
 import type { RecentMessage } from '../src/sessions/transcript.js';
 import { readRecentMessages, resolveSessionTranscript } from '../src/sessions/transcript.js';
 import { isOllamaProvider, fetchOllamaUsage, fetchAnthropicUsage } from '../src/usage.js';
 import { log } from '../src/log.js';
+import { CURRENT_VERSION } from '../src/update.js';
 
 // ---------- pure helpers ----------
 
@@ -641,6 +642,51 @@ export function sessionListText(sessions: Session[], activeId?: string): string 
     .join('\n');
 }
 
+// Fotografia dello stato del daemon, resa per Telegram. Serve nella situazione
+// in cui il servizio è utile: sei fuori casa, qualcosa non arriva, e non hai un
+// terminale per guardare i log.
+export interface DiagSession {
+  id: string;
+  kind: SessionKind;
+  status: SessionStatus;
+  title: string;
+  transcript?: string;
+  hasTmux: boolean;
+}
+
+export interface DiagSnapshot {
+  version: string;
+  armed: boolean;
+  chatBound: boolean;
+  activeSessionId?: string;
+  sessions: DiagSession[];
+  pending: { permissions: number; dialogs: number; questionFlows: number };
+  recentErrors: string[];
+}
+
+export function diagReport(s: DiagSnapshot): string {
+  const head = [
+    `🩺 <b>claude-omni-rc ${htmlEscape(s.version)}</b>`,
+    `state: ${s.armed ? 'armed' : 'disarmed'} · chat ${s.chatBound ? 'bound' : 'not bound'}`,
+    `selected: ${s.activeSessionId ? `<code>${htmlEscape(s.activeSessionId.slice(0, 8))}</code>` : '—'}`,
+  ].join('\n');
+
+  const sessions = s.sessions.length
+    ? s.sessions.map(x => {
+        const bits = [x.kind, x.status, x.hasTmux ? 'tmux' : 'no-tmux', x.transcript ? 'transcript' : 'no-transcript'];
+        return `• <code>${htmlEscape(x.id.slice(0, 8))}</code> ${htmlEscape(x.title)} — ${htmlEscape(bits.join(' · '))}`;
+      }).join('\n')
+    : 'no sessions tracked';
+
+  const pending = `permissions ${s.pending.permissions} · dialogs ${s.pending.dialogs} · questions ${s.pending.questionFlows}`;
+
+  const errors = s.recentErrors.length
+    ? s.recentErrors.map(l => `<code>${htmlEscape(l)}</code>`).join('\n')
+    : 'no recent errors';
+
+  return `${head}\n\n<b>Sessions</b>\n${sessions}\n\n<b>Pending</b>\n${htmlEscape(pending)}\n\n<b>Recent errors</b>\n${errors}`;
+}
+
 // spec §8: mai inoltrare blocchi immagine a modelli text-only.
 // Nota onesta (review finale): l'inoltro immagine è un "path reference" — il modello
 // legge il file via additionalDirectories: inboxDir — NON un blocco immagine nel
@@ -1055,7 +1101,7 @@ export class TelegramBot {
     const bot = this.bot;
     bot.command('start', ctx => this.safe(ctx, 'start', () => this.onStart(ctx)));
     bot.command('help', ctx => this.safe(ctx, 'help', async () => {
-      if (this.authorize(ctx)) await this.send(ctx, 'Commands: /rc [on|off|status] (no arg toggles) · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /usage · /help');
+      if (this.authorize(ctx)) await this.send(ctx, 'Commands: /rc [on|off|status] (no arg toggles) · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /usage · /diag · /help');
     }));
     bot.command('rc', ctx => this.safe(ctx, 'rc', () => this.onRc(ctx)));
     bot.command('sessions', ctx => this.safe(ctx, 'sessions', () => this.onSessions(ctx)));
@@ -1067,6 +1113,30 @@ export class TelegramBot {
     bot.command('history', ctx => this.safe(ctx, 'history', () => this.onHistory(ctx)));
     bot.command('delete', ctx => this.safe(ctx, 'delete', () => this.onDelete(ctx)));
     bot.command('usage', ctx => this.safe(ctx, 'usage', () => this.onUsage(ctx)));
+    bot.command('diag', ctx => this.safe(ctx, 'diag', async () => {
+      if (!this.authorize(ctx)) return;
+      const sessions = this.deps.manager.list();
+      await this.send(ctx, diagReport({
+        version: CURRENT_VERSION,
+        armed: this.deps.manager.isArmed(),
+        chatBound: this.chatId !== undefined,
+        activeSessionId: this.deps.manager.getActive(),
+        sessions: sessions.map(x => ({
+          id: x.id,
+          kind: x.kind,
+          status: x.status,
+          title: x.title,
+          transcript: x.transcriptFile ? basename(x.transcriptFile) : undefined,
+          hasTmux: Boolean(x.tmuxTarget),
+        })),
+        pending: {
+          permissions: this.deps.permissionFlow.pendingCount(),
+          dialogs: this.deps.dialogFlow.pendingCount(),
+          questionFlows: this.questionFlows.size,
+        },
+        recentErrors: log().recentErrors(),
+      }));
+    }));
     bot.on('callback_query:data', ctx => this.safe(ctx, 'callback', () => this.onCallback(ctx)));
     bot.on('message:text', ctx => this.safe(ctx, 'message', () => this.onMessage(ctx)));
     bot.on('message:photo', ctx => this.safe(ctx, 'photo', () => this.onPhoto(ctx)));

@@ -140,6 +140,7 @@ reattached.
 | `/history [id]` | last messages of a session |
 | `/delete [id]` | delete a session (headless: stops it; terminal: untracks only) |
 | `/usage` | 5h / weekly usage for the configured provider |
+| `/diag` | daemon state, sessions, pending interactions and recent errors |
 | `/help` | list the commands |
 
 Plain text goes to the active session — a new turn for headless sessions, typed
@@ -296,9 +297,15 @@ and one authorization method — plus `WORKSPACE_DIRS` if you want `/new`.
 | `POLL_INTERVAL_MS` | `500` | tmux discovery polling interval |
 | `CWD_REFRESH_MS` | `10000` | how often to re-check a session's real cwd (costs a `ps` + `lsof`) |
 | `CLAUDE_OMNI_RC_NO_UPDATE_CHECK` | unset | set to disable the GitHub release check below |
+| `LOG_LEVEL` | `info` | `error`, `warn`, `info` or `debug` for the structured log |
+| `LOG_FILE` | `<STATE_DIR>/logs/daemon.jsonl` | where the structured log is written |
+| `LOG_MAX_BYTES` | `5000000` | rotate the structured log past this size |
+| `LOG_KEEP` | `3` | how many rotated log files to keep |
 
-> `~/.claude-omni-rc/logs/daemon.log` has no automatic rotation — that's left to
-> the OS (`newsyslog`) or to you.
+> `~/.claude-omni-rc/logs/daemon.jsonl` is the structured log, one JSON record
+> per line, rotated at `LOG_MAX_BYTES`. `daemon.log` and `daemon.err.log` remain
+> the raw process output from launchd and have no automatic rotation — that's
+> left to the OS (`newsyslog`) or to you.
 
 ## Update notifications
 
@@ -326,6 +333,7 @@ Disable it with `CLAUDE_OMNI_RC_NO_UPDATE_CHECK=1` in `.env`.
 | The session streams nothing | Only the **active** session streams — select it with `/sessions`. If it has no transcript, use `/view`. Check `PROJECTS_DIR` matches where the CLI writes. |
 | Permission prompts hang in the terminal | The daemon is armed but has no chat bound. Send any message to the bot; the chat is then remembered across restarts. |
 | A terminal session shows a plan I can't approve from the phone | The plan approval is a full-screen terminal UI the bot can't drive. Approve it at the terminal, or start plan-heavy work with `/new` (headless) to review plans from Telegram. |
+| A message never arrived on Telegram | `/diag` from the phone, then `~/.claude-omni-rc/logs/daemon.jsonl`: every event carries an `eventId` from the transcript to the delivered message, and a dropped one is logged with its reason. |
 
 **Can I move a running session into tmux?** No — a running process can't be
 adopted by tmux. A session started outside tmux is still mirrored read-only

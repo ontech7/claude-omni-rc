@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **Structured log and `/diag`.** The daemon writes one JSON record per event to
+  `~/.claude-omni-rc/logs/daemon.jsonl` (levels, size-based rotation). Every
+  event bound for Telegram now carries an id from the transcript line to the
+  delivered message, and an event that is *not* delivered is logged with the
+  reason instead of vanishing. `/diag` reports daemon state, sessions, pending
+  interactions and recent errors from the phone.
 - **`/usage`**: 5h/weekly usage window for whichever provider is configured.
   Anthropic is read natively via the Agent SDK's experimental `/usage` control
   API; any other provider (Ollama, a custom proxy) shells out to

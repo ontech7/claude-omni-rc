@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { resolveHeadlessProjectDir, isPrivateChat, splitHtmlMessage, parseCommand, parseNewFlags, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToInjection, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent } from '../bot/telegram.js';
+import { resolveHeadlessProjectDir, isPrivateChat, splitHtmlMessage, parseCommand, parseNewFlags, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToInjection, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport } from '../bot/telegram.js';
 import type { ToolBurstSink } from '../bot/telegram.js';
 
 describe('formatPct / formatResetAt', () => {
@@ -714,5 +714,53 @@ describe('resolveHeadlessProjectDir', () => {
     const r = resolveHeadlessProjectDir([]);
     expect(r.dir).toBeUndefined();
     expect(r.error).toContain('WORKSPACE_DIRS');
+  });
+});
+
+describe('diagReport', () => {
+  const snapshot = {
+    version: '0.2.0',
+    armed: true,
+    chatBound: true,
+    activeSessionId: 'aaaaaaaa-1111',
+    sessions: [
+      { id: 'aaaaaaaa-1111', kind: 'terminal' as const, status: 'idle' as const, title: 'my-proj', transcript: 'abc.jsonl', hasTmux: true },
+      { id: 'bbbbbbbb-2222', kind: 'headless' as const, status: 'running' as const, title: 'task', hasTmux: false },
+    ],
+    pending: { permissions: 1, dialogs: 0, questionFlows: 2 },
+    recentErrors: ['{"level":"error","msg":"telegram send failed"}'],
+  };
+
+  it('reports armed state, version and the selected session', () => {
+    const out = diagReport(snapshot);
+    expect(out).toContain('0.2.0');
+    expect(out).toContain('armed');
+    expect(out).toContain('aaaaaaaa'); // id abbreviato della sessione selezionata
+  });
+
+  it('lists every session with kind, status and whether it can receive input', () => {
+    const out = diagReport(snapshot);
+    expect(out).toContain('my-proj');
+    expect(out).toContain('terminal');
+    expect(out).toContain('headless');
+    expect(out).toContain('running');
+  });
+
+  it('reports the pending interactions, which are what wedges a session', () => {
+    const out = diagReport(snapshot);
+    expect(out).toMatch(/permissions.*1/);
+    expect(out).toMatch(/questions.*2/);
+  });
+
+  it('includes the recent errors and escapes them for HTML', () => {
+    const out = diagReport({ ...snapshot, recentErrors: ['<script>&'] });
+    expect(out).toContain('&lt;script&gt;&amp;');
+    expect(out).not.toContain('<script>');
+  });
+
+  it('says so plainly when nothing is tracked', () => {
+    const out = diagReport({ ...snapshot, sessions: [], recentErrors: [], pending: { permissions: 0, dialogs: 0, questionFlows: 0 } });
+    expect(out).toContain('no sessions');
+    expect(out).toContain('no recent errors');
   });
 });
