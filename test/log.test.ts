@@ -126,17 +126,16 @@ describe('Logger', () => {
   it('rotates based on UTF-8 byte count, not UTF-16 code units', () => {
     const dir = tmpDir();
     const file = join(dir, 'daemon.jsonl');
-    // Accented Italian character "è" is 2 bytes in UTF-8 but 1 UTF-16 code unit.
-    // Emoji "🚀" is 4 bytes in UTF-8 but 2 UTF-16 code units.
-    // We set maxBytes such that rotation would NOT happen if counting UTF-16 code units,
-    // but WOULD happen if counting UTF-8 bytes.
-    const logger = createLogger({ file, level: 'info', maxBytes: 300, keep: 2, stderr: () => {} });
-    // Write records with multi-byte characters. Each includes accented chars and emoji.
-    for (let i = 0; i < 5; i++) {
-      logger.info(`Errore ${i}`, { info: 'Città con 🚀 caratteri' });
-    }
+    // Emoji "🚀" is 2 UTF-16 code units but 4 UTF-8 bytes.
+    // With 100 emoji: UTF-16 length ≈ 200 code units, UTF-8 bytes ≈ 400.
+    // Plus JSON structure (msg, field names): ≈ 100 UTF-16 / 100 UTF-8.
+    // Total: ≈ 300 UTF-16 code units, ≈ 500 UTF-8 bytes.
+    // With maxBytes = 350:
+    // - UTF-16 path: 0 + 300 < 350, does NOT rotate → file exists, file.1 does NOT exist
+    // - UTF-8 path: 0 + 500 > 350, DOES rotate → file and file.1 both exist
+    const logger = createLogger({ file, level: 'info', maxBytes: 350, stderr: () => {} });
+    logger.info('test', { payload: '🚀'.repeat(100) });
     logger.close();
-    // Rotation should have happened because we're counting UTF-8 bytes properly.
     expect(existsSync(file)).toBe(true);
     expect(existsSync(`${file}.1`)).toBe(true);
   });
@@ -201,14 +200,21 @@ describe('log() and initLogger()', () => {
     const logger1 = initLogger({ file: file1, level: 'info', stderr: () => {} });
     logger1.info('message1');
 
-    // Get a reference to the sink's fd before it's closed (via the logger)
-    // We'll verify closure by trying to use the old logger afterward
+    // Replace with new logger; this should close the sink of logger1
     const logger2 = initLogger({ file: file2, level: 'info', stderr: () => {} });
 
-    // Writing to the old logger should not throw, it just silently fails
-    // because close() was called on the sink
-    expect(() => logger1.info('orphaned')).not.toThrow();
-
+    // Write through old logger after replacement
+    logger1.info('orphaned');
+    logger2.info('message2');
     logger2.close();
+
+    // Comportamento osservabile: il vecchio logger smette di scrivere al vecchio file
+    // dopo che è stato sostituito. Non verifichiamo la chiusura OS-level del descrittore
+    // (non osservabile da un test), ma il contratto comportamentale: il messaggio
+    // "orphaned" non dovrebbe comparire nel file1 perché il sink è stato chiuso.
+    const file1Contents = readFileSync(file1, 'utf8').trim().split('\n').filter(Boolean);
+    expect(file1Contents).toHaveLength(1);
+    expect(JSON.parse(file1Contents[0]).msg).toBe('message1');
+    expect(file1Contents.some(line => JSON.parse(line).msg === 'orphaned')).toBe(false);
   });
 });
