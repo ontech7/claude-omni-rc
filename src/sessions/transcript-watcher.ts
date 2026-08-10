@@ -20,14 +20,21 @@ export interface TranscriptWatcherDeps {
   config: Config;
   manager: SessionManager;
   bus: Bus;
+  now?: () => number; // orologio iniettabile: la regola della finestra di grazia
+                       // confronta con l'istante reale, non solo con le mtime,
+                       // e i test devono poterlo simulare senza sleep reali.
 }
 
 // Finestra di grazia per il ramo "cambio di file" di un binding già vivo: un
 // transcript diverso, comparso nella stessa dir, soppianta quello legato solo
-// se la sua mtime lo supera di ALMENO questo margine. Sotto la finestra è
-// rumore (un subagent che scrive nella stessa dir di progetto mentre la nostra
-// sessione lavora ancora); oltre, è una rotazione vera — la sessione CLI è
-// ripartita in un file nuovo e quello vecchio ha smesso di crescere.
+// se il legato è DAVVERO silenzioso da almeno questo margine (vedi `supplants`
+// in pollSession). Sotto la finestra è rumore (un subagent che scrive nella
+// stessa dir di progetto mentre la nostra sessione lavora ancora); oltre, è
+// probabilmente una rotazione vera — la sessione CLI è ripartita in un file
+// nuovo e quello vecchio ha smesso di crescere. È un'euristica, può sbagliare
+// (un subagent può scrivere per minuti mentre noi siamo fermi in attesa di una
+// risposta umana): per questo lo switch, quando c'è, non deve MAI distruggere
+// lo stato di lettura del file lasciato — vedi `tailFor`.
 export const TRANSCRIPT_SWITCH_GRACE_MS = 60_000;
 
 // Per ogni sessione terminale tracciata risolve il transcript del CLI
@@ -44,9 +51,26 @@ export const TRANSCRIPT_SWITCH_GRACE_MS = 60_000;
 // proprio le sessioni più comuni.
 export class TranscriptWatcher {
   private timer?: NodeJS.Timeout;
-  private tails = new Map<string, TranscriptTail>();
+  // sessionId -> (file -> tail). Per sessione, non un solo tail globale: un
+  // rebinding (giusto o sbagliato che sia) NON deve più distruggere lo stato
+  // di lettura di un file già visto — vedi `tailFor`.
+  private tails = new Map<string, Map<string, TranscriptTail>>();
+  // Quanti file diversi restano "caldi" in cache per sessione: abbastanza per
+  // il legato più un candidato o due, non tanti da accumulare senza limite in
+  // una dir di progetto affollata di subagent.
+  private static readonly MAX_TAILS_PER_SESSION = 4;
+  // Un singolo TranscriptTail.poll() legge al più 1MB: per svuotare davvero un
+  // backlog più grande (coda del vecchio file, o candidato pinnato da tempo)
+  // serve un loop. Il cap sulle iterazioni è solo una sicurezza contro un file
+  // patologico che continua a crescere più in fretta di quanto riusciamo a
+  // leggerlo — non un limite che ci si aspetta di toccare in pratica.
+  private static readonly MAX_DRAIN_READS = 200;
 
   constructor(private deps: TranscriptWatcherDeps) {}
+
+  private now(): number {
+    return this.deps.now ? this.deps.now() : Date.now();
+  }
 
   start(): void {
     void this.poll();
@@ -63,6 +87,50 @@ export class TranscriptWatcher {
       try {
         this.pollSession(s);
       } catch { /* una sessione non deve far cadere le altre */ }
+    }
+  }
+
+  private mtimeOf(path: string): number | undefined {
+    try { return statSync(path).mtimeMs; } catch { return undefined; }
+  }
+
+  // Ottiene il tail di un file per una sessione, riusando l'OGGETTO esistente
+  // se questa sessione l'ha già visto (non solo il suo offset: il
+  // TranscriptParser porta con sé anche il dedupe seenText/seenTool/seenError,
+  // quindi un rientro su un file dopo che il binding è stato altrove riprende
+  // esattamente da dove eravamo, senza perdere né duplicare nulla — è la
+  // seconda barriera oltre all'offset). "Mai visto prima" (per questa
+  // sessione), che si tratti della prima adozione o di un candidato incontrato
+  // per la prima volta, resta invece EOF: questo progetto non rigioca mai la
+  // storia quando un file viene tailato per la prima volta.
+  private tailFor(sessionId: string, file: string): { tail: TranscriptTail; isNew: boolean } {
+    let bySession = this.tails.get(sessionId);
+    if (!bySession) { bySession = new Map(); this.tails.set(sessionId, bySession); }
+    const existing = bySession.get(file);
+    if (existing) {
+      bySession.delete(file); // touch LRU: lo sposta in fondo (più recente)
+      bySession.set(file, existing);
+      return { tail: existing, isNew: false };
+    }
+    const tail = new TranscriptTail(file); // startAtEnd di default: mai visto → EOF
+    bySession.set(file, tail);
+    while (bySession.size > TranscriptWatcher.MAX_TAILS_PER_SESSION) {
+      const lru = bySession.keys().next().value;
+      if (lru === undefined) break;
+      bySession.delete(lru);
+    }
+    return { tail, isNew: true };
+  }
+
+  // Legge un tail finché ci sono cambiamenti (loop, non un singolo poll: vedi
+  // il commento su MAX_DRAIN_READS) ed emette tutti gli eventi trovati.
+  private drainTail(s: Session, tail: TranscriptTail): void {
+    let reads = 0;
+    while (tail.hasChanges() && reads < TranscriptWatcher.MAX_DRAIN_READS) {
+      const { events, state } = tail.poll();
+      for (const ev of events) this.emit(s, ev);
+      this.applyState(s, state);
+      reads++;
     }
   }
 
@@ -83,7 +151,12 @@ export class TranscriptWatcher {
         manager.setTranscriptFile(s.id, file);
         manager.persist();
       } else {
-        file = undefined; // non è da nessuna parte → fallback sotto
+        // Non è da nessuna parte: lo registriamo. Se anche il fallback sotto
+        // (adozione del "più recente") scarta ogni candidato, il poll altrimenti
+        // finirebbe senza aver scritto NULLA — la stessa invisibilità che ha
+        // nascosto per settimane la causa di questo bug.
+        log().debug('transcript unbound', { sessionId: s.id, previous: file, reason: 'missing-not-relocated' });
+        file = undefined;
       }
     }
 
@@ -135,44 +208,66 @@ export class TranscriptWatcher {
       // (Task, review, …), che sono sessioni diverse scritte nello stesso istante
       // in cui la nostra sta lavorando: seguirli è come inseguire rumore.
       // Una rotazione VERA (la sessione CLI riparte in un file nuovo, es. dopo
-      // /clear) si riconosce perché il vecchio file smette di crescere: quindi il
-      // nuovo prevale solo se la sua mtime supera quella del legato di almeno la
-      // finestra di grazia (o se il legato non è più leggibile, cioè è sparito).
+      // /clear) si riconosce perché il vecchio file smette DAVVERO di crescere —
+      // vedi `boundIsQuiet`/`isNewer` sotto per la regola esatta.
       const newest = newestTranscriptFile(dirname(file));
       if (newest && newest !== file) {
-        let currentMtime: number | undefined;
-        try { currentMtime = statSync(file).mtimeMs; } catch { currentMtime = undefined; }
-        let newestMtime: number | undefined;
-        try { newestMtime = statSync(newest).mtimeMs; } catch { newestMtime = undefined; }
-        const supplants = newestMtime !== undefined && (currentMtime === undefined || newestMtime - currentMtime >= TRANSCRIPT_SWITCH_GRACE_MS);
-        if (supplants) {
-          const previous = file;
-          // Cambio di file legittimo: prima di spostare il tail sul file nuovo,
-          // svuotiamo quello vecchio ed emettiamo i suoi eventi residui — altrimenti
-          // la coda non ancora letta del file precedente andrebbe persa in silenzio
-          // (è esattamente così che la AskUserQuestion riprodotta è sparita).
-          // L'emissione avviene qui, PRIMA di sostituire `file`/il binding: gli
-          // eventi del file vecchio raggiungono il bus prima di quelli del nuovo,
-          // così la cronologia arriva in ordine su Telegram.
-          const oldTail = this.tails.get(s.id);
-          if (oldTail && oldTail.file === previous && oldTail.hasChanges()) {
-            const { events, state } = oldTail.poll();
-            for (const ev of events) this.emit(s, ev);
-            this.applyState(s, state);
+        const currentMtime = this.mtimeOf(file);
+        if (currentMtime === undefined && existsSync(file)) {
+          // statSync è appena fallito ma existsSync conferma che il file c'è
+          // ancora: più probabile un errore transitorio (EMFILE, una race) che
+          // una sparizione reale. Non decidiamo lo switch alla cieca — il
+          // binding resta quello di prima, si riprova al prossimo poll.
+        } else {
+          const gone = currentMtime === undefined; // existsSync l'ha appena confermato: davvero sparito
+          const newestMtime = this.mtimeOf(newest);
+          const now = this.now();
+          // "Il legato smette di crescere" = silenzio VERO rispetto a ORA, non
+          // solo rispetto al candidato — altrimenti un file con mtime nel futuro
+          // (un transcript ripristinato, copiato, o toccato da un tool) supera la
+          // guardia all'istante. E il candidato deve essere davvero più recente
+          // del legato, non semplicemente il legato più vecchio del candidato.
+          const boundIsQuiet = gone || now - currentMtime! >= TRANSCRIPT_SWITCH_GRACE_MS;
+          const isNewer = gone || (newestMtime !== undefined && newestMtime > currentMtime!);
+          const supplants = newestMtime !== undefined && boundIsQuiet && isNewer;
+          if (supplants) {
+            const previous = file;
+            // Cambio di file (giusto o sbagliato che sia): prima di spostare il
+            // binding, svuotiamo la coda residua del vecchio file — se esiste un
+            // suo tail — ed emettiamo i suoi eventi. PRIMA di riassegnare `file`,
+            // così gli eventi del file vecchio raggiungono il bus prima di
+            // quelli del nuovo e la cronologia arriva in ordine su Telegram.
+            // Il tail del vecchio file NON viene distrutto (resta in cache, per
+            // sessione+file): se il binding tornerà su di esso, riprenderà da
+            // qui esattamente, non da un nuovo EOF.
+            const oldTail = this.tails.get(s.id)?.get(previous);
+            if (oldTail) this.drainTail(s, oldTail);
+            file = newest;
+            log().info('transcript bound', { sessionId: s.id, previous, next: file, reason: 'file-switch' });
+            manager.setTranscriptFile(s.id, file);
+            manager.persist();
+          } else if (newestMtime !== undefined) {
+            // Non vince ancora, ma "pinniamo" comunque un tail per il candidato
+            // FIN DA ORA (non da quando vincerà): se si tratta di una rotazione
+            // vera, per tutta la finestra di grazia il file nuovo accumula la
+            // conversazione VERA post-rotazione. Se aspettassimo il momento
+            // dello switch per creare il tail (a EOF), quella conversazione
+            // andrebbe persa esattamente come il file vecchio nel bug originale
+            // — solo un minuto più tardi. Pinnarlo qui, quando lo vediamo per
+            // la prima volta, fissa l'offset vicino alla sua nascita: quando
+            // (e se) vincerà, il tail esiste già e riprende da lì.
+            this.tailFor(s.id, newest);
           }
-          file = newest;
-          log().info('transcript bound', { sessionId: s.id, previous, next: file, reason: 'file-switch' });
-          manager.setTranscriptFile(s.id, file);
-          manager.persist();
         }
       }
     }
 
-    let tail = this.tails.get(s.id);
-    if (!tail || tail.file !== file) {
-      tail = new TranscriptTail(file);
-      this.tails.set(s.id, tail);
-      // stato iniziale dall'ultima riga già scritta (nessun replay della storia)
+    const { tail, isNew } = this.tailFor(s.id, file);
+    if (isNew) {
+      // mai tailato prima per questa sessione (prima adozione, o qualunque
+      // altro file incontrato per la prima volta): nessun replay della storia,
+      // stato iniziale dall'ultima riga già scritta. Salta un giro di poll: il
+      // successivo recupera quanto scritto da qui in avanti.
       this.applyState(s, peekTranscriptState(file));
       return;
     }
@@ -180,9 +275,7 @@ export class TranscriptWatcher {
       this.applyState(s, tail.parser.state);
       return;
     }
-    const { events, state } = tail.poll();
-    for (const ev of events) this.emit(s, ev);
-    this.applyState(s, state);
+    this.drainTail(s, tail);
   }
 
   private emit(s: Session, ev: TranscriptEvent): void {

@@ -209,13 +209,17 @@ describe('TranscriptWatcher — identità degli eventi', () => {
 // riga. Riusa lo schema di `TranscriptWatcher (worktree relocation)` (vera dir
 // di progetto su disco, `PROJECTS_DIR` passato a `loadConfig`).
 describe('TranscriptWatcher (transcript rebind grace window)', () => {
-  function makeWatcher() {
+  // `nowFn`: orologio iniettabile (TranscriptWatcherDeps.now). La regola della
+  // finestra di grazia confronta con l'istante REALE (`Date.now()` di
+  // produzione), non solo con le mtime dei file — i test devono poter simulare
+  // il tempo che passa senza sleep reali di 60s+.
+  function makeWatcher(nowFn?: () => number) {
     const bus = new Bus();
     const dir = mkdtempSync(join(tmpdir(), 'orc-twatch-'));
     const config = loadConfig({ STATE_DIR: dir, PROJECTS_DIR: join(dir, 'projects') });
     const state = new StateStore(join(dir, 'state.json'));
     const manager = new SessionManager({ bus, state, idleGraceMs: 3000, armedOnStart: false });
-    const watcher = new TranscriptWatcher({ config, manager, bus });
+    const watcher = new TranscriptWatcher({ config, manager, bus, now: nowFn });
     return { manager, watcher, bus, config, stateDir: dir };
   }
 
@@ -241,7 +245,11 @@ describe('TranscriptWatcher (transcript rebind grace window)', () => {
 
     // il transcript di un subagent (Task) compare nella STESSA dir, 4s dopo —
     // ben dentro la finestra di grazia di 60s — mentre la nostra sessione
-    // continua a lavorare sul suo file
+    // continua a lavorare sul suo file.
+    // Il timestamp futuro (+4s) del sibling è il dettaglio che rende il test
+    // discriminante: senza di esso `newestTranscriptFile` non lo sceglierebbe
+    // affatto come "più recente" e il ramo di switch non verrebbe nemmeno
+    // valutato. Non rimuoverlo/appiattirlo in un refactor futuro.
     const subagentFile = join(mainDir, '897fa8b0.jsonl');
     writeFileSync(subagentFile, JSON.stringify({ type: 'mode', sessionId: '897fa8b0' }) + '\n');
     utimesSync(subagentFile, new Date(now + 4_000), new Date(now + 4_000));
@@ -266,23 +274,29 @@ describe('TranscriptWatcher (transcript rebind grace window)', () => {
     const logFile = join(mkdtempSync(join(tmpdir(), 'orc-twatch-log-')), 'daemon.jsonl');
     initLogger({ file: logFile, level: 'info', stderr: () => {} });
     try {
-      const { manager, watcher, config } = makeWatcher();
+      // Orologio iniettato: la regola confronta con l'istante reale (`this.now()`
+      // in produzione), quindi qui simuliamo il tempo che passa muovendo `clock`
+      // invece di dormire 60s+ nel test.
+      let clock = Date.now();
+      const { manager, watcher, config } = makeWatcher(() => clock);
       const mainDir = join(config.projectsDir, mungedProjectDir('/Users/u/proj'));
       mkdirSync(mainDir, { recursive: true });
 
       const oldFile = join(mainDir, 'old.jsonl');
       writeFileSync(oldFile, JSON.stringify({ type: 'mode', sessionId: 'old' }) + '\n');
-      const now = Date.now();
-      utimesSync(oldFile, new Date(now), new Date(now));
+      const t0 = clock;
+      utimesSync(oldFile, new Date(t0), new Date(t0));
 
       const s = manager.registerTerminal({ title: 'p', projectDir: '/Users/u/proj', tmuxTarget: 'claude:p' });
       manager.setTranscriptFile(s.id, oldFile);
       await (watcher as any).pollSession(s); // crea il tail sul vecchio file
 
-      // il vecchio file smette di crescere; il nuovo compare ben oltre la finestra di grazia
+      // il vecchio file smette di crescere; passa più della finestra di grazia
+      // (tempo reale simulato) e il nuovo compare, davvero più recente
+      clock = t0 + TRANSCRIPT_SWITCH_GRACE_MS + 5_000;
       const newFile = join(mainDir, 'new.jsonl');
       writeFileSync(newFile, JSON.stringify({ type: 'mode', sessionId: 'new' }) + '\n');
-      utimesSync(newFile, new Date(now + TRANSCRIPT_SWITCH_GRACE_MS + 5_000), new Date(now + TRANSCRIPT_SWITCH_GRACE_MS + 5_000));
+      utimesSync(newFile, new Date(clock), new Date(clock));
 
       const setTranscriptFile = vi.spyOn(manager, 'setTranscriptFile');
       await (watcher as any).pollSession(s);
@@ -299,14 +313,15 @@ describe('TranscriptWatcher (transcript rebind grace window)', () => {
   });
 
   it('drains the old file residual events on a legitimate rotation, and they reach the bus before any event from the new file', async () => {
-    const { manager, watcher, bus, config } = makeWatcher();
+    let clock = Date.now();
+    const { manager, watcher, bus, config } = makeWatcher(() => clock);
     const mainDir = join(config.projectsDir, mungedProjectDir('/Users/u/proj'));
     mkdirSync(mainDir, { recursive: true });
 
     const oldFile = join(mainDir, 'old.jsonl');
     writeFileSync(oldFile, JSON.stringify({ type: 'mode', sessionId: 'old' }) + '\n');
-    const now = Date.now();
-    utimesSync(oldFile, new Date(now), new Date(now));
+    const t0 = clock;
+    utimesSync(oldFile, new Date(t0), new Date(t0));
 
     const s = manager.registerTerminal({ title: 'p', projectDir: '/Users/u/proj', tmuxTarget: 'claude:p' });
     manager.setTranscriptFile(s.id, oldFile);
@@ -315,10 +330,11 @@ describe('TranscriptWatcher (transcript rebind grace window)', () => {
     // coda non ancora letta sul vecchio file: scritta ma non ancora "pollata"
     appendFileSync(oldFile, JSON.stringify({ type: 'assistant', message: { id: 'm1', stop_reason: 'end_turn', content: [{ type: 'text', text: 'coda-vecchia' }] } }) + '\n');
 
-    // rotazione legittima: il nuovo file compare oltre la finestra di grazia
+    // rotazione legittima: tempo reale simulato oltre la finestra di grazia
+    clock = t0 + TRANSCRIPT_SWITCH_GRACE_MS + 5_000;
     const newFile = join(mainDir, 'new.jsonl');
     writeFileSync(newFile, JSON.stringify({ type: 'mode', sessionId: 'new' }) + '\n');
-    utimesSync(newFile, new Date(now + TRANSCRIPT_SWITCH_GRACE_MS + 5_000), new Date(now + TRANSCRIPT_SWITCH_GRACE_MS + 5_000));
+    utimesSync(newFile, new Date(clock), new Date(clock));
 
     const order: string[] = [];
     bus.on('session.text', e => order.push(e.text));
@@ -354,5 +370,125 @@ describe('TranscriptWatcher (transcript rebind grace window)', () => {
     } finally {
       initLogger({});
     }
+  });
+
+  it('logs a debug record when a bound file vanishes and is not found anywhere else (M1)', async () => {
+    const logFile = join(mkdtempSync(join(tmpdir(), 'orc-twatch-log-')), 'daemon.jsonl');
+    initLogger({ file: logFile, level: 'debug', stderr: () => {} });
+    try {
+      const { manager, watcher, config } = makeWatcher();
+      const mainDir = join(config.projectsDir, mungedProjectDir('/Users/u/proj'));
+      mkdirSync(mainDir, { recursive: true });
+      const gone = join(mainDir, 'gone.jsonl'); // mai scritto su disco: sempre sparito
+
+      const s = manager.registerTerminal({ title: 'p', projectDir: '/Users/u/proj', tmuxTarget: 'claude:p' });
+      manager.setTranscriptFile(s.id, gone);
+
+      await (watcher as any).pollSession(s); // nessun candidato nella dir (vuota): il poll finiva senza loggare nulla
+
+      log().close();
+      const rec = logLines(logFile).find(r => r.msg === 'transcript unbound');
+      expect(rec).toMatchObject({ sessionId: s.id, previous: gone, reason: 'missing-not-relocated' });
+    } finally {
+      initLogger({});
+    }
+  });
+
+  // Fix round 2 — issue Critica C1: la finestra di grazia è un'euristica sulle
+  // mtime e PUÒ sbagliare. Il caso più comune su questo progetto: una domanda è
+  // pendente su Telegram e l'umano ci mette più di 60s a rispondere, mentre nella
+  // stessa dir un transcript "foreign" (un subagent, che nell'incidente reale ha
+  // scritto per 25 minuti ininterrotti) resta attivo e finisce per "vincere" il
+  // binding. PRIMA di questo fix, quando il binding tornava sul nostro file il
+  // tail veniva ricreato a EOF: tutto ciò che era stato scritto nel frattempo
+  // andava perso — lo stesso bug della causa originale, solo su scala di minuti
+  // invece che di secondi. Con `tailFor` che riusa il tail invece di ricrearlo,
+  // il rientro riprende esattamente da dove eravamo rimasti.
+  it('recovers lines written to our own file while a foreign transcript in the same dir held the binding, in order and exactly once (C1)', async () => {
+    let clock = Date.now();
+    const { manager, watcher, bus, config } = makeWatcher(() => clock);
+    const mainDir = join(config.projectsDir, mungedProjectDir('/Users/u/proj'));
+    mkdirSync(mainDir, { recursive: true });
+
+    const oursFile = join(mainDir, 'ours.jsonl');
+    writeFileSync(oursFile, JSON.stringify({ type: 'mode', sessionId: 'ours' }) + '\n');
+    const t0 = clock;
+    utimesSync(oursFile, new Date(t0), new Date(t0));
+
+    const s = manager.registerTerminal({ title: 'p', projectDir: '/Users/u/proj', tmuxTarget: 'claude:p' });
+    manager.setTranscriptFile(s.id, oursFile);
+    await (watcher as any).pollSession(s); // tail iniziale su "ours", da EOF
+
+    // la nostra sessione resta muta per più della finestra di grazia (l'umano
+    // sta pensando alla domanda); il transcript "foreign" nella stessa dir,
+    // attivo di continuo, la supera e vince il binding
+    const foreignFile = join(mainDir, 'foreign.jsonl');
+    writeFileSync(foreignFile, JSON.stringify({ type: 'mode', sessionId: 'foreign' }) + '\n');
+    clock = t0 + TRANSCRIPT_SWITCH_GRACE_MS + 5_000;
+    utimesSync(foreignFile, new Date(clock), new Date(clock));
+
+    const onText: string[] = [];
+    bus.on('session.text', e => onText.push(e.text));
+
+    await (watcher as any).pollSession(s); // il binding viene rubato dal foreign
+    expect(manager.get(s.id)?.transcriptFile).toBe(foreignFile);
+
+    // MENTRE il binding è altrove, l'umano risponde su Telegram e la nostra
+    // sessione riparte: due righe vengono scritte nel NOSTRO file.
+    appendFileSync(oursFile, JSON.stringify({ type: 'assistant', message: { id: 'm1', stop_reason: 'end_turn', content: [{ type: 'text', text: 'durante-1' }] } }) + '\n');
+    appendFileSync(oursFile, JSON.stringify({ type: 'assistant', message: { id: 'm2', stop_reason: 'end_turn', content: [{ type: 'text', text: 'durante-2' }] } }) + '\n');
+    clock = clock + TRANSCRIPT_SWITCH_GRACE_MS + 5_000;
+    utimesSync(oursFile, new Date(clock), new Date(clock));
+
+    await (watcher as any).pollSession(s); // il nostro file torna a essere il più recente: il binding rientra
+
+    expect(manager.get(s.id)?.transcriptFile).toBe(oursFile);
+    expect(onText).toEqual(['durante-1', 'durante-2']); // recuperate, in ordine, una sola volta
+  });
+
+  // Fix round 2 — issue Critica C2: con la finestra di grazia, nel momento in
+  // cui una rotazione VERA viene riconosciuta il file nuovo ha già accumulato
+  // fino a un minuto di conversazione NOSTRA (il prompt dell'utente dopo /clear
+  // e la risposta). PRIMA di questo fix il tail veniva creato a EOF proprio in
+  // quel momento, perdendo tutto quel contenuto. Il fix "pinna" un tail per il
+  // candidato appena lo vediamo comparire (non quando vince), quindi quando la
+  // finestra scade il tail esiste già da prima e recupera tutto.
+  it('does not drop conversation already written to the new file by the time a genuine rotation crosses the grace window (C2)', async () => {
+    let clock = Date.now();
+    const { manager, watcher, bus, config } = makeWatcher(() => clock);
+    const mainDir = join(config.projectsDir, mungedProjectDir('/Users/u/proj'));
+    mkdirSync(mainDir, { recursive: true });
+
+    const oldFile = join(mainDir, 'old.jsonl');
+    writeFileSync(oldFile, JSON.stringify({ type: 'mode', sessionId: 'old' }) + '\n');
+    const t0 = clock;
+    utimesSync(oldFile, new Date(t0), new Date(t0));
+
+    const s = manager.registerTerminal({ title: 'p', projectDir: '/Users/u/proj', tmuxTarget: 'claude:p' });
+    manager.setTranscriptFile(s.id, oldFile);
+    await (watcher as any).pollSession(s); // tail sul vecchio file
+
+    // il vecchio file smette di crescere (rotazione, es. /clear): il nuovo
+    // compare quasi subito, ma non supera ancora la finestra di grazia
+    const newFile = join(mainDir, 'new.jsonl');
+    writeFileSync(newFile, JSON.stringify({ type: 'mode', sessionId: 'new' }) + '\n');
+    clock = t0 + 5_000;
+    utimesSync(newFile, new Date(clock), new Date(clock));
+
+    await (watcher as any).pollSession(s); // non vince ancora: ma lo pinniamo già qui
+
+    // durante la finestra di grazia il file nuovo accumula la VERA
+    // conversazione post-rotazione — esattamente ciò che andava perso prima
+    appendFileSync(newFile, JSON.stringify({ type: 'assistant', message: { id: 'm1', stop_reason: 'end_turn', content: [{ type: 'text', text: 'post-rotazione' }] } }) + '\n');
+    clock = t0 + TRANSCRIPT_SWITCH_GRACE_MS + 10_000; // ora supera la finestra
+    utimesSync(newFile, new Date(clock), new Date(clock));
+
+    const onText: string[] = [];
+    bus.on('session.text', e => onText.push(e.text));
+
+    await (watcher as any).pollSession(s); // rotazione riconosciuta: il tail esisteva già, non riparte da EOF
+
+    expect(manager.get(s.id)?.transcriptFile).toBe(newFile);
+    expect(onText).toEqual(['post-rotazione']); // il contenuto pre-switch non è andato perso
   });
 });
