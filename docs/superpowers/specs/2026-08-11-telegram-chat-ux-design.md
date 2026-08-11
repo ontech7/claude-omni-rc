@@ -17,6 +17,11 @@ Usando il bot, la chat è difficile da leggere su tre fronti:
 3. **I testi si leggono male.** Il markdown del modello viene reso solo
    parzialmente; blocchi di codice senza linguaggio, tabelle sfasciate, citazioni
    perse, e messaggi lunghi spezzati a metà frase.
+4. **L'attività dei subagent si mescola a quella della sessione principale.** In
+   una UI con più pannelli sarebbe un albero; su Telegram, che ha una chat sola e
+   lineare, diventa un flusso indistinguibile. L'utente non vuole nascondere
+   quell'output, vuole **decidere** se guardarlo: di default gli basta sapere che
+   un agent sta lavorando e quando ha finito.
 
 A questi si aggiunge un problema di rumore: **ogni** bolla tool fa vibrare il
 telefono, e ogni URL citato dal modello apre un'anteprima gigante.
@@ -47,6 +52,15 @@ telefono notifica solo quando serve una persona.
   `>` citazioni, `~~`, liste ordinate/annidate, tabelle, `---`.
 - `balanceHtml()` e `splitHtmlMessage()` conoscono solo i tag `b|i|code|pre|a`.
 - Nessun uso di `disable_notification`, `link_preview_options`, `setMyCommands`.
+- `src/sessions/sdk-driver.ts` (righe 109-161) **ignora `parent_tool_use_id`**.
+  L'SDK marca con quel campo ogni messaggio che proviene da un subagent, e per
+  default emette già i blocchi `tool_use`/`tool_result` dei subagent
+  (`forwardSubagentText: false` limita solo *testo* e *thinking*). Il driver li
+  rigira sul bus identici a quelli della sessione principale: **è questa la causa
+  del mescolamento**, non un problema di rendering.
+- Il driver ignora anche i messaggi `system` di tipo `task_started`,
+  `task_progress`, `task_updated`, che l'SDK emette già con tutto quello che
+  serve (vedi 3.6).
 
 ## 3. Design
 
@@ -193,13 +207,110 @@ in coda un marcatore `<i>(1/3)</i>`; con una parte sola non compare nulla.
   come `<blockquote expandable>` con intestazione `▸ {n} passaggi`. Resta
   consultabile ma smette di occupare lo schermo nello storico.
 
+### 3.6 Subagent: una scheda per agent, dettagli a richiesta
+
+L'SDK offre già tutto il necessario; oggi non ne usiamo niente.
+
+| Segnale SDK | Contenuto utile |
+|---|---|
+| `parent_tool_use_id` (su assistant e user message) | non-null ⇒ il messaggio viene da un subagent; il valore è l'id della tool call `Task` che l'ha generato |
+| `system` / `task_started` | `task_id`, `tool_use_id`, `description`, `subagent_type`, `prompt` |
+| `system` / `task_progress` | `usage.tool_uses`, `usage.duration_ms`, `usage.total_tokens`, `last_tool_name`, `summary` |
+| `system` / `task_updated` | `patch.status`: `running` \| `completed` \| `failed` \| `killed` \| `paused`, `patch.error` |
+
+**Contratto del bus** (`src/types.ts`): `session.text` e `session.tool`
+guadagnano un campo opzionale `parentToolUseId`. Nasce un evento nuovo:
+
+```ts
+| {
+    type: 'session.agent';
+    sessionId: string;
+    taskId: string;
+    toolUseId?: string;          // la tool_use Task: chiave di correlazione
+    phase: 'started' | 'progress' | 'done';
+    subagentType?: string;
+    description?: string;
+    toolUses?: number;
+    durationMs?: number;
+    lastToolName?: string;
+    status?: 'completed' | 'failed' | 'killed';
+    error?: string;
+    eventId?: string;
+  }
+```
+
+**`sdk-driver.ts`**: propaga `msg.parent_tool_use_id ?? undefined` su ogni
+`session.text` e `session.tool` che emette, e traduce i tre messaggi `system`
+in `session.agent`. Nessun'altra modifica al driver.
+
+**Bot**: una `AgentCardRegistry` per sessione tiene, per `toolUseId`, la scheda:
+`{ messageId, subagentType, description, lines[], expanded, toolUses, startedAt, status }`.
+
+- Un `session.tool` o `session.text` **con `parentToolUseId`** non entra nello
+  stream principale e non tocca la `ToolBurstAggregator`: viene reso con
+  `renderToolLine` e accodato a `lines` della scheda corrispondente.
+- **Collassata** (default) la scheda è un messaggio solo:
+  ```
+  🤖 Agent · Explore — trova i punti di rendering
+  ⏳ 7 passaggi · 42s · ultimo: Grep
+  ```
+  con un bottone inline `👁 Dettagli`.
+- **Espansa**: stessa intestazione più `<blockquote expandable>` con le righe
+  accumulate, bottone `🙈 Nascondi`. Continua ad aggiornarsi dal vivo.
+- **Conclusa**: `✅ 🤖 Agent · Explore — … · 12 passaggi · 1m 40s`, oppure
+  `❌` con `patch.error` in caso di `failed`/`killed`. Il bottone resta, così i
+  dettagli si possono aprire anche dopo.
+
+Questo è esattamente il comportamento richiesto: di default sai *che* un agent
+lavora e *quando* finisce; i dettagli sono a un tap di distanza e non vengono mai
+buttati via.
+
+**Dettagli che decidono se funziona o no:**
+
+- **Eventi orfani.** Un `tool_use` del subagent può arrivare *prima* del
+  `task_started` che crea la scheda. Gli eventi con un `parentToolUseId` senza
+  scheda vanno in un buffer per quell'id e sono attaccati alla scheda quando
+  nasce. Un buffer che non trova mai la sua scheda viene scartato a fine turno.
+- **`tool_use_id` è opzionale** nei tipi SDK (`tool_use_id?: string`). Se manca,
+  la scheda è indicizzata per `task_id` e la correlazione con i tool del subagent
+  non è possibile: in quel caso la scheda mostra solo i contatori di
+  `task_progress` (che restano corretti) e gli eventi con `parentToolUseId`
+  ignoto **tornano nello stream principale** invece di sparire. Perdere
+  visibilità è peggio che perdere l'ordinamento.
+- **Frequenza degli aggiornamenti.** `task_progress` può arrivare molto spesso.
+  L'edit della scheda passa dall'`EditThrottler` esistente (1 op/s per chat) e
+  viene saltato se il testo renderizzato non è cambiato.
+- **`callback_data`** ha un limite di 64 byte: `agent:toggle:` (13) + UUID (36)
+  = 49 byte. Rientra, ma il limite va verificato nel test.
+- **Notifiche**: le schede agent sono `disable_notification: true`, come le bolle
+  tool. Un agent che finisce non è un evento che richiede una persona.
+
+**Limite dichiarato**: tutto questo vale per le sessioni **headless** (percorso
+SDK). Le sessioni **terminali** ricevono gli eventi dal transcript, e i subagent
+del CLI scrivono su un file transcript separato che il `TranscriptWatcher` evita
+deliberatamente di agganciare (commit `c8b4da3`). Per quelle sessioni resta
+visibile solo la riga `🤖 Agent` della tool call `Task`, senza scheda e senza
+dettagli. Estendere la copertura alle terminali significa far seguire al watcher
+i transcript figli: è un lavoro sul plumbing delle sessioni, non sulla
+presentazione, e sta fuori da questo branch.
+
 ## 4. Fuori scope
 
-- **`@grammyjs/stream`** (draft animati per l'output del modello). È una
-  dipendenza runtime nuova: il `CLAUDE.md` impone di chiedere, la domanda è stata
-  posta e non ha avuto risposta, quindi il default è non aggiungerla. Tocca anche
-  `EditThrottler` e `ToolBurstAggregator`, cioè mescolerebbe un rischio
-  architetturale a un lavoro di sola presentazione. Da valutare a parte.
+- **`@grammyjs/stream`.** `grammy` è il framework Telegram che il progetto già
+  usa (una delle tre dipendenze). `@grammyjs/stream` è un suo *plugin* separato:
+  sfrutta i "message draft" dell'API Telegram — il testo che compare
+  progressivamente in chat, come quando qualcuno sta scrivendo — per far
+  apparire l'output del modello mentre viene generato, invece che a blocchi già
+  completi, gestendo da solo lo split a 4096 caratteri.
+  Escluso, confermato dall'utente, per tre motivi in ordine di peso:
+  1. **Non risolve nessuno dei quattro problemi.** Cambia *come arriva* il testo,
+     non *quanto è leggibile*: una risposta lunga che si scrive dal vivo resta un
+     muro se il markdown è reso male. La leggibilità è il punto 3, e si risolve
+     in `mdToHtml`.
+  2. Sostituirebbe `forwardText` + `EditThrottler` + la logica di merge su
+     `lastMsg`, che contiene la soppressione dell'echo e la deduplica — codice
+     sottile, con bug già trovati e commentati.
+  3. È una dipendenza runtime nuova, e il `CLAUDE.md` fissa il budget a tre.
 - **`setMyCommands()`** (menu `/` di Telegram popolato con i comandi e le loro
   descrizioni). Proposto e **scartato dall'utente**: è discovery dei comandi, non
   leggibilità della chat, ed è l'unico intervento che tocca il ciclo di avvio del
@@ -216,6 +327,9 @@ in coda un marcatore `<i>(1/3)</i>`; con una parte sola non compare nulla.
 | `blockquote expandable` non supportato da un client vecchio | Degrada a citazione normale, nessuna perdita di testo |
 | La rimozione del summarizer LLM peggiora casi che oggi funzionano bene | Il catalogo copre esplicitamente ogni tool visto nei transcript reali; il ramo generico resta come rete |
 | Il rendering delle tabelle in `<pre>` sfora in larghezza su schermi stretti | Larghezza massima per colonna, con troncamento |
+| Un bug nel routing per `parentToolUseId` fa **sparire** l'attività di un subagent dalla chat | Il ramo di fallback è esplicito: `parentToolUseId` senza scheda ⇒ l'evento torna nello stream principale. Test dedicato sul caso "scheda mai creata" |
+| Le schede agent saturano l'`EditThrottler` (1 op/s) e ritardano il testo del modello | L'edit è saltato se il testo renderizzato non cambia; `task_progress` non forza un edit per sé |
+| Un subagent lasciato "in corso" per sempre se `task_updated` non arriva mai | A fine turno (`session.result` / `session.error`) ogni scheda ancora aperta viene chiusa come interrotta |
 
 ## 6. Verifica
 
@@ -224,6 +338,10 @@ in coda un marcatore `<i>(1/3)</i>`; con una parte sola non compare nulla.
   `shortenPath` (dentro progetto / dentro home / fuori da entrambi), parsing MCP,
   `mdToHtml` per ogni costrutto aggiunto, `splitHtmlMessage` con i tag nuovi a
   cavallo del limite.
+- Test nuovi per le schede agent: creazione da `task_started`, eventi orfani
+  attaccati a posteriori, `parentToolUseId` senza scheda che ricade nello stream
+  principale, toggle espandi/collassa, chiusura forzata a fine turno, lunghezza
+  del `callback_data` sotto i 64 byte.
 - Non verificabile in CI e da dichiarare come tale: la resa reale su Telegram
   (evidenziazione della sintassi, blockquote espandibile, comportamento delle
   notifiche) richiede un token bot e un telefono.
