@@ -179,3 +179,115 @@ export function shortenPath(p: string, projectDir?: string, maxLen = 50): string
   if (candidate.length <= maxLen) return candidate;
   return last.length <= maxLen ? last : `…${last.slice(-(maxLen - 1))}`;
 }
+
+export interface ToolLine {
+  icon: string;
+  label: string;     // Fixed label, always in English
+  target?: string;   // Rendered inside <code>
+  detail?: string;   // Free-form text, may be in the model's language
+  code?: string;     // Bash only: the command, on a separate line
+}
+
+const DETAIL_MAX = 100;
+const CODE_MAX = 200;
+
+// Keys that identify a resource instead of describing intent: fields like
+// `detail` of an MCP tool tell nothing to the human reading the chat.
+const OPAQUE_KEYS = new Set(['libraryid', 'id', 'token', 'apikey', 'signal', 'uuid', 'sessionid']);
+
+function firstMeaningfulString(input: Record<string, unknown>): string | undefined {
+  for (const [k, v] of Object.entries(input)) {
+    if (OPAQUE_KEYS.has(k.toLowerCase())) continue;
+    if (typeof v === 'string' && v.trim()) return v;
+  }
+  return undefined;
+}
+
+function str(input: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = input[k];
+    if (typeof v === 'string' && v.trim()) return v;
+  }
+  return undefined;
+}
+
+// The CLI always writes a `description` on Bash tool calls ("Install
+// dependencies"): a human-friendly phrase, while `command` is the raw reason
+// the chat became unreadable. Description wins, the command stays below for
+// those who want the detail.
+export function describeTool(toolName: string, input: Record<string, unknown>, projectDir?: string): ToolLine {
+  const name = toolName.toLowerCase();
+  const path = (...keys: string[]): string | undefined => {
+    const p = str(input, ...keys);
+    return p ? shortenPath(p, projectDir) : undefined;
+  };
+
+  if (name.startsWith('mcp__')) {
+    const rest = toolName.slice('mcp__'.length);
+    const cut = rest.lastIndexOf('__');
+    const server = cut === -1 ? rest : rest.slice(0, cut);
+    const tool = cut === -1 ? undefined : rest.slice(cut + 2);
+    return { icon: '🔌', label: `MCP ${server}`, target: tool, detail: firstMeaningfulString(input) };
+  }
+
+  switch (name) {
+    case 'bash': {
+      const cmd = str(input, 'command');
+      return { icon: '⚡', label: 'Bash', detail: str(input, 'description') ?? cmd, code: cmd };
+    }
+    case 'read': case 'readfile': {
+      const offset = typeof input.offset === 'number' ? input.offset : undefined;
+      const limit = typeof input.limit === 'number' ? input.limit : undefined;
+      const range = offset !== undefined && limit !== undefined ? `lines ${offset}–${offset + limit - 1}` : undefined;
+      return { icon: '📖', label: 'Read', target: path('file_path', 'path'), detail: range };
+    }
+    case 'write': case 'writefile':
+      return { icon: '📝', label: 'Write', target: path('file_path', 'path') };
+    case 'edit': case 'multiedit':
+      return { icon: '✏️', label: 'Edit', target: path('file_path', 'path'), detail: input.replace_all === true ? 'replace all' : undefined };
+    case 'notebookedit':
+      return { icon: '📓', label: 'Notebook', target: path('notebook_path', 'path') };
+    case 'glob':
+      return { icon: '🔍', label: 'Glob', target: str(input, 'pattern'), detail: path('path') };
+    case 'grep':
+      return { icon: '🔎', label: 'Grep', target: str(input, 'pattern'), detail: path('path') };
+    case 'webfetch': {
+      const url = str(input, 'url');
+      let host = url;
+      try { if (url) host = new URL(url).hostname; } catch { /* Malformed URL: keep raw text */ }
+      return { icon: '🌐', label: 'Fetch', target: host, detail: str(input, 'prompt') };
+    }
+    case 'websearch':
+      return { icon: '🔎', label: 'Search', target: str(input, 'query') };
+    case 'task':
+      return { icon: '🤖', label: 'Agent', target: str(input, 'subagent_type'), detail: str(input, 'description') };
+    case 'skill':
+      return { icon: '🧩', label: 'Skill', target: str(input, 'skill'), detail: str(input, 'args') };
+    case 'slashcommand':
+      return { icon: '⌨️', label: 'Command', target: str(input, 'command') };
+    case 'workflow':
+      return { icon: '🎛', label: 'Workflow', target: str(input, 'name'), detail: str(input, 'description') };
+    case 'exitplanmode':
+      return { icon: '📋', label: 'Plan' };
+    case 'todowrite': case 'todoread': {
+      const todos = Array.isArray(input.todos) ? input.todos as { content?: unknown; status?: unknown }[] : [];
+      const done = todos.filter(t => t?.status === 'completed').length;
+      const current = todos.find(t => t?.status === 'in_progress');
+      return {
+        icon: '📋', label: 'Todo',
+        target: todos.length ? `${done}/${todos.length}` : undefined,
+        detail: typeof current?.content === 'string' ? current.content : undefined,
+      };
+    }
+    default:
+      return { icon: '⚙️', label: toolName, detail: firstMeaningfulString(input) };
+  }
+}
+
+export function renderToolLine(line: ToolLine): string {
+  let out = `${line.icon} <b>${htmlEscape(line.label)}</b>`;
+  if (line.target) out += ` · <code>${htmlEscape(truncateAtWord(line.target, DETAIL_MAX))}</code>`;
+  if (line.detail) out += ` — ${htmlEscape(truncateAtWord(line.detail, DETAIL_MAX))}`;
+  if (line.code) out += `\n<code>${htmlEscape(truncateAtWord(line.code, CODE_MAX))}</code>`;
+  return out;
+}

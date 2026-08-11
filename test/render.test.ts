@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mdToHtml, balanceHtml, splitHtmlMessage, truncateAtWord, htmlEscape, shortenPath } from '../bot/render.js';
+import { mdToHtml, balanceHtml, splitHtmlMessage, truncateAtWord, htmlEscape, shortenPath, describeTool, renderToolLine } from '../bot/render.js';
 
 describe('mdToHtml v2 / balanceHtml', () => {
   it('renders bold, italic and nested ***both***', () => {
@@ -136,5 +136,105 @@ describe('shortenPath', () => {
     expect(out.length).toBeLessThanOrEqual(10);
     expect(out).toContain('…');
     expect(out).toContain('.ts');
+  });
+});
+
+describe('describeTool', () => {
+  const proj = '/Users/tizio/Progetti/app';
+
+  it('uses Bash description, not command', () => {
+    const l = describeTool('Bash', { command: 'cd /Users/tizio/Progetti/app && npm ci', description: 'Install dependencies' }, proj);
+    expect(l.label).toBe('Bash');
+    expect(l.detail).toBe('Install dependencies');
+    expect(l.code).toContain('npm ci');
+  });
+
+  it('falls back to command if description is missing', () => {
+    const l = describeTool('Bash', { command: 'ls -la' }, proj);
+    expect(l.detail).toBe('ls -la');
+  });
+
+  it('shortens the Read path', () => {
+    expect(describeTool('Read', { file_path: `${proj}/bot/telegram.ts` }, proj).target).toBe('bot/telegram.ts');
+  });
+
+  it('distinguishes Write from Edit', () => {
+    expect(describeTool('Write', { file_path: `${proj}/a.ts` }, proj).label).toBe('Write');
+    expect(describeTool('Edit', { file_path: `${proj}/a.ts` }, proj).label).toBe('Edit');
+  });
+
+  it('reports line range of Read when present', () => {
+    expect(describeTool('Read', { file_path: `${proj}/a.ts`, offset: 10, limit: 5 }, proj).detail).toBe('lines 10–14');
+  });
+
+  it('recognizes a Skill', () => {
+    const l = describeTool('Skill', { skill: 'editing-the-landing-page' }, proj);
+    expect(l.label).toBe('Skill');
+    expect(l.target).toBe('editing-the-landing-page');
+  });
+
+  it('parses MCP tool name', () => {
+    const l = describeTool('mcp__context7__query-docs', { query: 'how to use X' }, proj);
+    expect(l.label).toBe('MCP context7');
+    expect(l.target).toBe('query-docs');
+    expect(l.detail).toBe('how to use X');
+  });
+
+  it('handles MCP server name with underscore', () => {
+    const l = describeTool('mcp__my_server__do_thing', {}, proj);
+    expect(l.label).toBe('MCP my_server');
+    expect(l.target).toBe('do_thing');
+  });
+
+  it('skips non-descriptive keys for MCP tool detail', () => {
+    expect(describeTool('mcp__ctx__q', { libraryId: '/org/p', query: 'real intent' }, proj).detail).toBe('real intent');
+  });
+
+  it('describes a subagent', () => {
+    const l = describeTool('Task', { subagent_type: 'Explore', description: 'find rendering points' }, proj);
+    expect(l.target).toBe('Explore');
+    expect(l.detail).toBe('find rendering points');
+  });
+
+  it('counts todos and shows current item', () => {
+    const l = describeTool('TodoWrite', { todos: [
+      { content: 'a', status: 'completed' },
+      { content: 'look here', status: 'in_progress' },
+      { content: 'c', status: 'pending' },
+    ] }, proj);
+    expect(l.target).toBe('1/3');
+    expect(l.detail).toBe('look here');
+  });
+
+  it('falls back to first string value for unknown tool', () => {
+    const l = describeTool('SomethingNew', { foo: 'useful value' }, proj);
+    expect(l.label).toBe('SomethingNew');
+    expect(l.detail).toBe('useful value');
+  });
+
+  it('does not throw on empty input', () => {
+    expect(() => describeTool('Boh', {}, proj)).not.toThrow();
+  });
+});
+
+describe('renderToolLine', () => {
+  it('composes icon, label, target and detail', () => {
+    const out = renderToolLine({ icon: '📖', label: 'Read', target: 'bot/telegram.ts', detail: 'lines 1–20' });
+    expect(out).toBe('📖 <b>Read</b> · <code>bot/telegram.ts</code> — lines 1–20');
+  });
+
+  it('skips missing parts', () => {
+    expect(renderToolLine({ icon: '⚙️', label: 'Boh' })).toBe('⚙️ <b>Boh</b>');
+  });
+
+  it('escapes dynamic fragments', () => {
+    const out = renderToolLine({ icon: '⚡', label: 'Bash', detail: 'a < b & c' });
+    expect(out).toContain('a &lt; b &amp; c');
+    expect(out).not.toContain('a < b');
+  });
+
+  it('puts command on second line in code', () => {
+    const out = renderToolLine({ icon: '⚡', label: 'Bash', detail: 'Install', code: 'npm ci' });
+    expect(out).toBe('⚡ <b>Bash</b> — Install\n<code>npm ci</code>');
   });
 });
