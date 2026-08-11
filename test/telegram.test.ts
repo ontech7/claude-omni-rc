@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { resolveHeadlessProjectDir, isPrivateChat, splitHtmlMessage, parseCommand, parseNewFlags, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToInjection, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, formatPaneContext } from '../bot/telegram.js';
-import type { ToolBurstSink } from '../bot/telegram.js';
+import { resolveHeadlessProjectDir, isPrivateChat, splitHtmlMessage, parseCommand, parseNewFlags, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToInjection, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, formatPaneContext, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
+import type { ToolBurstSink, PromptKeyEntry } from '../bot/telegram.js';
 
 describe('formatPct / formatResetAt', () => {
   it('formats a rounded percentage, or an em-dash when absent', () => {
@@ -630,21 +630,23 @@ describe('promptDedupeKey', () => {
 });
 
 describe('registerPromptKey', () => {
+  const entry = (key: string, at: number): PromptKeyEntry => ({ key, at });
+
   it('registers a new key as not-duplicate and adds it to the seen list', () => {
-    const { duplicate, seen } = registerPromptKey([], 'id:toolu_1');
+    const { duplicate, seen } = registerPromptKey([], 'id:toolu_1', { now: 1000 });
     expect(duplicate).toBe(false);
-    expect(seen).toEqual(['id:toolu_1']);
+    expect(seen).toEqual([entry('id:toolu_1', 1000)]);
   });
 
-  it('reports a key already in the list as duplicate, without changing the list', () => {
-    const { duplicate, seen } = registerPromptKey(['id:toolu_1'], 'id:toolu_1');
+  it('reports an id: key already in the list as a permanent duplicate — a toolUseId is unique per tool call, so it is left registered exactly as before this fix (no one-shot, no age expiry)', () => {
+    const { duplicate, seen } = registerPromptKey([entry('id:toolu_1', 1000)], 'id:toolu_1', { now: 2000 });
     expect(duplicate).toBe(true);
-    expect(seen).toEqual(['id:toolu_1']);
+    expect(seen).toEqual([entry('id:toolu_1', 1000)]); // non consumata, timestamp intatto
   });
 
   it('evicts the oldest key once the cap is exceeded (FIFO)', () => {
-    const { seen } = registerPromptKey(['a', 'b'], 'c', 2);
-    expect(seen).toEqual(['b', 'c']);
+    const { seen } = registerPromptKey([entry('a', 1), entry('b', 2)], 'c', { cap: 2, now: 3 });
+    expect(seen).toEqual([entry('b', 2), entry('c', 3)]);
   });
 
   // Task 8, direzione della deduplica: la prima occorrenza di una chiave (la
@@ -653,13 +655,55 @@ describe('registerPromptKey', () => {
   // riscritta dal transcript quando il turno si sblocca, più tardi) è quella
   // scartata. Invertire l'ordine delle due chiamate qui sotto riprodurrebbe
   // esattamente il bug originale (mostrare solo la copia tardiva).
-  it('first arrival (hook) wins, second arrival (transcript) of the same key is the duplicate', () => {
-    let seen: string[] = [];
-    const hookArrival = registerPromptKey(seen, 'id:toolu_1');
+  it('first arrival (hook) wins, second arrival (transcript) of the same id: key is the duplicate', () => {
+    let seen: PromptKeyEntry[] = [];
+    const hookArrival = registerPromptKey(seen, 'id:toolu_1', { now: 1000 });
     expect(hookArrival.duplicate).toBe(false); // la domanda dall'hook viene mostrata
     seen = hookArrival.seen;
-    const transcriptArrival = registerPromptKey(seen, 'id:toolu_1');
+    const transcriptArrival = registerPromptKey(seen, 'id:toolu_1', { now: 1500 });
     expect(transcriptArrival.duplicate).toBe(true); // la copia dal transcript viene scartata
+  });
+
+  // Fix round 1 (Important) — reproduction dell'issue segnalata dalla review:
+  // senza toolUseId, la chiave di fallback è una firma di testo+opzioni. Una
+  // seconda domanda REALMENTE nuova ma con lo stesso testo e le stesse
+  // opzioni (es. "Continue? Yes/No" ripetuto nella stessa sessione) deve
+  // essere mostrata, non scartata come falso duplicato della prima. Prima del
+  // fix (commit c75bb05) questo falliva: la chiave restava registrata per
+  // sempre dopo il primo scarto e la seconda domanda genuina spariva — la
+  // stessa sparizione muta che questo task esiste per eliminare, reintrodotta
+  // nel percorso degradato.
+  it('sig: keys are one-shot — a matching hit consumes the key, so a genuinely later identical question is shown, not dropped as a false duplicate', () => {
+    let seen: PromptKeyEntry[] = [];
+    const hookArrival = registerPromptKey(seen, 'sig:s1:Continue?|Yes,No', { now: 1000 });
+    expect(hookArrival.duplicate).toBe(false); // prima domanda, dall'hook
+    seen = hookArrival.seen;
+    const transcriptArrival = registerPromptKey(seen, 'sig:s1:Continue?|Yes,No', { now: 1500 });
+    expect(transcriptArrival.duplicate).toBe(true); // copia dal transcript, scartata
+    seen = transcriptArrival.seen;
+    expect(seen).toEqual([]); // la chiave è stata consumata, non solo "trovata"
+    const secondQuestion = registerPromptKey(seen, 'sig:s1:Continue?|Yes,No', { now: 60_000 });
+    expect(secondQuestion.duplicate).toBe(false); // domanda nuova, stessa firma — deve arrivare
+  });
+
+  // Se il transcript non scrive mai la sua copia (sessione finita, cancellata
+  // o /stop mentre la domanda era in sospeso) la chiave 'sig:' non deve
+  // restare viva per sempre: scade dopo PROMPT_DEDUPE_MAX_AGE_MS, così la
+  // prossima domanda identica non trova più nulla da "consumare" e passa. Il
+  // bound è volutamente largo (30 minuti): AskUserQuestion non ha un timeout
+  // proprio e una risposta a mano al terminale può richiedere molti minuti.
+  it('a sig: key with no matching duplicate expires after PROMPT_DEDUPE_MAX_AGE_MS, instead of blocking the next identical question forever', () => {
+    const seen = [entry('sig:s1:Continue?|Yes,No', 0)];
+    const stillAlive = registerPromptKey(seen, 'sig:s1:Continue?|Yes,No', { now: PROMPT_DEDUPE_MAX_AGE_MS - 1 });
+    expect(stillAlive.duplicate).toBe(true); // entro il bound, ancora in attesa della sua copia
+    const expired = registerPromptKey(seen, 'sig:s1:Continue?|Yes,No', { now: PROMPT_DEDUPE_MAX_AGE_MS + 1 });
+    expect(expired.duplicate).toBe(false); // oltre il bound, la chiave scaduta non blocca più nulla
+  });
+
+  it('does not apply the age bound to id: keys — a toolUseId never expires by design', () => {
+    const seen = [entry('id:toolu_1', 0)];
+    const { duplicate } = registerPromptKey(seen, 'id:toolu_1', { now: PROMPT_DEDUPE_MAX_AGE_MS * 10 });
+    expect(duplicate).toBe(true);
   });
 });
 

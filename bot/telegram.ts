@@ -459,21 +459,68 @@ export function promptDedupeKey(sessionId: string, questions: PromptQuestion[], 
 // fine per una sessione che vive per giorni.
 export const PROMPT_DEDUPE_CAP = 50;
 
+// Fix round 1 (Important): quanto restare in vita una chiave 'sig:' (fallback
+// senza toolUseId) in attesa della sua eventuale copia dal transcript, se
+// quella copia non arriva mai — sessione finita, cancellata, o /stop mentre
+// la domanda era ancora in sospeso. Senza un bound la chiave resterebbe
+// registrata per sempre e la PROSSIMA domanda con lo stesso testo/opzioni
+// (es. un "Continue? Yes/No" ripetuto) verrebbe scartata a torto come falso
+// duplicato — la stessa sparizione muta che questo task esiste per
+// eliminare, reintrodotta nel percorso degradato. Deliberatamente largo:
+// AskUserQuestion non ha un timeout proprio (vedi il commento in
+// subscribeBus), e rispondere a mano al terminale può richiedere molti
+// minuti — un bound stretto scadrebbe mentre l'utente sta ancora decidendo,
+// riaprendo esattamente lo stesso buco. 30 minuti è il compromesso: molto
+// più lungo di qualunque tempo di risposta plausibile, ma non "per sempre".
+export const PROMPT_DEDUPE_MAX_AGE_MS = 30 * 60_000;
+
+// Un ingresso della cache di deduplica: la chiave e il momento in cui è stata
+// registrata (serve alla scadenza per età delle chiavi 'sig:', vedi sopra).
+export interface PromptKeyEntry { key: string; at: number }
+
+// Registra `key` nell'elenco delle chiavi già viste per una sessione (FIFO
+// con cap): se era già presente la domanda è un duplicato (va scartata con
+// motivo 'duplicate-prompt', mai in silenzio); altrimenti viene aggiunta.
+// Pura: non tocca lo stato del bot, il chiamante (isDuplicatePrompt) si
+// limita a leggere/scrivere la Map per sessione.
+//
+// Le due famiglie di chiavi (vedi promptDedupeKey) si comportano diversamente
+// su un hit:
+// - 'id:' (toolUseId, univoco per tool call): resta registrata esattamente
+//   come prima di questo fix — nessun rischio di collisione fra domande
+//   diverse, quindi nessun bisogno di consumarla né di farla scadere.
+// - 'sig:' (fallback quando l'hook non ha un toolUseId leggibile): è
+//   ONE-SHOT. La firma è solo testo+opzioni, quindi una domanda IDENTICA ma
+//   successiva nella stessa sessione produce la STESSA chiave. Lasciarla
+//   registrata per sempre scarterebbe quella domanda successiva come falso
+//   duplicato — per questo un hit su una chiave 'sig:' la CONSUME (la
+//   rimuove): sopprime esattamente la sua copia dal transcript, poi la
+//   sessione riparte pulita per la prossima domanda con la stessa firma. Le
+//   chiavi 'sig:' scadono anche per età (PROMPT_DEDUPE_MAX_AGE_MS) nel caso
+//   quella copia non arrivi mai.
+export function registerPromptKey(
+  seen: readonly PromptKeyEntry[],
+  key: string,
+  opts: { cap?: number; maxAgeMs?: number; now?: number } = {},
+): { duplicate: boolean; seen: PromptKeyEntry[] } {
+  const cap = opts.cap ?? PROMPT_DEDUPE_CAP;
+  const maxAgeMs = opts.maxAgeMs ?? PROMPT_DEDUPE_MAX_AGE_MS;
+  const now = opts.now ?? Date.now();
+  // La scadenza per età riguarda SOLO le 'sig:' — le 'id:' restano com'erano.
+  const alive = seen.filter(e => !e.key.startsWith('sig:') || now - e.at < maxAgeMs);
+  const idx = alive.findIndex(e => e.key === key);
+  if (idx !== -1) {
+    const oneShot = key.startsWith('sig:');
+    const next = oneShot ? alive.filter((_, i) => i !== idx) : alive;
+    return { duplicate: true, seen: next };
+  }
+  const next = [...alive, { key, at: now }];
+  return { duplicate: false, seen: next.length > cap ? next.slice(next.length - cap) : next };
+}
+
 // Quante righe di contesto del pane mostrare sopra una domanda dall'hook:
 // abbastanza per orientarsi, non l'intero pane.
 export const PANE_CONTEXT_LINES = 20;
-
-// Registra `key` nell'elenco delle chiavi già viste (FIFO con cap): se era già
-// presente la domanda è un duplicato (va scartata con motivo
-// 'duplicate-prompt', mai in silenzio) e l'elenco torna invariato; altrimenti
-// viene aggiunta e l'elenco (troncato al cap) torna con lei dentro. Pura: non
-// tocca lo stato del bot, il chiamante (isDuplicatePrompt) si limita a
-// leggere/scrivere la Map per sessione.
-export function registerPromptKey(seen: readonly string[], key: string, cap = PROMPT_DEDUPE_CAP): { duplicate: boolean; seen: string[] } {
-  if (seen.includes(key)) return { duplicate: true, seen: [...seen] };
-  const next = [...seen, key];
-  return { duplicate: false, seen: next.length > cap ? next.slice(next.length - cap) : next };
-}
 
 // Task 8, punto 5: righe di contesto del pane da mostrare sopra una domanda
 // di provenienza hook (il testo che il modello ha scritto prima vive solo nel
@@ -937,7 +984,7 @@ export class TelegramBot {
   // Task 8, punto 4: chiavi di deduplica già viste per sessione (vedi
   // promptDedupeKey/registerPromptKey) — riconosce la copia tardiva del
   // transcript della stessa domanda già mostrata dall'hook.
-  private seenPromptKeys = new Map<string, string[]>();
+  private seenPromptKeys = new Map<string, PromptKeyEntry[]>();
   // Permessi ExitPlanMode in attesa del testo libero per "Edit plan":
   // sessionId → id della richiesta di permesso.
   private pendingPlanEdits = new Map<string, string>();
