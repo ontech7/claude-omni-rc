@@ -41,6 +41,11 @@ describe('parseNewFlags', () => {
     expect(parseNewFlags('--standard --model claude-sonnet-4-5 fix the bug')).toEqual({ mode: 'standard', model: 'claude-sonnet-4-5', text: 'fix the bug' });
     expect(parseNewFlags('--model m1 --auto go')).toEqual({ mode: 'auto', model: 'm1', text: 'go' });
   });
+  it('parses --effort alongside the other flags, in any order', () => {
+    expect(parseNewFlags('--effort high think')).toEqual({ effort: 'high', text: 'think' });
+    expect(parseNewFlags('--standard --effort low go')).toEqual({ mode: 'standard', effort: 'low', text: 'go' });
+    expect(parseNewFlags('--effort ultra think')).toEqual({ text: '--effort ultra think' }); // livello invalido → flag non consumato
+  });
 });
 
 describe('parseSettingsCommand', () => {

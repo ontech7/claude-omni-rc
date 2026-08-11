@@ -52,13 +52,15 @@ export function parseCommand(text: string): ParsedCommand {
   return { kind: 'unknown' };
 }
 
-// Flag in testa di /new, in qualsiasi ordine: --auto/--standard (permessi) e
-// --model <name> (modello per questa sessione, default da DEFAULT_MODEL).
-// `mode` resta undefined se nessun flag è presente: il default lo decide la
-// config (DEFAULT_PERMISSION_MODE), non il parser.
-export function parseNewFlags(raw: string): { mode?: 'auto' | 'standard'; model?: string; text: string } {
+// Flag in testa di /new, in qualsiasi ordine: --auto/--standard (permessi),
+// --model <name> (modello per questa sessione) e --effort <level> (effort di
+// ragionamento). `mode`/`effort` restano undefined se nessun flag è presente:
+// i default li decide la config (DEFAULT_PERMISSION_MODE / DEFAULT_EFFORT),
+// non il parser.
+export function parseNewFlags(raw: string): { mode?: 'auto' | 'standard'; model?: string; effort?: EffortLevel; text: string } {
   let mode: 'auto' | 'standard' | undefined;
   let model: string | undefined;
+  let effort: EffortLevel | undefined;
   let text = raw.trim();
   for (;;) {
     const modeFlag = text.match(/^--(auto|standard)(?:\s+|$)/);
@@ -73,9 +75,15 @@ export function parseNewFlags(raw: string): { mode?: 'auto' | 'standard'; model?
       text = text.slice(modelFlag[0].length).trim();
       continue;
     }
+    const effortFlag = text.match(/^--effort\s+(\S+)(?:\s+|$)/);
+    if (effortFlag && (EFFORT_LEVELS as readonly string[]).includes(effortFlag[1])) {
+      effort = effortFlag[1] as EffortLevel;
+      text = text.slice(effortFlag[0].length).trim();
+      continue;
+    }
     break;
   }
-  return { ...(mode ? { mode } : {}), ...(model ? { model } : {}), text };
+  return { ...(mode ? { mode } : {}), ...(model ? { model } : {}), ...(effort ? { effort } : {}), text };
 }
 
 // ---------- /settings ----------
@@ -1572,11 +1580,11 @@ export class TelegramBot {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
     const raw = ctx.match?.toString().trim() ?? '';
     if (!raw) {
-      await this.send(ctx, 'Usage: /new [--auto|--standard] [--model &lt;name&gt;] &lt;text&gt;');
+      await this.send(ctx, 'Usage: /new [--auto|--standard] [--model &lt;name&gt;] [--effort &lt;level&gt;] &lt;text&gt;');
       return;
     }
-    const { mode, model, text } = parseNewFlags(raw);
-    if (!text) { await this.send(ctx, 'Usage: /new [--auto|--standard] [--model &lt;name&gt;] &lt;text&gt;'); return; }
+    const { mode, model, effort, text } = parseNewFlags(raw);
+    if (!text) { await this.send(ctx, 'Usage: /new [--auto|--standard] [--model &lt;name&gt;] [--effort &lt;level&gt;] &lt;text&gt;'); return; }
     const running = this.deps.manager.list().filter(s => s.kind === 'headless' && s.status === 'running').length;
     if (running >= this.deps.config.maxHeadlessSessions) { await this.send(ctx, `Reached the limit of ${this.deps.config.maxHeadlessSessions} active headless sessions.`); return; }
     const { dir: projectDir, error } = resolveHeadlessProjectDir(this.deps.config.workspaceDirs);
@@ -1584,7 +1592,7 @@ export class TelegramBot {
     const permissionMode = mode ?? this.deps.config.defaultPermissionMode;
     const session = this.deps.manager.createHeadless({
       title: text.slice(0, 40), projectDir, model: model ?? this.deps.config.defaultModel,
-      permissionMode,
+      permissionMode, effort: effort ?? this.deps.config.defaultEffort,
     });
     this.deps.manager.setActive(session.id); // persiste anche la nuova sessione
     const modeLabel = permissionMode === 'standard' ? ' (standard — approvals via buttons)' : ' (automode — no approvals)';
