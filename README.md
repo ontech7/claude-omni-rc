@@ -23,18 +23,7 @@ LLMs, or Claude itself.</p>
 
 ---
 
-```
-@your_bot                       ← Telegram, from your phone
-/rc on
-🔓 Remote control ARMED.
-/new write a haiku about tmux
-🆕 Session a1b2c3d4 started.
-🔧 Permission requested — session a1b2c3d4
-Tool: Bash
-{"command":"ollama list"}
-[✓ Approve]  [✗ Reject]         ← you tap Approve from the couch
-✅ Ran it: ollama list …
-```
+<img width="2200" height="787" alt="screenshot1" src="https://github.com/user-attachments/assets/9140bb1a-bb74-4330-a095-fff62e874b42" />
 
 Headline use case: you leave a long task running, arm claude-omni-rc, walk out
 the door — and keep steering that session, plus any other you have running,
@@ -110,6 +99,8 @@ For a foreground test instead: `npm run dev`. Logs go to
 </details>
 
 ## Usage
+
+<img width="1099" height="661" alt="screenshots2" src="https://github.com/user-attachments/assets/4b63c273-fb24-4181-9fe1-d2a2c0989ddb" />
 
 Run your interactive sessions inside tmux — the installer adds an `omni-rc`
 shell function that does it for you:
@@ -230,6 +221,8 @@ on the machine. See [SECURITY.md](SECURITY.md) for what that implies.
 </details>
 
 ### Usage windows (`/usage`)
+
+<img width="540" height="132" alt="6041639000054894732" src="https://github.com/user-attachments/assets/fd8c900f-5d49-48b9-b6e3-4578759d26ca" />
 
 `/usage` checks the 5-hour and weekly windows for whichever provider the
 **active session** uses (or `DEFAULT_MODEL` when there is no active session) —
