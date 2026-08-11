@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { EFFORT_LEVELS, type EffortLevel } from '../types.js';
 
 export interface ExecResult { code: number; stdout: string; stderr: string; }
 export type ExecFn = (args: string[], opts?: { input?: string }) => Promise<ExecResult>;
@@ -204,6 +205,24 @@ export class TmuxClient {
       if (ps.code !== 0) return undefined;
       const m = ps.stdout.match(/(?:^|\s)--model\s+(\S+)/);
       return m ? m[1] : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  // Effort di ragionamento del processo claude nel pane, letto dalla riga di
+  // comando (`claude --reasoning-effort <livello>`). undefined se il processo
+  // non c'è o non ha il flag → /diag mostra '—'. Stessa tecnica e stesso
+  // best-effort di claudeModel.
+  async claudeEffort(target: string, tree?: ProcessTree): Promise<EffortLevel | undefined> {
+    try {
+      const pid = await this.findClaudePid(target, tree);
+      if (!pid) return undefined;
+      const ps = await this.sh('ps', ['-o', 'args=', '-p', pid]);
+      if (ps.code !== 0) return undefined;
+      const m = ps.stdout.match(/(?:^|\s)--reasoning-effort\s+(\S+)/);
+      const raw = m ? m[1] : undefined;
+      return raw && (EFFORT_LEVELS as readonly string[]).includes(raw) ? raw as EffortLevel : undefined;
     } catch {
       return undefined;
     }

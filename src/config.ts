@@ -1,6 +1,8 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { LOG_LEVELS, type LogLevel } from './log.js';
+import { sanitizeSettings, type UserSettings } from './settings.js';
+import { EFFORT_LEVELS, type EffortLevel } from './types.js';
 
 export interface Config {
   telegramBotToken: string;
@@ -12,6 +14,10 @@ export interface Config {
   // Default 'standard' (ogni tool passa dai bottoni): 'auto' significa un agente
   // non presidiato con accesso a Bash sulla macchina — va scelto, non subìto.
   defaultPermissionMode: 'auto' | 'standard';
+  // Effort di ragionamento di default per le sessioni headless (/new --effort
+  // lo sovrascrive per sessione). Vale per i modelli che lo supportano (Claude
+  // nativo); gli altri lo ignorano.
+  defaultEffort: EffortLevel;
   maxHeadlessSessions: number;
   permissionTimeoutSeconds: number;
   workspaceDirs: string[];
@@ -35,6 +41,9 @@ export interface Config {
   logFile: string;
   logMaxBytes: number;
   logKeep: number;
+  // Percorso del file settings.json (le chiavi curate di /settings, con
+  // precedenza su .env: vedi loadConfig).
+  settingsFile: string;
 }
 
 function expandHome(p: string): string {
@@ -55,31 +64,39 @@ function parseLevel(env: NodeJS.ProcessEnv, key: string, fallback: LogLevel): Lo
   return (LOG_LEVELS as string[]).includes(raw) ? (raw as LogLevel) : fallback;
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const stateDir = expandHome(env.STATE_DIR ?? '~/.claude-omni-rc');
+export function resolveStateDir(env: NodeJS.ProcessEnv): string {
+  return expandHome(env.STATE_DIR ?? '~/.claude-omni-rc');
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, settings: UserSettings = {}): Config {
+  const s = sanitizeSettings(settings);
+  const stateDir = resolveStateDir(env);
   return {
     telegramBotToken: env.TELEGRAM_BOT_TOKEN ?? '',
     allowedUserIds: (env.ALLOWED_USER_IDS ?? '')
       .split(',').map(s => s.trim()).filter(Boolean).map(Number),
     pairingCode: env.PAIRING_CODE || undefined,
     ollamaBaseUrl: env.OLLAMA_BASE_URL ?? 'http://127.0.0.1:11434',
-    defaultModel: env.DEFAULT_MODEL ?? 'deepseek-v4-flash:cloud',
-    defaultPermissionMode: env.DEFAULT_PERMISSION_MODE === 'auto' ? 'auto' : 'standard',
-    maxHeadlessSessions: parseNum(env, 'MAX_HEADLESS_SESSIONS', 2),
-    permissionTimeoutSeconds: parseNum(env, 'PERMISSION_TIMEOUT_SECONDS', 120),
+    defaultModel: s.defaultModel ?? env.DEFAULT_MODEL ?? 'deepseek-v4-flash:cloud',
+    defaultPermissionMode: s.defaultPermissionMode ?? (env.DEFAULT_PERMISSION_MODE === 'auto' ? 'auto' : 'standard'),
+    defaultEffort: s.defaultEffort
+      ?? ((EFFORT_LEVELS as readonly string[]).includes(env.DEFAULT_EFFORT ?? '') ? env.DEFAULT_EFFORT as EffortLevel : 'medium'),
+    maxHeadlessSessions: s.maxHeadlessSessions ?? parseNum(env, 'MAX_HEADLESS_SESSIONS', 2),
+    permissionTimeoutSeconds: s.permissionTimeoutSeconds ?? parseNum(env, 'PERMISSION_TIMEOUT_SECONDS', 120),
     workspaceDirs: (env.WORKSPACE_DIRS ?? '').split(':').map(s => expandHome(s.trim())).filter(Boolean),
     stateDir,
     inboxDir: env.INBOX_DIR ?? join(stateDir, 'inbox'),
     projectsDir: expandHome(env.PROJECTS_DIR ?? '~/.claude/projects'),
     apiPort: parseNum(env, 'API_PORT', 4123),
-    armedOnStart: env.ARMED_ON_START === 'true',
+    armedOnStart: s.armedOnStart ?? env.ARMED_ON_START === 'true',
     idleGraceMs: parseNum(env, 'IDLE_GRACE_MS', 3000),
     pollIntervalMs: parseNum(env, 'POLL_INTERVAL_MS', 500),
     cwdRefreshMs: parseNum(env, 'CWD_REFRESH_MS', 10_000),
-    noUpdateCheck: Boolean(env.CLAUDE_OMNI_RC_NO_UPDATE_CHECK),
+    noUpdateCheck: s.noUpdateCheck ?? Boolean(env.CLAUDE_OMNI_RC_NO_UPDATE_CHECK),
     logLevel: parseLevel(env, 'LOG_LEVEL', 'info'),
     logFile: expandHome(env.LOG_FILE ?? join(stateDir, 'logs', 'daemon.jsonl')),
     logMaxBytes: parseNum(env, 'LOG_MAX_BYTES', 5_000_000),
     logKeep: parseNum(env, 'LOG_KEEP', 3),
+    settingsFile: join(stateDir, 'settings.json'),
   };
 }

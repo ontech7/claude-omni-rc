@@ -21,6 +21,7 @@ function makeWatcher(tmuxSessions: string[] = [], serverUp = true, env: Record<s
     paneCommand: vi.fn(async () => 'ollama'), // default: claude attivo nel pane
     claudeCwd: vi.fn(async (_t: string, _tree?: unknown): Promise<string | undefined> => undefined), // default: nessun processo claude distinguibile
     claudeModel: vi.fn(async (_t: string, _tree?: unknown): Promise<string | undefined> => undefined), // default: nessun --model leggibile
+    claudeEffort: vi.fn(async (_t: string, _tree?: unknown): Promise<string | undefined> => undefined), // default: nessun --reasoning-effort leggibile
     processTree: vi.fn(async () => ({ children: new Map<string, string[]>(), comms: new Map<string, string>() })),
   };
   const watcher = new TmuxWatcher({ config, manager, tmux: tmux as any });
@@ -46,6 +47,14 @@ describe('TmuxWatcher', () => {
     await (watcher as any).poll();
     const s1 = manager.findByTmuxTarget('claude:proj1');
     expect(s1?.model).toBe('claude-sonnet-5');
+  });
+  it('records the claude --reasoning-effort on registration when readable', async () => {
+    const { manager, watcher, tmux } = makeWatcher(['claude:proj1']);
+    tmux.claudeEffort.mockResolvedValue('high');
+    manager.setArmed(true);
+    await (watcher as any).poll();
+    const s1 = manager.findByTmuxTarget('claude:proj1');
+    expect(s1?.effort).toBe('high');
   });
   it('does nothing when disarmed', async () => {
     const { manager, watcher } = makeWatcher(['claude:proj1']);

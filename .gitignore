@@ -12,3 +12,6 @@ __pycache__/
 
 # Local tool state (Serena MCP)
 .serena/
+
+# Git worktrees
+.worktrees/

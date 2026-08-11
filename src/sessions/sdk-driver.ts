@@ -81,6 +81,10 @@ export class SdkDriver {
           resume: session.claudeSessionId,
           permissionMode: 'default',
           additionalDirectories: [config.inboxDir],
+          // Effort di ragionamento (se la sessione ne ha uno — default
+          // DEFAULT_EFFORT per le headless). L'SDK lo ignora/declassa per i
+          // modelli che non lo supportano: comportamento SDK, non nostro.
+          ...(session.effort ? { effort: session.effort } : {}),
           abortController: ac,
           env,
           canUseTool: (toolName, input, opts) => {

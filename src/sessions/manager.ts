@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Bus } from '../bus.js';
 import type { StateStore, StateFile } from '../state.js';
-import type { Session, SessionKind, SessionStatus } from '../types.js';
+import type { Session, SessionKind, SessionStatus, EffortLevel } from '../types.js';
 
 export interface ManagerDeps {
   bus: Bus;
@@ -40,16 +40,17 @@ export class SessionManager {
     return { id: randomUUID(), kind, title, projectDir, status: 'idle', lastActivity: now, createdAt: now };
   }
 
-  createHeadless(input: { title: string; projectDir: string; model?: string; permissionMode?: 'auto' | 'standard' }): Session {
+  createHeadless(input: { title: string; projectDir: string; model?: string; permissionMode?: 'auto' | 'standard'; effort?: EffortLevel }): Session {
     const s = this.makeSession('headless', input.title, input.projectDir);
     if (input.model) s.model = input.model;
+    if (input.effort) s.effort = input.effort;
     s.permissionMode = input.permissionMode ?? 'standard';
     this.state.sessions.push(s);
     this.emitUpdated(s.id);
     return s;
   }
 
-  registerTerminal(input: { title: string; projectDir: string; tmuxTarget?: string; model?: string }): Session {
+  registerTerminal(input: { title: string; projectDir: string; tmuxTarget?: string; model?: string; effort?: EffortLevel }): Session {
     // dedupe: per target tmux se presente, altrimenti per project dir
     const existing = input.tmuxTarget
       ? this.findByTmuxTarget(input.tmuxTarget)
@@ -58,6 +59,7 @@ export class SessionManager {
     const s = this.makeSession('terminal', input.title, input.projectDir);
     if (input.tmuxTarget) s.tmuxTarget = input.tmuxTarget;
     if (input.model) s.model = input.model;
+    if (input.effort) s.effort = input.effort;
     this.state.sessions.push(s);
     this.emitUpdated(s.id);
     return s;

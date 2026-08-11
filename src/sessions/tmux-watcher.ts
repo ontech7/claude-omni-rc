@@ -1,11 +1,12 @@
 import type { Config } from '../config.js';
+import type { EffortLevel } from '../types.js';
 import type { SessionManager } from './manager.js';
 import type { TmuxClient, ProcessTree } from './tmux-inject.js';
 
 export interface WatcherDeps {
   config: Config;
   manager: SessionManager;
-  tmux: Pick<TmuxClient, 'listSessions' | 'serverRunning' | 'paneCwd' | 'paneCommand' | 'claudeCwd' | 'claudeModel'>
+  tmux: Pick<TmuxClient, 'listSessions' | 'serverRunning' | 'paneCwd' | 'paneCommand' | 'claudeCwd' | 'claudeModel' | 'claudeEffort'>
     & Partial<Pick<TmuxClient, 'processTree'>>;
 }
 
@@ -91,8 +92,12 @@ export class TmuxWatcher {
       // non leggibile → il chiamante usa DEFAULT_MODEL.
       let model: string | undefined;
       try { model = await this.deps.tmux.claudeModel(target, tree); } catch { /* best-effort */ }
+      // Effort del processo claude (`--reasoning-effort <livello>`), per /diag.
+      // Best-effort: undefined se non leggibile → la resa mostra '—'.
+      let effort: EffortLevel | undefined;
+      try { effort = await this.deps.tmux.claudeEffort(target, tree); } catch { /* best-effort */ }
       this.cwdCheckedAt.set(target, Date.now());
-      this.deps.manager.registerTerminal({ title: name, projectDir, tmuxTarget: target, model });
+      this.deps.manager.registerTerminal({ title: name, projectDir, tmuxTarget: target, model, effort });
       this.deps.manager.persist();
     }
     // refresh: il cwd del PROCESSO claude può cambiare (il CLI sposta la sessione

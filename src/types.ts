@@ -1,3 +1,10 @@
+// Effort di ragionamento dei modelli che lo supportano (Claude nativo). Le
+// sessioni terminali lo scoprono dalla riga di comando (`--reasoning-effort`),
+// le headless lo ricevono da /new --effort (default DEFAULT_EFFORT). 'max' è
+// riservato a pochi modelli e non è esposto qui: si sceglie esplicitamente via CLI.
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
 export type SessionKind = 'headless' | 'terminal';
 export type SessionStatus = 'idle' | 'running' | 'awaiting-input' | 'waiting-permission' | 'error' | 'stopped';
 
@@ -7,6 +14,7 @@ export interface Session {
   title: string;
   projectDir: string;
   model?: string;
+  effort?: EffortLevel;
   permissionMode?: 'auto' | 'standard'; // automode default: nessun prompt di permesso
   status: SessionStatus;
   claudeSessionId?: string;

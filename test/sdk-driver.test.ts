@@ -327,4 +327,18 @@ describe('SdkDriver', () => {
       }
     }
   });
+  it('passes the session effort to the SDK query options', async () => {
+    const { sdk, session } = makeDriver();
+    const s = session; // sessione base senza effort; creiamone una con effort esplicito
+    queryMock.mockImplementationOnce(async function* () { yield resultMsg(s.id, 'ok'); });
+    await sdk.runTurn(s.id, 'hello');
+    expect(queryMock.mock.calls[0][0].options.effort).toBeUndefined();
+
+    queryMock.mockReset();
+    const { sdk: sdk2, manager } = makeDriver();
+    const withEffort = manager.createHeadless({ title: 't', projectDir: '/tmp/x', model: 'm', effort: 'high' });
+    queryMock.mockImplementationOnce(async function* () { yield resultMsg(withEffort.id, 'ok'); });
+    await sdk2.runTurn(withEffort.id, 'hello');
+    expect(queryMock.mock.calls[0][0].options.effort).toBe('high');
+  });
 });
