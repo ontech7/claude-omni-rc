@@ -127,6 +127,20 @@ describe('SessionManager', () => {
     const { manager } = makeManager();
     expect(manager.getActive()).toBeUndefined();
   });
+  it('stores effort on headless sessions when provided', () => {
+    const { manager } = makeManager();
+    const s = manager.createHeadless({ title: 't', projectDir: '/tmp/x', effort: 'high' });
+    expect(s.effort).toBe('high');
+    const plain = manager.createHeadless({ title: 'p', projectDir: '/tmp/p' });
+    expect(plain.effort).toBeUndefined();
+  });
+  it('stores effort on terminal registration when provided', () => {
+    const { manager } = makeManager();
+    const s = manager.registerTerminal({ title: 'x', projectDir: '/tmp/x', tmuxTarget: 'claude:x', model: 'claude-sonnet-5', effort: 'low' });
+    expect(s.effort).toBe('low');
+    const plain = manager.registerTerminal({ title: 'y', projectDir: '/tmp/y', tmuxTarget: 'claude:y' });
+    expect(plain.effort).toBeUndefined();
+  });
 });
 
 describe('SessionManager chat id', () => {
