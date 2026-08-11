@@ -1,7 +1,6 @@
-// Presentazione pura per la chat Telegram: markdown → HTML, bilanciamento e
-// split dei tag, descrizione delle tool call. Nessun I/O e nessuno stato, così
-// ogni regola di formattazione si testa come input → output invece che
-// attraverso il bot.
+// Pure presentation for Telegram chat: markdown → HTML, tag balancing and
+// splitting, tool call descriptions. No I/O and no state, so each formatting
+// rule can be tested as input → output rather than through the bot.
 
 // parse_mode 'HTML' rigetta markup malformato (es. '<b' sbilanciato) e il send è
 // dentro .catch(()=>{}) → il messaggio sparirebbe in silenzio. Escapare ogni frammento
