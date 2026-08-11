@@ -51,7 +51,8 @@ telefono notifica solo quando serve una persona.
   heading → `<b>`, `- ` → `• `, link. Non copre: linguaggio dei blocchi di codice,
   `>` citazioni, `~~`, liste ordinate/annidate, tabelle, `---`.
 - `balanceHtml()` e `splitHtmlMessage()` conoscono solo i tag `b|i|code|pre|a`.
-- Nessun uso di `disable_notification`, `link_preview_options`, `setMyCommands`.
+- Nessun uso di `disable_notification` né di `link_preview_options`.
+  (`setMyCommands` è arrivato con la 0.4.0, dopo la stesura di questo spec.)
 - `src/sessions/sdk-driver.ts` (righe 109-161) **ignora `parent_tool_use_id`**.
   L'SDK marca con quel campo ogni messaggio che proviene da un subagent, e per
   default emette già i blocchi `tool_use`/`tool_result` dei subagent
@@ -314,8 +315,11 @@ presentazione, e sta fuori da questo branch.
 - **`setMyCommands()`** (menu `/` di Telegram popolato con i comandi e le loro
   descrizioni). Proposto e **scartato dall'utente**: è discovery dei comandi, non
   leggibilità della chat, ed è l'unico intervento che tocca il ciclo di avvio del
-  bot invece del solo rendering. Resta un'aggiunta facile e indipendente in
-  futuro.
+  bot invece del solo rendering.
+  **Aggiornamento (0.4.0):** è arrivato comunque, per altra via, col merge di
+  `feat/settings-diag` (`bot/telegram.ts`, `setMyCommands` nell'avvio del bot).
+  Nessun task di questo piano lo tocca: resta fuori scope, ma non è più
+  "mancante".
 - Supergruppi e topic (esclusi esplicitamente dall'utente).
 - Invio degli output lunghi come documento (`sendDocument`).
 

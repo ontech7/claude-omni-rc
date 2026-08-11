@@ -9,7 +9,24 @@
 **Tech Stack:** Node 22+, TypeScript strict ESM (nessuno step di build, `tsx` esegue i sorgenti), Vitest, grammY, `@anthropic-ai/claude-agent-sdk`.
 
 **Spec di riferimento:** `docs/superpowers/specs/2026-08-11-telegram-chat-ux-design.md`
-**Branch:** `feat/telegram-ux` (già creato, tre commit di docs)
+**Branch:** `feat/telegram-ux`, ribasato su `main` a `3f7f406` (release 0.4.0)
+
+> **I numeri di riga sono indicativi**, verificati contro `3f7f406`. `main` si è
+> già mosso una volta sotto questo piano — il merge di `feat/settings-diag` ha
+> spostato ogni funzione di `bot/telegram.ts` di ~68 righe. **Localizza sempre
+> per nome di simbolo**, non per numero: se il numero non torna, il simbolo è
+> l'autorità.
+
+> **Comando di test su questa macchina.** Due test di `test/sdk-driver.test.ts`
+> dipendono dall'ambiente: `runTurn` fa `{...process.env}` e la shell del daemon
+> esporta `ANTHROPIC_BASE_URL`, che fa scegliere a `resolveProvider` il provider
+> sbagliato. Passano in CI, falliscono qui. È un difetto preesistente su `main`,
+> **fuori dallo scope di questo piano**: non tentare di correggerlo. Usa sempre
+> ```bash
+> env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY npm test
+> ```
+> Baseline attesa con quel comando: **382 test, 0 fallimenti**. Un fallimento
+> diverso da questo è tuo e va corretto.
 
 ## Global Constraints
 
@@ -59,12 +76,12 @@ Spostamento puro, **zero cambi di comportamento**. Serve a dare una casa alle fu
 
 Taglia da `bot/telegram.ts` e incolla in un nuovo `bot/render.ts`, **senza modificarne il corpo**, queste definizioni con i loro commenti:
 
-- `htmlEscape` (riga 128)
-- `mdToHtml` (riga 157)
-- `balanceHtml` (riga 184)
-- `SEND_MAX_CHARS` (riga 220) e la costante `HTML_TAG` (riga 221)
-- `splitHtmlMessage` (riga 223)
-- `truncateAtWord` (riga 650)
+- `htmlEscape` (riga 196)
+- `mdToHtml` (riga 225)
+- `balanceHtml` (riga 252)
+- `SEND_MAX_CHARS` (riga 288) e la costante `HTML_TAG` (riga 289)
+- `splitHtmlMessage` (riga 291)
+- `truncateAtWord` (riga 718)
 
 Intestazione del file nuovo:
 
@@ -95,10 +112,10 @@ import { mdToHtml, balanceHtml, splitHtmlMessage, truncateAtWord, htmlEscape } f
 ```
 
 Sposta dentro, invariati, i blocchi `describe` di `test/telegram.test.ts`:
-- `describe('mdToHtml v2 / balanceHtml', ...)` (riga 493)
-- `describe('splitHtmlMessage', ...)` (riga 865)
+- `describe('mdToHtml v2 / balanceHtml', ...)` (riga 551)
+- `describe('splitHtmlMessage', ...)` (riga 923)
 
-In `test/telegram.test.ts`: togli `splitHtmlMessage`, `mdToHtml`, `balanceHtml`, `truncateAtWord` dall'import da `../bot/telegram.js` e aggiungi `import { truncateAtWord, mdToHtml } from '../bot/render.js';` (servono ancora a `describe('renderHistory v2 / truncateAtWord')` alla riga 550 e a `describe('renderHistory')` alla riga 285).
+In `test/telegram.test.ts`: togli `splitHtmlMessage`, `mdToHtml`, `balanceHtml`, `truncateAtWord` dall'import da `../bot/telegram.js` e aggiungi `import { truncateAtWord, mdToHtml } from '../bot/render.js';` (servono ancora a `describe('renderHistory v2 / truncateAtWord')` alla riga 608 e a `describe('renderHistory')` alla riga 343).
 
 - [ ] **Step 4: Verificare che tutto passi immutato**
 
@@ -491,9 +508,9 @@ git commit -m "feat(render): catalogo deterministico per la descrizione delle to
 ### Task 4: Collegare il catalogo e rimuovere il summarizer via LLM
 
 **Files:**
-- Modify: `bot/telegram.ts` (righe 681-717, 1284-1317, 2445-2456, campi privati 1073/1077)
-- Modify: `src/ollama.ts` (rimuove `summarize`, righe 50-85)
-- Modify: `test/telegram.test.ts` (rimuove `describe('summarizeTool')` riga 644 e `describe('SummarizeQueue')` riga 459)
+- Modify: `bot/telegram.ts` (righe 749-785, 1359-1394, 2561-2572, campi privati 1146/1150)
+- Modify: `src/ollama.ts` (rimuove `summarize`, righe 54-87)
+- Modify: `test/telegram.test.ts` (rimuove `describe('summarizeTool')` riga 702 e `describe('SummarizeQueue')` riga 517)
 - Modify: `test/ollama.test.ts` (rimuove i test di `summarize`)
 
 **Interfaces:**
@@ -503,19 +520,19 @@ git commit -m "feat(render): catalogo deterministico per la descrizione delle to
 - [ ] **Step 1: Rimuovere `summarizeTool` e il percorso LLM**
 
 Da `bot/telegram.ts` cancella:
-- `summarizeTool` (righe 677-717) e il suo commento
-- `SummarizeQueue` (riga 989) e il tipo/classe interi
-- `llmSummarize` (righe 1281-1298), `summarizeToolLine` (1300-1311), `resetSummarize` (1313-1317)
+- `summarizeTool` (righe 745-785) e il suo commento
+- `SummarizeQueue` (riga 1061) e il tipo/classe interi
+- `llmSummarize` (righe 1359-1377), `summarizeToolLine` (1379-1388), `resetSummarize` (1390-1394)
 - i campi `private summarizeQueues` (1073) e `private summaryCache` (1077)
-- `ollama` dalle `deps` **solo se non serve più altrove**: serve ancora (riga 2315 usa `hasVision`), quindi **lascialo**.
+- `ollama` dalle `deps` **solo se non serve più altrove**: serve ancora (riga 2431 usa `hasVision`), quindi **lascialo**.
 
 Ogni chiamata a `this.resetSummarize(x)` va cancellata insieme alla funzione: cerca `resetSummarize` e rimuovi le chiamate nei gestori di `session.text`, `session.prompt`, `session.permission`, `session.dialog`, `session.result`, `session.error`.
 
-Da `src/ollama.ts` cancella `summarize()` (righe 50-85). Restano `hasVision`, `modelContext`, `listModels`.
+Da `src/ollama.ts` cancella `summarize()` (righe 54-87). Restano `hasVision`, `modelContext`, `listModels`.
 
 - [ ] **Step 2: Collegare `describeTool` nel gestore `session.tool`**
 
-In `bot/telegram.ts`, sostituisci il corpo del gestore (righe 2445-2456) con:
+In `bot/telegram.ts`, sostituisci il corpo del gestore (righe 2561-2572) con:
 
 ```ts
     bus.on('session.tool', e => {
@@ -534,7 +551,7 @@ Aggiungi all'import da `./render.js`: `describeTool`, `renderToolLine`.
 
 - [ ] **Step 3: Ripulire i test**
 
-Da `test/telegram.test.ts`: cancella `describe('summarizeTool', ...)` (riga 644) e `describe('SummarizeQueue', ...)` (riga 459); togli `summarizeTool` e `SummarizeQueue` dall'import.
+Da `test/telegram.test.ts`: cancella `describe('summarizeTool', ...)` (riga 702) e `describe('SummarizeQueue', ...)` (riga 517); togli `summarizeTool` e `SummarizeQueue` dall'import.
 Da `test/ollama.test.ts`: cancella i `describe`/`it` che esercitano `summarize`.
 
 - [ ] **Step 4: Verificare**
@@ -768,8 +785,8 @@ produce un messaggio malformato che Telegram rifiuta in silenzio."
 ### Task 6: Marcare i fallimenti delle tool
 
 **Files:**
-- Modify: `bot/telegram.ts` (`ToolBurstAggregator`, riga 916; gestore `session.tool`)
-- Modify: `test/telegram.test.ts` (`describe('ToolBurstAggregator')`, riga 357)
+- Modify: `bot/telegram.ts` (`ToolBurstAggregator`, riga 988; gestore `session.tool`)
+- Modify: `test/telegram.test.ts` (`describe('ToolBurstAggregator')`, riga 415)
 
 **Interfaces:**
 - Consumes: `renderToolLine` (Task 3)
@@ -1025,8 +1042,8 @@ git commit -m "feat(bot): bolle tool silenziose, senza anteprime e richiudibili 
 ### Task 8: Contratto del bus e `sdk-driver` per i subagent
 
 **Files:**
-- Modify: `src/types.ts` (righe 55-87)
-- Modify: `src/sessions/sdk-driver.ts` (righe 107-175)
+- Modify: `src/types.ts` (righe 63-95)
+- Modify: `src/sessions/sdk-driver.ts` (righe 111-180)
 - Modify: `test/sdk-driver.test.ts`
 
 **Interfaces:**
@@ -1173,7 +1190,7 @@ Nel ciclo `for await (const msg of stream)`, all'inizio:
         const parentToolUseId = ('parent_tool_use_id' in msg && msg.parent_tool_use_id) ? msg.parent_tool_use_id : undefined;
 ```
 
-Aggiungi `parentToolUseId` agli oggetti emessi per `session.text` (riga 120) e per entrambi i `session.tool` (righe 141 e 156).
+Aggiungi `parentToolUseId` agli oggetti emessi per `session.text` (riga 124) e per entrambi i `session.tool` (righe 146 e 161).
 
 Aggiungi, prima del ramo `msg.type === 'result'`:
 
@@ -1358,7 +1375,7 @@ git commit -m "feat(render): scheda di avanzamento per i subagent"
 ### Task 10: Instradare i subagent nella scheda
 
 **Files:**
-- Modify: `bot/telegram.ts` (`parseCallbackData` righe 89-123, `subscribeBus`, `onCallback`)
+- Modify: `bot/telegram.ts` (`parseCallbackData` righe 165-191, `subscribeBus`, `onCallback`)
 - Modify: `test/telegram.test.ts`
 
 **Interfaces:**
