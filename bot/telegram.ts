@@ -802,6 +802,10 @@ export class ToolBurstAggregator {
   // (await sul sink) cattura la generazione all'inizio e la ri-verifica dopo
   // l'await: se close() è scattato nel frattempo, non riapre la bubble chiusa.
   private generation = 0;
+  // toolUseId → indice della riga dentro la bolla aperta: serve a riscrivere
+  // in place la riga giusta quando arriva il suo tool_result fallito.
+  private lineIds: (string | undefined)[] = [];
+  private lines: string[] = [];
 
   constructor(private sink: ToolBurstSink, private maxLen = 3800, private windowMs = 5000) {}
 
@@ -811,9 +815,9 @@ export class ToolBurstAggregator {
   // catturata QUI (non in pushNow): se close() scatta tra push() e l'avvio di
   // pushNow(), la push sa di appartenere alla generazione precedente e non
   // riapre la bubble chiusa.
-  push(line: string): Promise<void> {
+  push(line: string, toolUseId?: string): Promise<void> {
     const gen = this.generation;
-    this.chain = this.chain.then(() => this.pushNow(line, gen)).catch(() => { /* la catena sopravvive a un errore inatteso del sink */ });
+    this.chain = this.chain.then(() => this.pushNow(line, toolUseId, gen)).catch(() => { /* la catena sopravvive a un errore inatteso del sink */ });
     return this.chain;
   }
 
@@ -823,15 +827,17 @@ export class ToolBurstAggregator {
     return !!this.open && Date.now() - this.open.at < this.windowMs;
   }
 
-  private async pushNow(line: string, gen: number): Promise<void> {
+  private async pushNow(line: string, toolUseId: string | undefined, gen: number): Promise<void> {
     const open = this.open;
     const fresh = open && Date.now() - open.at < this.windowMs;
     if (this.lastWasTool && fresh) {
       // riga vuota tra una tool call e l'altra: la bubble non diventa un muro
       // di testo, ogni tool call resta riconoscibile come voce separata.
-      const next = `${open.text}\n\n${line}`;
+      const next = [...this.lines, line].join('\n\n');
       if (next.length <= this.maxLen && await this.sink.edit(open.messageId, next)) {
         if (gen !== this.generation) return; // chiusa nel frattempo: non toccare
+        this.lines.push(line);
+        this.lineIds.push(toolUseId);
         open.text = next;
         open.at = Date.now();
         return;
@@ -841,6 +847,8 @@ export class ToolBurstAggregator {
     if (gen !== this.generation) return; // chiusa nel frattempo: non riaprire
     if (id !== undefined) {
       this.open = { messageId: id, text: line, at: Date.now() };
+      this.lines = [line];
+      this.lineIds = [toolUseId];
       this.lastWasTool = true;
     } else {
       // send fallita (es. chatId assente): senza bubble aperta la prossima push
@@ -849,10 +857,29 @@ export class ToolBurstAggregator {
     }
   }
 
+  // Only failures are signalled: the EditThrottler allows 1 op/s per chat, and
+  // marking every success would double the calls for information that the
+  // absence of ❌ already conveys.
+  async markFailed(toolUseId: string, reason: string): Promise<void> {
+    const open = this.open;
+    if (!open) return;                       // bubble closed: do not reopen
+    const i = this.lineIds.indexOf(toolUseId);
+    if (i === -1) return;
+    if (this.lines[i].startsWith('❌ ')) return; // already marked
+    const short = reason.split('\n').find(l => l.trim())?.slice(0, 100) ?? '';
+    this.lines[i] = `❌ ${this.lines[i]}${short ? `\n<i>${htmlEscape(short)}</i>` : ''}`;
+    const next = this.lines.join('\n\n');
+    if (next.length <= this.maxLen && await this.sink.edit(open.messageId, next)) {
+      open.text = next;
+    }
+  }
+
   close(): void {
     this.generation++;
     this.open = undefined;
     this.lastWasTool = false;
+    this.lines = [];
+    this.lineIds = [];
   }
 }
 
@@ -2271,11 +2298,18 @@ export class TelegramBot {
     });
     bus.on('session.tool', e => {
       if (!this.passes('tool', e.sessionId, e.eventId).deliver) return;
+      if (e.kind === 'tool_result') {
+        if (e.isError && e.toolUseId) {
+          const text = typeof e.result === 'string' ? e.result : JSON.stringify(e.result ?? '');
+          void this.toolBurst(e.sessionId).markFailed(e.toolUseId, text);
+        }
+        return;
+      }
       if (e.kind !== 'tool_use' || !e.input) return;
       this.typing.start(); // il modello sta lavorando di nuovo
       const session = this.deps.manager.get(e.sessionId);
       const line = renderToolLine(describeTool(e.toolName, e.input, session?.projectDir));
-      void this.toolBurst(e.sessionId).push(line);
+      void this.toolBurst(e.sessionId).push(line, e.toolUseId);
     });
     bus.on('session.permission', ({ permission }) => {
       if (!this.passes('permission', permission.sessionId, undefined).deliver) return;

@@ -513,6 +513,37 @@ describe('ToolBurstAggregator', () => {
     expect(sends).toEqual(['t1', 't2']);
     expect(sink.edit).not.toHaveBeenCalled();
   });
+  it('marks as failed the line of the corresponding tool', async () => {
+    const edits: string[] = [];
+    const agg = new ToolBurstAggregator({
+      edit: async (_id, text) => { edits.push(text); return true; },
+      send: async () => 1,
+    });
+    await agg.push('📖 <b>Read</b>', 'tu-1');
+    await agg.push('⚡ <b>Bash</b>', 'tu-2');
+    await agg.markFailed('tu-2', 'command not found');
+    const last = edits[edits.length - 1];
+    expect(last).toContain('❌ ⚡ <b>Bash</b>');
+    expect(last).toContain('command not found');
+    expect(last).toContain('📖 <b>Read</b>');   // the healthy line stays intact
+    expect(last).not.toContain('❌ 📖');
+  });
+  it('ignores a failure for a tool that is not in the bubble', async () => {
+    const agg = new ToolBurstAggregator({ edit: async () => true, send: async () => 1 });
+    await agg.push('📖 <b>Read</b>', 'tu-1');
+    await expect(agg.markFailed('unknown', 'boom')).resolves.toBeUndefined();
+  });
+  it('ignores a failure after the bubble is closed', async () => {
+    let edited = false;
+    const agg = new ToolBurstAggregator({
+      edit: async () => { edited = true; return true; },
+      send: async () => 1,
+    });
+    await agg.push('⚡ <b>Bash</b>', 'tu-1');
+    agg.close();
+    await agg.markFailed('tu-1', 'boom');
+    expect(edited).toBe(false); // reopening would break chronological order
+  });
 });
 
 describe('promptMessage v2 / promptLayout', () => {
