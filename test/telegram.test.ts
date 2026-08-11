@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { resolveHeadlessProjectDir, isPrivateChat, parseCommand, parseNewFlags, parseSettingsCommand, formatSettingsReport, formatSettingsKey, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToKeys, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, formatPaneContext, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
+import { resolveHeadlessProjectDir, isPrivateChat, parseCommand, parseNewFlags, parseSettingsCommand, formatSettingsReport, formatSettingsKey, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, stopReply, TypingIndicator, narrationPlan, answerSummary, answerToKeys, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, formatPaneContext, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
 import type { ToolBurstSink, PromptKeyEntry } from '../bot/telegram.js';
 import { truncateAtWord, mdToHtml } from '../bot/render.js';
 import { loadConfig } from '../src/config.js';
@@ -515,40 +515,6 @@ describe('ToolBurstAggregator', () => {
   });
 });
 
-describe('SummarizeQueue', () => {
-  function makeQueue() {
-    const lines: string[] = [];
-    const q = new SummarizeQueue(line => lines.push(line));
-    return { q, lines };
-  }
-  it('flushes summaries in order even when they resolve out of order', () => {
-    const { q, lines } = makeQueue();
-    const a = q.add(); // indice 0
-    const b = q.add(); // indice 1
-    b('line2'); // risolve prima: deve aspettare l'indice 0
-    expect(lines).toEqual([]);
-    a('line1');
-    expect(lines).toEqual(['line1', 'line2']);
-  });
-  it('reset() discards summaries that resolve after a turn boundary', () => {
-    const { q, lines } = makeQueue();
-    const a = q.add();
-    q.reset();
-    a('line1');
-    expect(lines).toEqual([]);
-  });
-  it('reset() clears the buffer so stale entries do not block new ones', () => {
-    const { q, lines } = makeQueue();
-    const a = q.add(); // indice 0
-    const b = q.add(); // indice 1
-    b('line2'); // bufferizzata, in attesa dell'indice 0
-    q.reset(); // scarta l'indice 1 stantio
-    const c = q.add(); // indice 2
-    c('line3');
-    expect(lines).toEqual(['line3']);
-  });
-});
-
 describe('promptMessage v2 / promptLayout', () => {
   it('lists every option with its number and description, HTML-escaped', () => {
     const qs = [{ header: 'Lens', question: 'Pick <one>?', options: [{ label: 'a', description: 'desc <x>' }, { label: 'b' }] }];
@@ -666,37 +632,6 @@ describe('TypingIndicator', () => {
   it('stop without start is a no-op', () => {
     const t = new TypingIndicator(async () => {});
     expect(() => t.stop()).not.toThrow();
-  });
-});
-
-describe('summarizeTool', () => {
-  it('identifies every tool call with the gear, then the key field', () => {
-    expect(summarizeTool('Bash', { command: 'npm test' })).toBe('⚙️ npm test');
-    expect(summarizeTool('WebFetch', { url: 'https://x.com' })).toBe('⚙️ https://x.com');
-    expect(summarizeTool('Grep', { pattern: 'TODO' })).toBe('⚙️ TODO');
-  });
-  it('prefixes Read/Write/Edit with a verb — same path, different action', () => {
-    expect(summarizeTool('Read', { file_path: 'src/foo.ts' })).toBe('⚙️ Read src/foo.ts');
-    expect(summarizeTool('Write', { file_path: 'src/foo.ts' })).toBe('⚙️ Write src/foo.ts');
-    expect(summarizeTool('Edit', { file_path: 'src/foo.ts' })).toBe('⚙️ Edit src/foo.ts');
-    expect(summarizeTool('MultiEdit', { file_path: 'src/foo.ts' })).toBe('⚙️ Edit src/foo.ts');
-    expect(summarizeTool('NotebookEdit', { notebook_path: 'nb.ipynb' })).toBe('⚙️ Edit nb.ipynb');
-  });
-  it('summarizes Task (sub-agent) with its description', () => {
-    expect(summarizeTool('Task', { description: 'Fix flaky tests', prompt: 'x'.repeat(500) })).toBe('⚙️ Agent: Fix flaky tests');
-    expect(summarizeTool('Task', { prompt: 'x'.repeat(500) })).toBe('⚙️ Agent');
-  });
-  it('summarizes TodoWrite/TodoRead without dumping the todo list', () => {
-    expect(summarizeTool('TodoWrite', { todos: [{ content: 'a' }] })).toBe('⚙️ Updates the task list');
-    expect(summarizeTool('TodoRead', {})).toBe('⚙️ Updates the task list');
-  });
-  it('falls back to the tool name and the first string value', () => {
-    expect(summarizeTool('SomeTool', { a: 1, b: 'hello' })).toBe('⚙️ SomeTool — hello');
-    expect(summarizeTool('SomeTool', { a: 1 })).toBe('⚙️ SomeTool');
-  });
-  it('truncates long values with an explicit marker', () => {
-    const long = 'x'.repeat(200);
-    expect(summarizeTool('Bash', { command: long })).toBe(`⚙️ ${'x'.repeat(80)}…`);
   });
 });
 

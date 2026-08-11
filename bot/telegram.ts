@@ -22,7 +22,7 @@ import { readRecentMessages, resolveSessionTranscript } from '../src/sessions/tr
 import { isOllamaProvider, fetchOllamaUsage, fetchAnthropicUsage } from '../src/usage.js';
 import { log } from '../src/log.js';
 import { CURRENT_VERSION } from '../src/update.js';
-import { htmlEscape, mdToHtml, balanceHtml, splitHtmlMessage, truncateAtWord, SEND_MAX_CHARS } from './render.js';
+import { htmlEscape, mdToHtml, balanceHtml, splitHtmlMessage, truncateAtWord, SEND_MAX_CHARS, describeTool, renderToolLine } from './render.js';
 
 // ---------- pure helpers ----------
 
@@ -593,48 +593,6 @@ export function stopReply(o: {
     : 'This terminal session has no tmux pane to interrupt.';
 }
 
-// Riassunto leggibile di una tool call (niente JSON grezzo): l'ingranaggio ⚙️
-// identifica la riga come tool call, seguito dal campo chiave dell'input
-// (fallback al nome + primo valore). È il fallback quando la summary via LLM
-// non è disponibile (Ollama lento/giù).
-export function summarizeTool(toolName: string, input: Record<string, unknown>): string {
-  const s = (v: unknown): string => (typeof v === 'string' ? v : '');
-  const first = (): string => {
-    for (const v of Object.values(input)) {
-      if (typeof v === 'string' && v.trim()) return v;
-    }
-    return '';
-  };
-  const pick = (...keys: string[]): string => {
-    for (const k of keys) {
-      const v = s(input[k]);
-      if (v.trim()) return v;
-    }
-    return first();
-  };
-  const trunc = (v: string, max = 80): string => (v.length > max ? `${v.slice(0, max).trimEnd()}…` : v);
-
-  const name = toolName.toLowerCase();
-  if (name === 'bash') return `⚙️ ${trunc(pick('command'))}`;
-  // Read/Write/Edit senza verbo sono indistinguibili (stesso path, stesso
-  // formato) — il verbo è quello che dà contesto quando il fallback scatta.
-  if (name === 'read' || name === 'readfile') return `⚙️ Read ${trunc(pick('file_path', 'path'))}`;
-  if (name === 'write' || name === 'writefile') return `⚙️ Write ${trunc(pick('file_path', 'path'))}`;
-  if (name === 'edit' || name === 'multiedit') return `⚙️ Edit ${trunc(pick('file_path', 'path'))}`;
-  if (name === 'notebookedit') return `⚙️ Edit ${trunc(pick('notebook_path', 'path'))}`;
-  if (name === 'glob' || name === 'grep') return `⚙️ ${trunc(pick('pattern', 'query'))}`;
-  if (name === 'webfetch') return `⚙️ ${trunc(pick('url'))}`;
-  if (name === 'websearch') return `⚙️ ${trunc(pick('query'))}`;
-  if (name === 'taskcreate' || name === 'taskupdate') return `⚙️ ${trunc(pick('subject'))}`;
-  if (name === 'task') {
-    const desc = s(input['description']);
-    return desc.trim() ? `⚙️ Agent: ${trunc(desc)}` : '⚙️ Agent';
-  }
-  if (name === 'todowrite' || name === 'todoread') return '⚙️ Updates the task list';
-  const v = first();
-  return v ? `⚙️ ${toolName} — ${trunc(v)}` : `⚙️ ${toolName}`;
-}
-
 // Testo breve del modello mentre una bubble tool è aperta → si fonde nella
 // bubble (niente messaggio extra); testo lungo (una risposta vera) o nessuna
 // bubble aperta → messaggio separato. Soglia: la narrazione tra le tool call è
@@ -898,51 +856,6 @@ export class ToolBurstAggregator {
   }
 }
 
-// Coda delle summary via LLM per le tool call di una sessione: le chiamate
-// partono in parallelo ma le righe vanno pushatte in ORDINE (la bubble non deve
-// mostrare le tool in ordine sbagliato). `add()` assegna un indice e restituisce
-// il callback da chiamare quando la summary è pronta; `reset()` a fine turno
-// scarta le summary pendenti (gen) e svuota il buffer.
-//
-// Due contatori distinti: `last` assegna gli indici (0, 1, 2…), `next` è il
-// prossimo indice da fluscare. Senza questa separazione `next` avanzava in
-// `add()` e `flush()` cercava `buffer.has(next)` — sempre l'indice successivo a
-// quello appena bufferizzato — e la coda non fluscava MAI (le tool call non
-// arrivavano su Telegram).
-export class SummarizeQueue {
-  private next = 0; // prossimo indice da fluscare
-  private last = 0; // prossimo indice da assegnare
-  private buffer = new Map<number, string>();
-  private gen = 0;
-
-  constructor(private onLine: (line: string) => void) {}
-
-  add(): (line: string) => void {
-    const index = this.last++;
-    const gen = this.gen;
-    return (line: string) => {
-      if (this.gen !== gen || !line) return; // turno finito: scarta
-      this.buffer.set(index, line);
-      this.flush();
-    };
-  }
-
-  reset(): void {
-    this.gen++;
-    this.buffer.clear();
-    this.next = this.last; // gli indici stantii non bloccano i nuovi
-  }
-
-  private flush(): void {
-    while (this.buffer.has(this.next)) {
-      const line = this.buffer.get(this.next)!;
-      this.buffer.delete(this.next);
-      this.next++;
-      this.onLine(line);
-    }
-  }
-}
-
 // ---------- bot ----------
 
 // I2: correlazione opzionale per gli invii — non ogni chiamante ha un eventId
@@ -990,15 +903,6 @@ export class TelegramBot {
   // finché l'utente non seleziona quella sessione (sess:select in onCallback).
   private pendingPermissions = new Map<string, PermissionRequest[]>();
   private pendingDialogs = new Map<string, UserDialog[]>();
-  // Summary via LLM per le tool call: una coda per sessione che bufferizza i
-  // risultati (le chiamate partono in parallelo) e li pusha in ordine. `reset()`
-  // a fine turno (result/errore/domanda/permesso/testo lungo) scarta le summary
-  // pendenti: non aprono bubble dopo la fine.
-  private summarizeQueues = new Map<string, SummarizeQueue>();
-  // Cache delle summary (tool + input → riga): le tool ripetute (stesso file,
-  // stesso comando) non rifanno la chiamata a Ollama. Cap semplice: oltre 200
-  // si svuota (una cache, non un archivio).
-  private summaryCache = new Map<string, string>();
   // Indicatore "sta scrivendo…" per la sessione attiva (chat action, non un messaggio).
   private typing = new TypingIndicator(() => {
     if (!this.chatId) return Promise.resolve();
@@ -1204,43 +1108,6 @@ export class TelegramBot {
     return agg;
   }
 
-  // Summary via LLM di una tool call, con l'ingranaggio ⚙️ che la identifica
-  // come tool call. Fallback a `summarizeTool` se Ollama non risponde (timeout
-  // 5s) o restituisce vuoto.
-  private async llmSummarize(model: string, toolName: string, input: Record<string, unknown>, languageHint?: string): Promise<string> {
-    const key = `${toolName}:${JSON.stringify(input).slice(0, 200)}`;
-    const hit = this.summaryCache.get(key);
-    if (hit) return hit;
-    let line: string;
-    try {
-      const llm = await this.deps.ollama.summarize(model, toolName, input, languageHint);
-      line = `⚙️ ${llm}`;
-    } catch {
-      line = summarizeTool(toolName, input);
-    }
-    if (this.summaryCache.size >= 200) this.summaryCache.clear();
-    this.summaryCache.set(key, line);
-    return line;
-  }
-
-  // Lancia la summary per una tool call: chiamate in parallelo, risultati
-  // bufferizzati per indice e pushati in ordine (la bubble non deve mostrare le
-  // tool in ordine sbagliato). Se il turno è finito nel frattempo (gen cambiato),
-  // la summary viene scartata.
-  private summarizeToolLine(sessionId: string, model: string, toolName: string, input: Record<string, unknown>, languageHint?: string): void {
-    let q = this.summarizeQueues.get(sessionId);
-    if (!q) {
-      q = new SummarizeQueue(line => this.toolBurst(sessionId).push(htmlEscape(line)));
-      this.summarizeQueues.set(sessionId, q);
-    }
-    void this.llmSummarize(model, toolName, input, languageHint).then(q.add());
-  }
-
-  // Fine turno (o testo lungo): le summary pendenti di questa sessione vengono
-  // scartate — non devono aprire bubble dopo la risposta/errore.
-  private resetSummarize(sessionId: string): void {
-    this.summarizeQueues.get(sessionId)?.reset();
-  }
 
   private isAuthorized(ctx: Context): boolean {
     if (!isPrivateChat(ctx.chat)) return false;
@@ -2348,11 +2215,11 @@ export class TelegramBot {
       if (!gate.deliver) {
         // Fix 1: l'echo di un testo iniettato dal bot non viene reinoltrato, e
         // solo in quel caso (motivo == 'injected-echo', non un qualunque
-        // scarto) la bolla tool va chiusa e le summary pendenti scartate — per
-        // un evento scartato per altro motivo (disarmato, sessione non
-        // selezionata) questa sessione potrebbe non essere quella in cui
-        // l'iniezione sta effettivamente avvenendo.
-        if (gate.reason === 'injected-echo') { this.toolBurst(e.sessionId).close(); this.resetSummarize(e.sessionId); }
+        // scarto) la bolla tool va chiusa — per un evento scartato per altro
+        // motivo (disarmato, sessione non selezionata) questa sessione
+        // potrebbe non essere quella in cui l'iniezione sta effettivamente
+        // avvenendo.
+        if (gate.reason === 'injected-echo') { this.toolBurst(e.sessionId).close(); }
         return;
       }
       if (e.role === 'assistant') this.typing.stop(); // il testo è già l'indicatore
@@ -2366,7 +2233,6 @@ export class TelegramBot {
         return;
       }
       burst.close();
-      this.resetSummarize(e.sessionId);
       log().info('event delivering', { eventId: e.eventId, sessionId: e.sessionId, kind: 'text', role: e.role });
       // sia le headless che i transcript delle terminali arrivano come markdown.
       void this.forwardText(e.sessionId, mdToHtml(e.text), e.role, e.eventId);
@@ -2398,7 +2264,6 @@ export class TelegramBot {
       // decide se mostrarla subito (sessione attiva) o lasciarla in pending
       // (mostrata quando l'utente ci seleziona sopra, vedi sess:select).
       this.toolBurst(sessionId).close();
-      this.resetSummarize(sessionId);
       // C2: 'event delivering' NON viene più loggato qui — a questo punto non è
       // ancora vero: onSessionPrompt può accodare il set invece di mostrarlo
       // (sessione non selezionata, o un'altra domanda già a schermo). Il log
@@ -2411,20 +2276,15 @@ export class TelegramBot {
     });
     bus.on('session.tool', e => {
       if (!this.passes('tool', e.sessionId, e.eventId).deliver) return;
-      if (e.kind === 'tool_use' && e.input) {
-        this.typing.start(); // il modello sta lavorando di nuovo
-        // riassunto leggibile via LLM nella lingua della conversazione (niente
-        // JSON grezzo); fallback a summarizeTool se Ollama non risponde.
-        const session = this.deps.manager.get(e.sessionId);
-        const model = session?.model ?? this.deps.config.defaultModel;
-        const hint = this.lastUserText.get(e.sessionId);
-        this.summarizeToolLine(e.sessionId, model, e.toolName, e.input, hint);
-      }
+      if (e.kind !== 'tool_use' || !e.input) return;
+      this.typing.start(); // il modello sta lavorando di nuovo
+      const session = this.deps.manager.get(e.sessionId);
+      const line = renderToolLine(describeTool(e.toolName, e.input, session?.projectDir));
+      void this.toolBurst(e.sessionId).push(line);
     });
     bus.on('session.permission', ({ permission }) => {
       if (!this.passes('permission', permission.sessionId, undefined).deliver) return;
       this.toolBurst(permission.sessionId).close();
-      this.resetSummarize(permission.sessionId);
       // Stessa logica delle domande (onSessionPrompt): mostrata subito solo se
       // la sessione è quella selezionata, altrimenti in coda — ma qui il
       // countdown NON parte finché non viene davvero mostrata (arm(), dentro
@@ -2444,7 +2304,6 @@ export class TelegramBot {
     bus.on('session.dialog', ({ sessionId, dialog }) => {
       if (!this.passes('dialog', sessionId, undefined).deliver) return;
       this.toolBurst(sessionId).close();
-      this.resetSummarize(sessionId);
       const known = this.deps.manager.get(sessionId);
       if (!known || sessionId === this.deps.manager.getActive()) {
         this.track(this.showDialog(sessionId, dialog), 'dialog send');
@@ -2458,7 +2317,6 @@ export class TelegramBot {
       if (!this.passes('result', e.sessionId, undefined).deliver) return;
       this.typing.stop(); // fine turno: niente più "sta scrivendo"
       this.toolBurst(e.sessionId).close(); // fine turno headless: chiude la raffica di tool
-      this.resetSummarize(e.sessionId); // scarta le summary pendenti
       // solo segnale di completamento: il testo della risposta è già arrivato
       // streammato (session.text → mdToHtml). Re-inviarlo qui (come faceva la
       // vecchia notifica `✅ <result>`) duplicava l'ultimo messaggio, e senza
@@ -2469,7 +2327,6 @@ export class TelegramBot {
       if (!this.passes('error', e.sessionId, e.eventId).deliver) return;
       this.typing.stop(); // errore: niente più "sta scrivendo"
       this.toolBurst(e.sessionId).close();
-      this.resetSummarize(e.sessionId);
       const flow = this.questionFlows.get(e.sessionId);
       if (flow) this.deleteFlow(flow); // errore: niente domande pendenti
       this.pendingPlanEdits.delete(e.sessionId);
