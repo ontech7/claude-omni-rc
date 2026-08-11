@@ -133,6 +133,18 @@ describe('parseCallbackData extensions', () => {
   });
 });
 
+describe('parseCallbackData for agent cards', () => {
+  it('recognizes the toggle', () => {
+    expect(parseCallbackData('agent:toggle:t-1')).toEqual({ action: 'agent-toggle', id: 't-1' });
+  });
+
+  it('callback_data stays under 64 bytes with a uuid', () => {
+    const d = `agent:toggle:${'0e572638-6992-4a0b-b552-8293c5cd7195'}`;
+    expect(Buffer.byteLength(d, 'utf8')).toBeLessThanOrEqual(64);
+    expect(parseCallbackData(d).action).toBe('agent-toggle');
+  });
+});
+
 describe('dialog helpers', () => {
   it('dialogMessage renders a refusal fallback with the model', () => {
     const dlg = { id: 'd1', dialogKind: 'refusal_fallback_prompt', payload: { fallbackModel: 'claude-haiku-4-5', guidanceText: 'refused' } };

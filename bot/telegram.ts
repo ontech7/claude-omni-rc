@@ -22,7 +22,8 @@ import { readRecentMessages, resolveSessionTranscript } from '../src/sessions/tr
 import { isOllamaProvider, fetchOllamaUsage, fetchAnthropicUsage } from '../src/usage.js';
 import { log } from '../src/log.js';
 import { CURRENT_VERSION } from '../src/update.js';
-import { htmlEscape, mdToHtml, balanceHtml, splitHtmlMessage, truncateAtWord, SEND_MAX_CHARS, describeTool, renderToolLine } from './render.js';
+import { htmlEscape, mdToHtml, balanceHtml, splitHtmlMessage, truncateAtWord, SEND_MAX_CHARS, describeTool, renderToolLine, renderAgentCard } from './render.js';
+import type { AgentCard } from './render.js';
 
 // ---------- pure helpers ----------
 
@@ -157,7 +158,7 @@ export function resolveHeadlessProjectDir(workspaceDirs: string[]): { dir?: stri
 
 export interface CallbackData {
   action: 'approve' | 'deny' | 'select' | 'answer' | 'done' | 'other' | 'cancel' | 'del' | 'del-yes' | 'del-no'
-    | 'perm-edit' | 'dlg-retry' | 'dlg-skip';
+    | 'perm-edit' | 'dlg-retry' | 'dlg-skip' | 'agent-toggle';
   id: string;
   index?: number;        // per 'answer': indice opzione
   questionIndex?: number; // per 'answer'/'done'/'other': indice domanda
@@ -175,6 +176,7 @@ export function parseCallbackData(data: string): CallbackData {
     if (ns === 'dlg' && (action === 'retry' || action === 'skip') && id) {
       return { action: `dlg-${action}` as CallbackData['action'], id };
     }
+    if (ns === 'agent' && action === 'toggle' && id) return { action: 'agent-toggle', id };
   }
   if (parts.length === 4) {
     const [ns, action, token, q] = parts;
@@ -919,6 +921,12 @@ export class TelegramBot {
   private chatId?: number;
   private lastMsg = new Map<string, { messageId: number; text: string; at: number; role: 'user' | 'assistant' }>();
   private toolBursts = new Map<string, ToolBurstAggregator>();
+  // One card per subagent, keyed by the toolUseId of the Task tool_use — the
+  // same key the subagent's events carry in parentToolUseId.
+  private agentCards = new Map<string, { messageId?: number; taskId: string; card: AgentCard; lastText?: string }>();
+  // Events of a subagent that arrive before the task_started that creates its
+  // card: buffered here so no tool line is lost when the card appears.
+  private orphanAgentLines = new Map<string, string[]>();
   // Fix 1: testi iniettati dal bot per sessione (per sopprimere l'echo del transcript).
   private recentInjected = new Map<string, { text: string; at: number }[]>();
   // Fix 2: flusso delle domande a scelta multipla per sessione (macchina a
@@ -1154,6 +1162,49 @@ export class TelegramBot {
       this.toolBursts.set(sessionId, agg);
     }
     return agg;
+  }
+
+  private agentKeyboard(key: string, expanded: boolean): InlineKeyboard {
+    return new InlineKeyboard().text(expanded ? '🙈 Hide' : '👁 Details', `agent:toggle:${key}`);
+  }
+
+  // task_progress can arrive very often: the EditThrottler allows 1 op/s per
+  // chat, so a card redrawn identically would steal the model text's turn. The
+  // edit only fires if the rendered text actually changed.
+  private async refreshAgentCard(key: string): Promise<void> {
+    const entry = this.agentCards.get(key);
+    const chatId = this.chatId;
+    if (!entry) return;
+    if (!chatId) { log().warn('send skipped', { kind: 'agent', reason: 'no-chat-bound' }); return; }
+    const text = renderAgentCard(entry.card);
+    if (text === entry.lastText) return;
+    const opts = {
+      parse_mode: 'HTML' as const,
+      link_preview_options: { is_disabled: true },
+      reply_markup: this.agentKeyboard(key, entry.card.expanded),
+    };
+    if (entry.messageId === undefined) {
+      const msg = await this.throttler.throttled(() =>
+        this.bot.api.sendMessage(chatId, text, { ...opts, disable_notification: true })
+          .catch(err => { log().error('agent card send failed', { kind: 'agent', err }); return undefined; }));
+      if (msg?.message_id !== undefined) { entry.messageId = msg.message_id; entry.lastText = text; }
+      return;
+    }
+    const ok = await this.throttler.throttled(() =>
+      this.bot.api.editMessageText(chatId, entry.messageId!, text, opts)
+        .then(() => true)
+        .catch(err => { log().error('agent card edit failed', { kind: 'agent', err }); return false; }));
+    if (ok) entry.lastText = text;
+  }
+
+  // A task_updated that never arrives would leave the card in "⏳" forever: at
+  // end of turn every card still running is interrupted.
+  private closeAgentCards(): void {
+    for (const [key, entry] of this.agentCards) {
+      if (entry.card.status === 'running') { entry.card.status = 'killed'; void this.refreshAgentCard(key); }
+    }
+    this.agentCards.clear();
+    this.orphanAgentLines.clear();
   }
 
 
@@ -2090,6 +2141,12 @@ export class TelegramBot {
           await this.dlgSkip(ctx, parsed);
           break;
         }
+        case 'agent-toggle': {
+          const entry = this.agentCards.get(parsed.id);
+          if (entry) { entry.card.expanded = !entry.card.expanded; await this.refreshAgentCard(parsed.id); }
+          await ctx.answerCallbackQuery();
+          return;
+        }
       }
     } catch {
       await ctx.answerCallbackQuery({ text: 'Invalid data' });
@@ -2271,6 +2328,11 @@ export class TelegramBot {
         }
         return;
       }
+      // Text of a subagent: if its card exists, it stays there. If it does NOT
+      // exist (missing tool_use_id, or task_started never arrived) the event
+      // flows to the main stream instead of vanishing: losing the ordering is
+      // better than losing visibility.
+      if (e.parentToolUseId && this.agentCards.has(e.parentToolUseId)) return;
       if (e.role === 'assistant') this.typing.stop(); // il testo è già l'indicatore
       const burst = this.toolBurst(e.sessionId);
       if (narrationPlan(e.role, e.text, burst.isOpen()) === 'merge') {
@@ -2327,6 +2389,22 @@ export class TelegramBot {
     });
     bus.on('session.tool', e => {
       if (!this.passes('tool', e.sessionId, e.eventId).deliver) return;
+      if (e.parentToolUseId) {
+        // Activity of a subagent: it does not enter the main stream nor the
+        // tool bubble, it goes to its own card.
+        if (e.kind === 'tool_use' && e.input) {
+          const session = this.deps.manager.get(e.sessionId);
+          const line = renderToolLine(describeTool(e.toolName, e.input, session?.projectDir));
+          const entry = this.agentCards.get(e.parentToolUseId);
+          if (entry) { entry.card.lines.push(line); void this.refreshAgentCard(e.parentToolUseId); }
+          else {
+            const buf = this.orphanAgentLines.get(e.parentToolUseId) ?? [];
+            buf.push(line);
+            this.orphanAgentLines.set(e.parentToolUseId, buf);
+          }
+        }
+        return;
+      }
       if (e.kind === 'tool_result') {
         if (e.isError && e.toolUseId) {
           const text = typeof e.result === 'string' ? e.result : JSON.stringify(e.result ?? '');
@@ -2339,6 +2417,38 @@ export class TelegramBot {
       const session = this.deps.manager.get(e.sessionId);
       const line = renderToolLine(describeTool(e.toolName, e.input, session?.projectDir));
       void this.toolBurst(e.sessionId).push(line, e.toolUseId);
+    });
+    bus.on('session.agent', e => {
+      if (!this.passes('tool', e.sessionId, e.eventId).deliver) return;
+      const key = e.toolUseId ?? e.taskId;
+      if (e.phase === 'started') {
+        const card: AgentCard = {
+          subagentType: e.subagentType, description: e.description,
+          lines: this.orphanAgentLines.get(key) ?? [], expanded: false, status: 'running',
+        };
+        this.orphanAgentLines.delete(key);
+        this.agentCards.set(key, { taskId: e.taskId, card });
+        void this.refreshAgentCard(key);
+        return;
+      }
+      // task_updated carries no tool_use_id: fall back to the task id stored on
+      // the card, or the card would never learn about its completion.
+      let cardKey: string | undefined = this.agentCards.has(key) ? key : undefined;
+      if (!cardKey) {
+        for (const [k, v] of this.agentCards) if (v.taskId === e.taskId) { cardKey = k; break; }
+      }
+      if (!cardKey) return;
+      const entry = this.agentCards.get(cardKey);
+      if (!entry) return;
+      if (e.phase === 'progress') {
+        entry.card.toolUses = e.toolUses ?? entry.card.toolUses;
+        entry.card.durationMs = e.durationMs ?? entry.card.durationMs;
+        entry.card.lastToolName = e.lastToolName ?? entry.card.lastToolName;
+      } else {
+        entry.card.status = e.status ?? 'completed';
+        entry.card.error = e.error;
+      }
+      void this.refreshAgentCard(cardKey);
     });
     bus.on('session.permission', ({ permission }) => {
       if (!this.passes('permission', permission.sessionId, undefined).deliver) return;
@@ -2378,6 +2488,7 @@ export class TelegramBot {
       this.typing.stop(); // fine turno: niente più "sta scrivendo"
       void this.toolBurst(e.sessionId).collapse();
       this.toolBurst(e.sessionId).close(); // fine turno headless: chiude la raffica di tool
+      this.closeAgentCards();
       // solo segnale di completamento: il testo della risposta è già arrivato
       // streammato (session.text → mdToHtml). Re-inviarlo qui (come faceva la
       // vecchia notifica `✅ <result>`) duplicava l'ultimo messaggio, e senza
@@ -2389,6 +2500,7 @@ export class TelegramBot {
       this.typing.stop(); // errore: niente più "sta scrivendo"
       void this.toolBurst(e.sessionId).collapse();
       this.toolBurst(e.sessionId).close();
+      this.closeAgentCards();
       const flow = this.questionFlows.get(e.sessionId);
       if (flow) this.deleteFlow(flow); // errore: niente domande pendenti
       this.pendingPlanEdits.delete(e.sessionId);
