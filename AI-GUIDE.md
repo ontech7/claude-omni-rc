@@ -61,6 +61,7 @@ npm install
 | see the active session's raw screen | from Telegram: `/view` |
 | send a file | the bot saves it to `~/.claude-omni-rc/inbox/` and forwards the path |
 | check what sessions exist | from Telegram: `/sessions` or `/status` |
+| check / change your settings from the phone | from Telegram: `/settings` (list), `/settings <key> <value>` (set), `/settings reset <key>` — saved to `settings.json`, applies at the next restart |
 | check provider usage (5h / weekly) | from Telegram: `/usage` — Anthropic reads it via the Agent SDK directly; any other provider (Ollama, a custom proxy) shells out to `ollama-usage`, which must be installed and authenticated on the daemon's machine |
 | run it without launchd | `npm run dev` in the repo (foreground) |
 | uninstall claude-omni-rc | `./install.sh --uninstall` (asks about the Ollama model, then removes launchd, the hooks, and on confirmation the state dir; `.env` is kept) |
@@ -74,11 +75,11 @@ npm install
 - `/sessions` — list sessions and switch the active one (inline buttons). Only
   the active session's screen is streamed.
 - `/view` — send the active session's current screen (tmux pane).
-- `/new [--auto|--standard] [--model <name>] <text>` — create a headless
+- `/new [--auto|--standard] [--model <name>] [--effort <level>] <text>` — create a headless
   session and send it the prompt (automode by default: permissions
   auto-approved; `--standard` for approve/reject buttons; `--model` to pick
-  the model for this session). Headless sessions use the provider configured
-  in `.env` (`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`),
+  the model for this session; `--effort` to set the reasoning effort). Headless
+  sessions use the provider configured in `.env` (`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`),
   falling back to Ollama when unset.
 - `/attach <project>` — attach the `claude:<project>` tmux session.
 - `/stop` — abort the active session's running turn (sends `Ctrl+C` to a tmux
@@ -89,8 +90,13 @@ npm install
 - `/usage` — 5h/weekly usage window for the provider of the active session (or
   `DEFAULT_MODEL`): Anthropic natively; any other provider via `ollama-usage`,
   which must be installed and authenticated on the daemon's machine.
-- `/diag` — daemon state, sessions, pending interactions and recent errors
-  (from the structured log at `~/.claude-omni-rc/logs/daemon.jsonl`).
+- `/diag` — daemon state, sessions, pending interactions and recent errors;
+  per session it shows the model, the reasoning effort and the git branch when
+  available (from the structured log at `~/.claude-omni-rc/logs/daemon.jsonl`).
+- `/settings [key [value]]` · `/settings reset <key>` — view the curated user
+  settings, change one (`/settings <key> <value>`) or reset it to the `.env`
+  default (`/settings reset <key>`). Stored in `<STATE_DIR>/settings.json` with
+  precedence over `.env`; changes apply at the next daemon restart.
 - `/help` — list commands.
 
 Plain messages go to the active session: headless sessions receive them as a

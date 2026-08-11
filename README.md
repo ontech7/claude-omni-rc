@@ -124,14 +124,15 @@ reattached.
 | `/rc` · `/rc on` · `/rc off` · `/rc status` | global armed switch — no argument toggles it |
 | `/sessions` | list sessions, switch the active one |
 | `/view` | show the active session's current screen |
-| `/new [--auto\|--standard] [--model <name>] <text>` | headless session + your prompt (standard by default: approve/reject buttons) |
+| `/new [--auto\|--standard] [--model <name>] [--effort <level>] <text>` | headless session + your prompt (standard by default: approve/reject buttons) |
 | `/attach <project>` | attach a `claude:<project>` tmux session |
 | `/stop` | abort the running turn (Ctrl+C for a tmux pane) |
 | `/status` | the active session's status |
 | `/history [id]` | last messages of a session |
 | `/delete [id]` | delete a session (headless: stops it; terminal: untracks only) |
 | `/usage` | 5h / weekly usage for the configured provider |
-| `/diag` | daemon state, sessions, pending interactions and recent errors |
+| `/settings [key [value]]` · `/settings reset <key>` | view / change user settings; saved to `settings.json`, applies at the next daemon restart |
+| `/diag` | daemon state, sessions, pending interactions, recent errors; per session: model · effort · git branch |
 | `/help` | list the commands |
 
 Plain text goes to the active session — a new turn for headless sessions, typed
@@ -283,6 +284,7 @@ and one authorization method — plus `WORKSPACE_DIRS` if you want `/new`.
 | `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | — | credentials for that provider (Ollama uses the placeholder `ollama` token) |
 | `DEFAULT_MODEL` | `deepseek-v4-flash:cloud` | model for headless sessions (per-session: `/new --model`) |
 | `DEFAULT_PERMISSION_MODE` | `standard` | permission mode for `/new` without a flag; `auto` runs unattended |
+| `DEFAULT_EFFORT` | `medium` | reasoning effort for headless `/new` without a flag (per-session: `/new --effort`) |
 | `MAX_HEADLESS_SESSIONS` | `2` | concurrent headless sessions |
 | `PERMISSION_TIMEOUT_SECONDS` | `120` | unanswered permission → deny |
 | `STATE_DIR` | `~/.claude-omni-rc` | where state, logs and the inbox live |
@@ -298,6 +300,13 @@ and one authorization method — plus `WORKSPACE_DIRS` if you want `/new`.
 | `LOG_FILE` | `<STATE_DIR>/logs/daemon.jsonl` | where the structured log is written |
 | `LOG_MAX_BYTES` | `5000000` | rotate the structured log past this size |
 | `LOG_KEEP` | `3` | how many rotated log files to keep |
+
+Settings changed from Telegram with `/settings` are stored in
+`<STATE_DIR>/settings.json` and take precedence over the `.env` values above.
+They cover `DEFAULT_MODEL`, `DEFAULT_PERMISSION_MODE`,
+`MAX_HEADLESS_SESSIONS`, `PERMISSION_TIMEOUT_SECONDS`, `ARMED_ON_START`,
+`CLAUDE_OMNI_RC_NO_UPDATE_CHECK` and `DEFAULT_EFFORT`, and apply at the next
+daemon restart.
 
 > `~/.claude-omni-rc/logs/daemon.jsonl` is the structured log, one JSON record
 > per line, rotated at `LOG_MAX_BYTES`. `daemon.log` and `daemon.err.log` remain

@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+- **`/settings` command.** See and change the curated user settings from the
+  phone (`/settings`, `/settings <key> <value>`, `/settings reset <key>`). They
+  are stored in `<STATE_DIR>/settings.json` with precedence over `.env` and
+  apply at the next daemon restart. New `DEFAULT_EFFORT` setting and a
+  `--effort` flag on `/new`.
+- **`/diag` in the command menu and enriched.** `/diag` now appears in the
+  Telegram command autocomplete and reports, per session, the model, the
+  reasoning effort and the git branch when available.
+
 ## [0.3.0] - 2026-08-11
 
 - **Structured log and `/diag`.** The daemon writes one JSON record per event to
