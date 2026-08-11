@@ -881,9 +881,6 @@ export class TelegramBot {
   private throttler = new EditThrottler(1000);
   private chatId?: number;
   private lastMsg = new Map<string, { messageId: number; text: string; at: number; role: 'user' | 'assistant' }>();
-  // Ultimo testo utente per sessione: hint di lingua per le summary via LLM
-  // (il messaggio utente non finisce in lastMsg — l'echo del transcript è filtrato).
-  private lastUserText = new Map<string, string>();
   private toolBursts = new Map<string, ToolBurstAggregator>();
   // Fix 1: testi iniettati dal bot per sessione (per sopprimere l'echo del transcript).
   private recentInjected = new Map<string, { text: string; at: number }[]>();
@@ -2091,10 +2088,8 @@ export class TelegramBot {
     // restringe; `?? ''` è sicuro perché il filtro message:text scatta solo su testi.
     const text = ctx.message.text ?? '';
     if (!this.deps.manager.isArmed()) { await this.send(ctx, '🔒 Remote control is off. Send /rc on.'); return; }
-    // hint di lingua per le summary via LLM: l'ultimo testo utente della sessione.
     const active = this.deps.manager.getActive();
     const session = active ? this.deps.manager.get(active) : this.deps.manager.list()[0];
-    if (session) this.lastUserText.set(session.id, text);
     // "Edit plan" in attesa: il testo dell'utente è il nuovo piano.
     if (session && this.pendingPlanEdits.has(session.id)) {
       await this.answerPlanEdit(session.id, text);
