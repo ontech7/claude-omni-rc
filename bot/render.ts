@@ -343,3 +343,37 @@ export function renderToolLine(line: ToolLine): string {
   if (line.code) out += `\n<code>${htmlEscape(truncateAtWord(line.code, CODE_MAX))}</code>`;
   return out;
 }
+
+export interface AgentCard {
+  subagentType?: string;
+  description?: string;
+  lines: string[];
+  expanded: boolean;
+  toolUses?: number;
+  durationMs?: number;
+  lastToolName?: string;
+  status?: 'running' | 'completed' | 'failed' | 'killed';
+  error?: string;
+}
+
+export function formatDuration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
+// A linear chat has no panels: the card is the only place where a subagent's
+// activity can live without mixing into everything else. Collapsed it says only
+// that it is working and how far it got; the details stay one tap away.
+export function renderAgentCard(card: AgentCard): string {
+  const icon = card.status === 'completed' ? '✅' : card.status === 'failed' || card.status === 'killed' ? '❌' : '⏳';
+  const who = card.subagentType ? ` · <code>${htmlEscape(card.subagentType)}</code>` : '';
+  const what = card.description ? ` — ${htmlEscape(truncateAtWord(card.description, 100))}` : '';
+  const bits: string[] = [];
+  if (card.toolUses !== undefined) bits.push(`${card.toolUses} steps`);
+  if (card.durationMs !== undefined) bits.push(formatDuration(card.durationMs));
+  if (card.status === 'running' && card.lastToolName) bits.push(htmlEscape(card.lastToolName));
+  if (card.error) bits.push(htmlEscape(truncateAtWord(card.error, 100)));
+  let out = `🤖 <b>Agent</b>${who}${what}\n${icon} ${bits.join(' · ') || '…'}`;
+  if (card.expanded && card.lines.length) out += `\n<blockquote expandable>${card.lines.join('\n\n')}</blockquote>`;
+  return out;
+}

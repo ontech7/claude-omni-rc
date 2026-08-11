@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mdToHtml, balanceHtml, splitHtmlMessage, truncateAtWord, htmlEscape, shortenPath, describeTool, renderToolLine } from '../bot/render.js';
+import { mdToHtml, balanceHtml, splitHtmlMessage, truncateAtWord, htmlEscape, shortenPath, describeTool, renderToolLine, renderAgentCard, formatDuration } from '../bot/render.js';
 
 describe('mdToHtml v2 / balanceHtml', () => {
   it('renders bold, italic and nested ***both***', () => {
@@ -302,4 +302,49 @@ describe('tag invariant on split and balancing', () => {
     }
     expect(parts.join('')).toContain('riga 499');  // the tail is not lost
   });
+});
+
+describe('renderAgentCard', () => {
+  const base = { subagentType: 'Explore', description: 'find rendering points', lines: ['📖 <b>Read</b>'], expanded: false, status: 'running' as const };
+
+  it('collapsed shows type, description and progress without the details', () => {
+    const out = renderAgentCard({ ...base, toolUses: 7, durationMs: 42_000, lastToolName: 'Grep' });
+    expect(out).toContain('Explore');
+    expect(out).toContain('find rendering points');
+    expect(out).toContain('7 steps');
+    expect(out).toContain('42s');
+    expect(out).toContain('Grep');
+    expect(out).not.toContain('<blockquote');
+  });
+
+  it('expanded includes the lines in a blockquote', () => {
+    const out = renderAgentCard({ ...base, expanded: true });
+    expect(out).toContain('<blockquote expandable>');
+    expect(out).toContain('📖 <b>Read</b>');
+  });
+
+  it('completed shows the check mark', () => {
+    expect(renderAgentCard({ ...base, status: 'completed' })).toContain('✅');
+  });
+
+  it('failed shows the error', () => {
+    const out = renderAgentCard({ ...base, status: 'failed', error: 'boom' });
+    expect(out).toContain('❌');
+    expect(out).toContain('boom');
+  });
+
+  it('expanded with no lines does not produce an empty blockquote', () => {
+    const out = renderAgentCard({ ...base, lines: [], expanded: true });
+    expect(out).not.toContain('<blockquote');
+  });
+
+  it('escapes the description', () => {
+    expect(renderAgentCard({ ...base, description: 'a < b' })).toContain('a &lt; b');
+  });
+});
+
+describe('formatDuration', () => {
+  it('uses seconds below a minute', () => expect(formatDuration(42_000)).toBe('42s'));
+  it('uses minutes and seconds above a minute', () => expect(formatDuration(100_000)).toBe('1m 40s'));
+  it('zero is 0s', () => expect(formatDuration(0)).toBe('0s'));
 });
