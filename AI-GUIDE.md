@@ -46,7 +46,7 @@ npm install
 | allow only themselves | set `ALLOWED_USER_IDS` to their Telegram numeric id (@userinfobot) |
 | allow via a code instead | set `PAIRING_CODE` in `.env`; they send `/start <code>` once |
 | arm / disarm remote control | from Telegram: `/rc on` / `/rc off` (or `ARMED_ON_START=true` in `.env`) |
-| create a headless session | from Telegram: `/new <prompt>` (automode by default; `/new --standard <prompt>` for approve/reject prompts; `/new --model <name> <prompt>` to pick the model) |
+| create a headless session | from Telegram: `/new <prompt>` (standard by default: approve/reject buttons; `/new --auto <prompt>` for automode; `/new --model <name> <prompt>` to pick the model) |
 | use a provider other than Ollama for headless sessions | set `ANTHROPIC_BASE_URL` (+ `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`) in `.env`; a `claude-*` model (or `opus`/`sonnet`/`haiku`/`fable`) means Anthropic even with `ANTHROPIC_BASE_URL` unset; anything else → Ollama (`OLLAMA_BASE_URL`) |
 | continue an ongoing session from the phone | make sure it runs inside tmux — start it with `omni-rc <name>` (or `tmux new -s claude:<project>`); it auto-appears in `/sessions` and streams as a chat |
 | start a session ready for remote control | `omni-rc <name>` (shell function added by `./install.sh`); options in `omni-rc --help` |
