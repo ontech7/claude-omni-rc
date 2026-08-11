@@ -15,3 +15,6 @@ __pycache__/
 
 # Git worktrees
 .worktrees/
+
+# SDD scratch (ledger, brief, review package)
+.superpowers/
