@@ -874,6 +874,16 @@ export class ToolBurstAggregator {
     }
   }
 
+  // At the end of a turn the burst becomes a collapsible block: it stays
+  // consultable but stops taking up the screen in history. With a single line
+  // the blockquote would cost an edit for no gain.
+  async collapse(): Promise<void> {
+    const open = this.open;
+    if (!open || this.lines.length < 2) return;
+    const body = `▸ <b>${this.lines.length} steps</b>\n<blockquote expandable>${this.lines.join('\n\n')}</blockquote>`;
+    if (body.length <= this.maxLen) await this.sink.edit(open.messageId, body);
+  }
+
   close(): void {
     this.generation++;
     this.open = undefined;
@@ -977,8 +987,13 @@ export class TelegramBot {
   // Ogni risposta passa dallo splitter: oltre 4096 caratteri Telegram rigetta il
   // messaggio e il .catch lo farebbe sparire in silenzio.
   private async send(ctx: Context, text: string): Promise<unknown> {
+    const parts = splitHtmlMessage(text);
+    // With a single part the marker would be pure noise.
+    const label = (i: number): string => (parts.length > 1 ? `\n<i>(${i + 1}/${parts.length})</i>` : '');
     let last: unknown;
-    for (const part of splitHtmlMessage(text)) last = await ctx.reply(part, { parse_mode: 'HTML' });
+    for (let i = 0; i < parts.length; i++) {
+      last = await ctx.reply(parts[i] + label(i), { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
+    }
     return last;
   }
 
@@ -992,10 +1007,14 @@ export class TelegramBot {
   // invece di inventarli.
   private async sendChunked(chatId: number, text: string, extra: Record<string, unknown> = {}, correlation: SendCorrelation = {}): Promise<number | undefined> {
     const parts = splitHtmlMessage(text);
+    // The marker is appended AFTER the split: prepending it to the text would
+    // shift the character count on which splitHtmlMessage decides the cuts.
+    // A single part needs no marker.
+    const label = (i: number): string => (parts.length > 1 ? `\n<i>(${i + 1}/${parts.length})</i>` : '');
     let lastId: number | undefined;
     for (let i = 0; i < parts.length; i++) {
-      const opts = { parse_mode: 'HTML' as const, ...(i === parts.length - 1 ? extra : {}) };
-      const msg = await this.bot.api.sendMessage(chatId, parts[i], opts).catch(err => { log().error('telegram send failed', { ...correlation, chatId, part: i, of: parts.length, err }); return undefined; });
+      const opts = { parse_mode: 'HTML' as const, link_preview_options: { is_disabled: true }, ...(i === parts.length - 1 ? extra : {}) };
+      const msg = await this.bot.api.sendMessage(chatId, parts[i] + label(i), opts).catch(err => { log().error('telegram send failed', { ...correlation, chatId, part: i, of: parts.length, err }); return undefined; });
       if (msg) lastId = msg.message_id;
     }
     return lastId;
@@ -1103,7 +1122,7 @@ export class TelegramBot {
           const chatId = this.chatId;
           if (!chatId) { log().warn('send skipped', { sessionId, kind: 'tool', reason: 'no-chat-bound' }); return false; }
           const ok = await this.throttler.throttled(() =>
-            this.bot.api.editMessageText(chatId, messageId, text, { parse_mode: 'HTML' })
+            this.bot.api.editMessageText(chatId, messageId, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } })
               .then(() => true)
               // C1: il sink non ha l'eventId (non è instradato dentro push(), fuori
               // scope per questa fase) — sessionId + kind bastano a legare questo
@@ -1122,7 +1141,12 @@ export class TelegramBot {
           // tool bubble'. Il valore di ritorno resta undefined: nessun cambio di
           // comportamento, solo il record in più.
           const msg = await this.throttler.throttled(() =>
-            this.bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' })
+            // A Read must not buzz the phone: tool notifications stay silent.
+            this.bot.api.sendMessage(chatId, text, {
+              parse_mode: 'HTML',
+              disable_notification: true,
+              link_preview_options: { is_disabled: true },
+            })
               .catch(err => { log().error('tool bubble send failed', { sessionId, kind: 'tool', err }); return undefined; }));
           return msg?.message_id;
         },
@@ -2241,7 +2265,10 @@ export class TelegramBot {
         // motivo (disarmato, sessione non selezionata) questa sessione
         // potrebbe non essere quella in cui l'iniezione sta effettivamente
         // avvenendo.
-        if (gate.reason === 'injected-echo') { this.toolBurst(e.sessionId).close(); }
+        if (gate.reason === 'injected-echo') {
+          void this.toolBurst(e.sessionId).collapse();
+          this.toolBurst(e.sessionId).close();
+        }
         return;
       }
       if (e.role === 'assistant') this.typing.stop(); // il testo è già l'indicatore
@@ -2254,6 +2281,7 @@ export class TelegramBot {
         void burst.push(mdToHtml(e.text));
         return;
       }
+      void burst.collapse();
       burst.close();
       log().info('event delivering', { eventId: e.eventId, sessionId: e.sessionId, kind: 'text', role: e.role });
       // sia le headless che i transcript delle terminali arrivano come markdown.
@@ -2285,6 +2313,7 @@ export class TelegramBot {
       // bloccata per sempre senza modo di rispondere da Telegram. onSessionPrompt
       // decide se mostrarla subito (sessione attiva) o lasciarla in pending
       // (mostrata quando l'utente ci seleziona sopra, vedi sess:select).
+      void this.toolBurst(sessionId).collapse();
       this.toolBurst(sessionId).close();
       // C2: 'event delivering' NON viene più loggato qui — a questo punto non è
       // ancora vero: onSessionPrompt può accodare il set invece di mostrarlo
@@ -2313,6 +2342,7 @@ export class TelegramBot {
     });
     bus.on('session.permission', ({ permission }) => {
       if (!this.passes('permission', permission.sessionId, undefined).deliver) return;
+      void this.toolBurst(permission.sessionId).collapse();
       this.toolBurst(permission.sessionId).close();
       // Stessa logica delle domande (onSessionPrompt): mostrata subito solo se
       // la sessione è quella selezionata, altrimenti in coda — ma qui il
@@ -2332,6 +2362,7 @@ export class TelegramBot {
     });
     bus.on('session.dialog', ({ sessionId, dialog }) => {
       if (!this.passes('dialog', sessionId, undefined).deliver) return;
+      void this.toolBurst(sessionId).collapse();
       this.toolBurst(sessionId).close();
       const known = this.deps.manager.get(sessionId);
       if (!known || sessionId === this.deps.manager.getActive()) {
@@ -2345,6 +2376,7 @@ export class TelegramBot {
     bus.on('session.result', e => {
       if (!this.passes('result', e.sessionId, undefined).deliver) return;
       this.typing.stop(); // fine turno: niente più "sta scrivendo"
+      void this.toolBurst(e.sessionId).collapse();
       this.toolBurst(e.sessionId).close(); // fine turno headless: chiude la raffica di tool
       // solo segnale di completamento: il testo della risposta è già arrivato
       // streammato (session.text → mdToHtml). Re-inviarlo qui (come faceva la
@@ -2355,6 +2387,7 @@ export class TelegramBot {
     bus.on('session.error', e => {
       if (!this.passes('error', e.sessionId, e.eventId).deliver) return;
       this.typing.stop(); // errore: niente più "sta scrivendo"
+      void this.toolBurst(e.sessionId).collapse();
       this.toolBurst(e.sessionId).close();
       const flow = this.questionFlows.get(e.sessionId);
       if (flow) this.deleteFlow(flow); // errore: niente domande pendenti

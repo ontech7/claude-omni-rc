@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { resolveHeadlessProjectDir, isPrivateChat, parseCommand, parseNewFlags, parseSettingsCommand, formatSettingsReport, formatSettingsKey, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, stopReply, TypingIndicator, narrationPlan, answerSummary, answerToKeys, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, formatPaneContext, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
 import type { ToolBurstSink, PromptKeyEntry } from '../bot/telegram.js';
-import { truncateAtWord, mdToHtml } from '../bot/render.js';
+import { truncateAtWord, mdToHtml, splitHtmlMessage } from '../bot/render.js';
 import { loadConfig } from '../src/config.js';
 
 describe('formatPct / formatResetAt', () => {
@@ -543,6 +543,45 @@ describe('ToolBurstAggregator', () => {
     agg.close();
     await agg.markFailed('tu-1', 'boom');
     expect(edited).toBe(false); // reopening would break chronological order
+  });
+  it('collapses the bubble into an expandable blockquote with the count', async () => {
+    const edits: string[] = [];
+    const agg = new ToolBurstAggregator({
+      edit: async (_id, t) => { edits.push(t); return true; },
+      send: async () => 1,
+    });
+    await agg.push('📖 <b>Read</b>', 'a');
+    await agg.push('⚡ <b>Bash</b>', 'b');
+    await agg.collapse();
+    const last = edits[edits.length - 1];
+    expect(last).toContain('<blockquote expandable>');
+    expect(last).toContain('2 steps');
+    expect(last).toContain('📖 <b>Read</b>');
+  });
+  it('does not collapse a bubble with a single line', async () => {
+    const edits: string[] = [];
+    const agg = new ToolBurstAggregator({
+      edit: async (_id, t) => { edits.push(t); return true; },
+      send: async () => 1,
+    });
+    await agg.push('📖 <b>Read</b>', 'a');
+    await agg.collapse();
+    expect(edits.some(e => e.includes('<blockquote'))).toBe(false);
+  });
+});
+
+describe('continuation marker', () => {
+  it('does not appear with a single part', () => {
+    const parts = splitHtmlMessage('short');
+    expect(parts.length).toBe(1);
+  });
+
+  it('the marker space does not push past the Telegram limit', () => {
+    const parts = splitHtmlMessage('x'.repeat(12_000));
+    for (let i = 0; i < parts.length; i++) {
+      const withLabel = `${parts[i]}\n<i>(${i + 1}/${parts.length})</i>`;
+      expect(withLabel.length).toBeLessThan(4096);
+    }
   });
 });
 
