@@ -1,8 +1,9 @@
 import 'dotenv/config';
 import { join } from 'node:path';
 import { augmentPath } from './path.js';
-import { loadConfig, type Config } from './config.js';
+import { loadConfig, resolveStateDir, type Config } from './config.js';
 import { initLogger, log } from './log.js';
+import { SettingsStore } from './settings.js';
 import { StateStore } from './state.js';
 import { Bus } from './bus.js';
 import { SessionManager } from './sessions/manager.js';
@@ -27,7 +28,7 @@ export interface Daemon { start(): Promise<void>; stop(): Promise<void>; }
 
 export function createDaemon(
   config: Config,
-  overrides: { bot?: Pick<TelegramBot, 'start' | 'stop' | 'notify'> } = {},
+  overrides: { bot?: Pick<TelegramBot, 'start' | 'stop' | 'notify'>; settingsStore?: SettingsStore } = {},
 ): Daemon {
   // Prima di ogni altra cosa: da qui in poi qualunque modulo può chiamare log()
   // e finire nel file configurato, incluso ciò che fallisce durante il cablaggio.
@@ -43,6 +44,7 @@ export function createDaemon(
     apiPort: config.apiPort,
     armedOnStart: config.armedOnStart,
     stateDir: config.stateDir,
+    settingsFile: config.settingsFile,
   });
 
   const state = new StateStore(join(config.stateDir, 'state.json'));
@@ -68,7 +70,8 @@ export function createDaemon(
   const watcher = new TmuxWatcher({ config, manager, tmux });
   const transcriptWatcher = new TranscriptWatcher({ config, manager, bus });
   const inbox = new Inbox({ dir: config.inboxDir });
-  const bot = overrides.bot ?? new TelegramBot({ config, bus, manager, permissionFlow, dialogFlow, sdk, tmux, inbox, ollama });
+  const settingsStore = overrides.settingsStore ?? new SettingsStore(config.settingsFile);
+  const bot = overrides.bot ?? new TelegramBot({ config, bus, manager, permissionFlow, dialogFlow, sdk, tmux, inbox, ollama, settingsStore });
   botRef = bot;
 
   const reaper = setInterval(() => manager.reapIdle(), 1000);
@@ -118,7 +121,8 @@ const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}
 if (isMain) {
   // rete di sicurezza: anche un fire-and-forget sfuggito non deve uccidere il daemon.
   process.on('unhandledRejection', err => { log().error('unhandledRejection', { err }); });
-  const daemon = createDaemon(loadConfig());
+  const settingsStore = new SettingsStore(join(resolveStateDir(process.env), 'settings.json'));
+  const daemon = createDaemon(loadConfig(process.env, settingsStore.load()), { settingsStore });
   const shutdown = (): void => {
     void daemon.stop().then(() => process.exit(0)).catch(() => process.exit(1));
   };

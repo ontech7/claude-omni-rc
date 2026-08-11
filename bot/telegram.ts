@@ -12,6 +12,7 @@ import type { TmuxClient, QuestionKey } from '../src/sessions/tmux-inject.js';
 import { createShExec } from '../src/sessions/tmux-inject.js';
 import type { OllamaClient } from '../src/ollama.js';
 import type { Inbox } from '../src/input.js';
+import type { SettingsStore } from '../src/settings.js';
 import type { Session, SessionKind, SessionStatus, PermissionRequest, PromptQuestion, PromptAnswer, UserDialog } from '../src/types.js';
 import type { RecentMessage } from '../src/sessions/transcript.js';
 import { readRecentMessages, resolveSessionTranscript } from '../src/sessions/transcript.js';
@@ -1037,6 +1038,7 @@ export interface BotDeps {
   tmux: TmuxClient;
   inbox: Inbox;
   ollama: OllamaClient;
+  settingsStore: SettingsStore;
 }
 
 export class TelegramBot {
