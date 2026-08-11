@@ -189,9 +189,6 @@ in coda un marcatore `<i>(1/3)</i>`; con una parte sola non compare nulla.
   del modello, domanda, richiesta di permesso, dialogo, errore — cioè gli eventi
   che richiedono una persona. Le tool call restano visibili ma silenziose.
 - **`link_preview_options: { is_disabled: true }`** su ogni messaggio di stream.
-- **`setMyCommands()`** all'avvio del bot: il menu `/` di Telegram elenca i
-  comandi con la descrizione. La lista si genera dalla stessa struttura che
-  alimenta `/help`, così non possono divergere.
 - **Bolla tool collassabile**: alla chiusura del turno la bolla viene riscritta
   come `<blockquote expandable>` con intestazione `▸ {n} passaggi`. Resta
   consultabile ma smette di occupare lo schermo nello storico.
@@ -203,6 +200,11 @@ in coda un marcatore `<i>(1/3)</i>`; con una parte sola non compare nulla.
   posta e non ha avuto risposta, quindi il default è non aggiungerla. Tocca anche
   `EditThrottler` e `ToolBurstAggregator`, cioè mescolerebbe un rischio
   architetturale a un lavoro di sola presentazione. Da valutare a parte.
+- **`setMyCommands()`** (menu `/` di Telegram popolato con i comandi e le loro
+  descrizioni). Proposto e **scartato dall'utente**: è discovery dei comandi, non
+  leggibilità della chat, ed è l'unico intervento che tocca il ciclo di avvio del
+  bot invece del solo rendering. Resta un'aggiunta facile e indipendente in
+  futuro.
 - Supergruppi e topic (esclusi esplicitamente dall'utente).
 - Invio degli output lunghi come documento (`sendDocument`).
 
