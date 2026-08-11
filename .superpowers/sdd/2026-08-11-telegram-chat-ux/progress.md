@@ -59,3 +59,35 @@ Task 4: primo tentativo ABORTITO — il subagent è stato terminato dal limite d
   Stato verificato dopo il ripristino: HEAD 003aeee, tree pulito, typecheck OK,
   409 test 0 fallimenti. Nessun lavoro perso: la rimozione è 37 righe, la rifà
   il tentativo successivo.
+Task 4: secondo tentativo riuscito — commit f252479. Catalogo collegato al
+  gestore session.tool, summarizer via Ollama rimosso (summarizeTool,
+  SummarizeQueue, llmSummarize, summarizeToolLine, resetSummarize e i suoi 7
+  punti di chiamata, summarizeQueues, summaryCache, OllamaClient.summarize).
+  Gate eseguito dal controller: typecheck pulito, 400 test 0 fallimenti (409-9,
+  il calo è atteso: rimossi i test delle funzioni cancellate). Verificato anche
+  che non resti alcun riferimento ai simboli rimossi.
+Task 4: review — Spec OK, 1 rilievo Important: dead code `lastUserText` + due
+  commenti che descrivevano il summarizer ormai inesistente. Il typecheck non lo
+  vedeva perché il campo risultava usato da una .set().
+Task 4: fix round 1/5 (1 addressed, 0 open; commit 7c82498). Re-review mirata:
+  ADDRESSED, resto del gestore intatto, zero residui, nessuna rottura.
+Task 4: complete (commits 003aeee..7c82498, review clean)
+Task 4: NOTA SULL'EVIDENZA — il gate letterale "400/0 con env pulito" NON è stato
+  riprodotto DOPO il fix 7c82498: il blocco dei permessi su npm/node era tornato.
+  Evidenza raccolta: typecheck pulito; `npx vitest run` con env sporco → 398 verdi
+  + 2 rossi, e i 2 rossi sono esattamente gli env-leak preesistenti di sdk-driver;
+  totale 400, invariato rispetto a prima del fix; grep di lastUserText a zero
+  match; tree pulito. Il fix era una cancellazione di 5 righe di codice morto,
+  quindi l'evidenza è adeguata al rischio. Primo comando utile alla ripresa:
+  rilanciare il gate per chiudere formalmente.
+
+STOP CONTROLLER — sessione chiusa dopo il Task 4. Task 5-11 NON iniziati.
+  Motivo dello stop: l'ambiente ha perso progressivamente la shell (npm, node,
+  rtk e infine le scritture su file via bash fallivano con
+  "Tool permission request failed: AbortError: Stream closed"). Non è un bug del
+  progetto: git e i comandi semplici funzionavano. Fermarsi era obbligato perché
+  il Task 5 è quello che non si può fare senza gate dei test: aggiunge tag HTML
+  nuovi che, se non insegnati anche a balanceHtml/splitHtmlMessage nello stesso
+  commit, fanno sparire i messaggi lunghi in silenzio dentro il .catch() di invio.
+  Le ultime righe di questo ledger sono state scritte con gli strumenti di
+  editing diretto, non dalla shell.
