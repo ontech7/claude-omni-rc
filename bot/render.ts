@@ -163,6 +163,7 @@ export function shortenPath(p: string, projectDir?: string, maxLen = 50): string
   const strip = (base: string | undefined, replacement: string): boolean => {
     if (!base) return false;
     const b = base.endsWith('/') ? base.slice(0, -1) : base;
+    if (!b) return false; // Prevent empty base (e.g., from HOME='/') from matching all absolute paths
     if (out === b) { out = replacement || '.'; return true; }
     if (out.startsWith(`${b}/`)) { out = replacement + out.slice(b.length + (replacement ? 0 : 1)); return true; }
     return false;

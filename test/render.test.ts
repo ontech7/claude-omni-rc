@@ -109,4 +109,32 @@ describe('shortenPath', () => {
   it('works without projectDir', () => {
     expect(shortenPath('/etc/hosts')).toBe('/etc/hosts');
   });
+
+  it('handles HOME="/" without matching every absolute path', () => {
+    const oldHome = process.env.HOME;
+    try {
+      process.env.HOME = '/';
+      // With HOME='/', a path like '/etc/hosts' should stay absolute, not become '~/etc/hosts'
+      expect(shortenPath('/etc/hosts', proj)).toBe('/etc/hosts');
+    } finally {
+      process.env.HOME = oldHome;
+    }
+  });
+
+  it('returns only the filename when it fits in maxLen and first/…/last does not', () => {
+    // Create a path where even first/…/last exceeds maxLen, so we get just the filename
+    const longPath = proj + '/very/long/nested/directory/structure/file.ts';
+    const out = shortenPath(longPath, proj, 10);
+    expect(out.length).toBeLessThanOrEqual(10);
+    expect(out).toBe('file.ts');
+  });
+
+  it('truncates the filename with … when even the filename exceeds maxLen', () => {
+    // Create a path where even the filename alone exceeds maxLen
+    const veryLongFileName = proj + '/' + 'x'.repeat(20) + '.ts';
+    const out = shortenPath(veryLongFileName, proj, 10);
+    expect(out.length).toBeLessThanOrEqual(10);
+    expect(out).toContain('…');
+    expect(out).toContain('.ts');
+  });
 });
