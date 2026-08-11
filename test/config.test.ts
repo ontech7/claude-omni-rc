@@ -66,3 +66,37 @@ describe('loadConfig — logging', () => {
     expect(loadConfig({ LOG_LEVEL: 'chatty' }).logLevel).toBe('info');
   });
 });
+
+describe('loadConfig — settings.json layer', () => {
+  it('lets settings override env, and env override defaults', () => {
+    const c = loadConfig({ DEFAULT_MODEL: 'from-env', DEFAULT_PERMISSION_MODE: 'standard' }, { defaultModel: 'from-settings', maxHeadlessSessions: 7 });
+    expect(c.defaultModel).toBe('from-settings');
+    expect(c.maxHeadlessSessions).toBe(7);
+    expect(c.defaultPermissionMode).toBe('standard'); // non toccato dal settings → .env
+  });
+  it('ignores invalid settings values and falls back to env/default', () => {
+    const c = loadConfig({ DEFAULT_MODEL: 'from-env' }, { defaultPermissionMode: 'yolo', defaultEffort: 'ultra' } as never);
+    expect(c.defaultPermissionMode).toBe('standard');
+    expect(c.defaultEffort).toBe('medium');
+    expect(c.defaultModel).toBe('from-env');
+  });
+  it('defaults defaultEffort to medium and parses a valid env value', () => {
+    expect(loadConfig({}).defaultEffort).toBe('medium');
+    expect(loadConfig({ DEFAULT_EFFORT: 'high' }).defaultEffort).toBe('high');
+    expect(loadConfig({ DEFAULT_EFFORT: 'max' }).defaultEffort).toBe('medium'); // 'max' non è esposto
+  });
+  it('applies settings to every curated key', () => {
+    const c = loadConfig({}, {
+      defaultPermissionMode: 'auto', permissionTimeoutSeconds: 45, armedOnStart: true, noUpdateCheck: true, defaultEffort: 'low',
+    });
+    expect(c.defaultPermissionMode).toBe('auto');
+    expect(c.permissionTimeoutSeconds).toBe(45);
+    expect(c.armedOnStart).toBe(true);
+    expect(c.noUpdateCheck).toBe(true);
+    expect(c.defaultEffort).toBe('low');
+  });
+  it('exposes the settings file path under the state dir', () => {
+    expect(loadConfig({}).settingsFile).toBe(`${process.env.HOME}/.claude-omni-rc/settings.json`);
+    expect(loadConfig({ STATE_DIR: '/tmp/orc' }).settingsFile).toBe('/tmp/orc/settings.json');
+  });
+});
