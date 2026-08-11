@@ -10,6 +10,7 @@ import type { DialogFlow } from '../src/dialogs.js';
 import type { SdkDriver } from '../src/sessions/sdk-driver.js';
 import type { TmuxClient, QuestionKey } from '../src/sessions/tmux-inject.js';
 import { createShExec } from '../src/sessions/tmux-inject.js';
+import { currentBranch } from '../src/git.js';
 import type { OllamaClient } from '../src/ollama.js';
 import type { Inbox } from '../src/input.js';
 import type { SettingsStore } from '../src/settings.js';
@@ -905,6 +906,9 @@ export interface DiagSession {
   title: string;
   transcript?: string;
   hasTmux: boolean;
+  model?: string;
+  effort?: EffortLevel;
+  branch?: string;
 }
 
 export interface DiagSnapshot {
@@ -927,7 +931,8 @@ export function diagReport(s: DiagSnapshot): string {
   const sessions = s.sessions.length
     ? s.sessions.map(x => {
         const bits = [x.kind, x.status, x.hasTmux ? 'tmux' : 'no-tmux', x.transcript ? 'transcript' : 'no-transcript'];
-        return `• <code>${htmlEscape(x.id.slice(0, 8))}</code> ${htmlEscape(x.title)} — ${htmlEscape(bits.join(' · '))}`;
+        const modelEffortBranch = [x.model ?? '—', x.effort ?? '—', x.branch ?? '—'].map(htmlEscape).join(' · ');
+        return `• <code>${htmlEscape(x.id.slice(0, 8))}</code> ${htmlEscape(x.title)} — ${htmlEscape(bits.join(' · '))} — ${modelEffortBranch}`;
       }).join('\n')
     : 'no sessions tracked';
 
@@ -1179,6 +1184,7 @@ export class TelegramBot {
       { command: 'history', description: 'Show the last messages of a session' },
       { command: 'delete', description: 'Delete a session' },
       { command: 'usage', description: 'Check provider usage (5h / weekly)' },
+      { command: 'diag', description: 'Daemon diagnostics' },
       { command: 'settings', description: 'View / change user settings' },
       { command: 'help', description: 'Show all commands' },
     ]).catch(this.logCatch('setMyCommands'));
@@ -1430,19 +1436,23 @@ export class TelegramBot {
     bot.command('diag', ctx => this.safe(ctx, 'diag', async () => {
       if (!this.authorize(ctx)) return;
       const sessions = this.deps.manager.list();
+      const diagSessions = await Promise.all(sessions.map(async x => ({
+        id: x.id,
+        kind: x.kind,
+        status: x.status,
+        title: x.title,
+        transcript: x.transcriptFile ? basename(x.transcriptFile) : undefined,
+        hasTmux: Boolean(x.tmuxTarget),
+        model: x.model ?? this.deps.config.defaultModel,
+        effort: x.effort,
+        branch: await currentBranch(x.projectDir),
+      })));
       await this.send(ctx, diagReport({
         version: CURRENT_VERSION,
         armed: this.deps.manager.isArmed(),
         chatBound: this.chatId !== undefined,
         activeSessionId: this.deps.manager.getActive(),
-        sessions: sessions.map(x => ({
-          id: x.id,
-          kind: x.kind,
-          status: x.status,
-          title: x.title,
-          transcript: x.transcriptFile ? basename(x.transcriptFile) : undefined,
-          hasTmux: Boolean(x.tmuxTarget),
-        })),
+        sessions: diagSessions,
         pending: {
           permissions: this.deps.permissionFlow.pendingCount(),
           dialogs: this.deps.dialogFlow.pendingCount(),

@@ -1039,4 +1039,19 @@ describe('diagReport', () => {
     // solo la resa — la stringa originale resta quella lunga in input, sopra.
     expect(longLine.length).toBeGreaterThan(300);
   });
+
+  it('shows model, effort and branch per session, with — when unknown', () => {
+    const s = {
+      ...snapshot,
+      sessions: [
+        { id: 'aaaaaaaa-1111', kind: 'terminal' as const, status: 'idle' as const, title: 'my-proj', transcript: 'a.jsonl', hasTmux: true, model: 'claude-sonnet-4-5', effort: 'high' as const, branch: 'main' },
+        { id: 'bbbbbbbb-2222', kind: 'headless' as const, status: 'running' as const, title: 'task', hasTmux: false },
+      ],
+    };
+    const out = diagReport(s);
+    expect(out).toContain('claude-sonnet-4-5');
+    expect(out).toContain('high');
+    expect(out).toContain('main');
+    expect(out).toMatch(/— · —/); // la headless senza dati mostra i segnaposto
+  });
 });
