@@ -32,6 +32,13 @@ describe('SessionManager', () => {
     expect(b.id).toBe(a.id);
     expect(manager.list().filter(s => s.tmuxTarget === 'claude:x')).toHaveLength(1);
   });
+  it('records the model on terminal registration when provided', () => {
+    const { manager } = makeManager();
+    const s = manager.registerTerminal({ title: 'x', projectDir: '/tmp/x', tmuxTarget: 'claude:x', model: 'claude-sonnet-5' });
+    expect(s.model).toBe('claude-sonnet-5');
+    const plain = manager.registerTerminal({ title: 'y', projectDir: '/tmp/y', tmuxTarget: 'claude:y' });
+    expect(plain.model).toBeUndefined();
+  });
   it('setProjectDir updates projectDir and emits session.updated only on change', () => {
     const { manager, onUpdated } = makeManager();
     const s = manager.registerTerminal({ title: 'x', projectDir: '/tmp/x', tmuxTarget: 'claude:x' });

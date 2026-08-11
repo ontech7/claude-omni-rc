@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { join } from 'node:path';
+import { augmentPath } from './path.js';
 import { loadConfig, type Config } from './config.js';
 import { initLogger, log } from './log.js';
 import { StateStore } from './state.js';
@@ -16,6 +17,11 @@ import { Inbox } from './input.js';
 import { startApi } from './api.js';
 import { TelegramBot } from '../bot/telegram.js';
 import { checkForUpdate, markNotified, CURRENT_VERSION, RELEASES_URL, CHECK_INTERVAL_MS } from './update.js';
+
+// Prima di ogni altra cosa: il PATH di launchd non include ~/.local/bin (uv,
+// pipx) né ~/bin, dove vivono `ollama-usage` e `claude`. Senza, ogni spawn()
+// dal daemon fallisce con ENOENT anche se il tool è installato.
+augmentPath();
 
 export interface Daemon { start(): Promise<void>; stop(): Promise<void>; }
 

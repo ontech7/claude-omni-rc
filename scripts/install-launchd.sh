@@ -27,6 +27,7 @@ sed -e "s|__NODE__|$NODE|g" \
     -e "s|__DAEMON__|$REPO/src/daemon.ts|g" \
     -e "s|__REPO__|$REPO|g" \
     -e "s|__STATE__|$STATE|g" \
+    -e "s|__USER_BIN__|$HOME/.local/bin|g" \
     "$REPO/scripts/com.ontech7.claude-omni-rc.plist.template" > "$PLIST"
 
 launchctl unload "$PLIST" 2>/dev/null || true

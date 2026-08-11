@@ -8,6 +8,7 @@ import type { PermissionFlow } from '../permissions.js';
 import type { DialogFlow } from '../dialogs.js';
 import type { SessionManager } from './manager.js';
 import { parseAskUserQuestions } from './transcript.js';
+import { resolveProvider } from '../usage.js';
 
 export interface SdkDriverDeps {
   bus: Bus;
@@ -49,15 +50,15 @@ export class SdkDriver {
       // query() attacchi il listener → va onorato qui (e dopo la fetch), o si perderebbe.
       if (ac.signal.aborted) throw new DOMException('aborted', 'AbortError');
       // L'SDK spawna `claude --model <modello>` con l'ambiente del daemon. Il
-      // driver è "omni": rispetta il provider configurato dall'utente via env
-      // (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY in .env).
-      // Solo quando il base URL è quello di Ollama replica `ollama launch claude`
-      // (token placeholder + mapping dei modelli default + context length reale);
-      // per ogni altro provider l'env passa intatto.
+      // driver è "omni": stesso criterio di omni-rc.sh (resolveProvider) —
+      // ANTHROPIC_BASE_URL esplicito (≠ Ollama) vince per ogni modello; un
+      // modello Anthropic (claude-*) va su Anthropic nativo; tutto il resto
+      // replica `ollama launch claude` (token placeholder + mapping dei modelli
+      // default + context length reale).
       const env = { ...process.env };
-      const baseUrl = env.ANTHROPIC_BASE_URL ?? config.ollamaBaseUrl;
-      env.ANTHROPIC_BASE_URL = baseUrl;
-      if (baseUrl === config.ollamaBaseUrl) {
+      const provider = resolveProvider(config, model, env);
+      if (provider === 'ollama') {
+        env.ANTHROPIC_BASE_URL = config.ollamaBaseUrl;
         if (!env.ANTHROPIC_AUTH_TOKEN && !env.ANTHROPIC_API_KEY) env.ANTHROPIC_AUTH_TOKEN = 'ollama';
         if (env.ANTHROPIC_API_KEY === undefined) env.ANTHROPIC_API_KEY = '';
         env.ANTHROPIC_DEFAULT_HAIKU_MODEL = model;
@@ -66,7 +67,12 @@ export class SdkDriver {
         const ctx = await this.deps.ollama.modelContext(model);
         if (ac.signal.aborted) throw new DOMException('aborted', 'AbortError');
         if (ctx !== undefined) env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(ctx);
+      } else if (provider === 'anthropic') {
+        // Anthropic nativo: base URL esplicito, credenziali (ANTHROPIC_AUTH_TOKEN
+        // / ANTHROPIC_API_KEY) già nell'env del daemon passano intatte.
+        env.ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
       }
+      // 'custom': l'env passa intatto (ANTHROPIC_BASE_URL già impostato).
       const stream = query({
         prompt,
         options: {

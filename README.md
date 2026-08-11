@@ -231,9 +231,12 @@ on the machine. See [SECURITY.md](SECURITY.md) for what that implies.
 
 ### Usage windows (`/usage`)
 
-`/usage` checks the 5-hour and weekly windows for whichever provider is
-currently configured — the same detection `omni-rc`/headless sessions use
-(`ANTHROPIC_BASE_URL` unset → Ollama; set → that provider):
+`/usage` checks the 5-hour and weekly windows for whichever provider the
+**active session** uses (or `DEFAULT_MODEL` when there is no active session) —
+the same model-aware detection `omni-rc`/headless sessions use: an explicit
+`ANTHROPIC_BASE_URL` (≠ Ollama) wins for every model; a model starting with
+`claude-` (or the `opus`/`sonnet`/`haiku`/`fable` aliases) means Anthropic;
+anything else is Ollama.
 
 - **Anthropic** (a claude.ai Pro/Max/Team/Enterprise session): read via the
   Agent SDK's experimental `/usage` control API — no extra install needed. API
@@ -243,7 +246,8 @@ currently configured — the same detection `omni-rc`/headless sessions use
   [`ollama-usage`](https://github.com/ontech7/ollama-usage) installed and
   authenticated (`ollama-usage auth`) **on the machine running the daemon** —
   `/usage` shells out to `ollama-usage --json`. If it's missing, the bot
-  replies with the install command.
+  replies with the install command. The daemon's PATH includes `~/.local/bin`
+  and `~/bin` (where `ollama-usage` is typically installed) even under launchd.
 
 ### Media
 
@@ -314,7 +318,7 @@ release. When one exists, it logs a one-line notice to `daemon.log` **and**
 sends it to your bound Telegram chat — at most once per version:
 
 ```
-⬆️ New version available: claude-omni-rc 0.3.0 (you have 0.2.0) — https://github.com/ontech7/claude-omni-rc/releases
+⬆️ New version available: claude-omni-rc 0.4.0 (you have 0.3.0) — https://github.com/ontech7/claude-omni-rc/releases
 ```
 
 Disable it with `CLAUDE_OMNI_RC_NO_UPDATE_CHECK=1` in `.env`.

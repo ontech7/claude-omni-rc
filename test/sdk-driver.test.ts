@@ -273,6 +273,28 @@ describe('SdkDriver', () => {
       if (prev === undefined) delete process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS; else process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = prev;
     }
   });
+  it('routes an Anthropic model to native Anthropic (no Ollama overrides)', async () => {
+    const keys = ['ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'CLAUDE_CODE_MAX_CONTEXT_TOKENS'] as const;
+    const prev = Object.fromEntries(keys.map(k => [k, process.env[k]]));
+    for (const k of keys) delete process.env[k]; // l'env della shell non deve inquinare il test
+    try {
+      const { sdk, manager, ollama } = makeDriver();
+      const s = manager.createHeadless({ title: 'anthropic', projectDir: '/tmp/a', model: 'claude-sonnet-5' });
+      queryMock.mockImplementationOnce(async function* () { yield resultMsg(s.id, 'ok'); });
+      await sdk.runTurn(s.id, 'x');
+      const opts = queryMock.mock.calls[0][0].options;
+      expect(opts.env.ANTHROPIC_BASE_URL).toBe('https://api.anthropic.com');
+      expect(opts.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBeUndefined();
+      expect(opts.env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBeUndefined();
+      expect(opts.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBeUndefined();
+      expect(opts.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBeUndefined();
+      expect(ollama.modelContext).not.toHaveBeenCalled();
+    } finally {
+      for (const k of keys) {
+        if (prev[k] === undefined) delete process.env[k]; else process.env[k] = prev[k];
+      }
+    }
+  });
   it('passes through a non-Ollama provider env untouched (no Ollama overrides)', async () => {
     const keys = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
       'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL',

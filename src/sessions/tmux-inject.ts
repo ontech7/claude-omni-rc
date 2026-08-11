@@ -132,16 +132,13 @@ export class TmuxClient {
     return r.stdout.trim();
   }
 
-  // Cwd REALE del processo claude nel pane. Quando il CLI sposta la sessione in
-  // un git worktree (`cd .claude/worktrees/<nome>`), il cwd del PANE resta
-  // quello di partenza: `pane_current_path` non basta a risolvere il transcript,
-  // che finisce nella dir worktree-encoded di ~/.claude/projects. Il processo
-  // claude (figlio di `ollama launch claude`) invece ha il cwd vero.
-  //
   // Dal pane_pid (la radice del pane) scende nell'albero dei processi fino al
-  // primo il cui eseguibile è `claude` e ne legge il cwd con lsof. undefined se
-  // il processo non c'è o non è leggibile → il chiamante ripiega sul cwd del pane.
-  async claudeCwd(target: string, tree?: ProcessTree): Promise<string | undefined> {
+  // primo il cui eseguibile è `claude` e ne restituisce il pid. undefined se il
+  // processo non c'è o il pane non è leggibile.
+  //
+  // Lo snapshot può arrivare dal chiamante: il watcher ne prende UNO per poll e
+  // lo condivide fra le sessioni, invece di uno `ps` per sessione.
+  private async findClaudePid(target: string, tree?: ProcessTree): Promise<string | undefined> {
     try {
       const t = await this.resolveTarget(target);
       const pidRes = await this.exec(['display-message', '-p', '-t', t, '#{pane_pid}']);
@@ -149,8 +146,6 @@ export class TmuxClient {
       const root = pidRes.stdout.trim();
       if (!/^\d+$/.test(root)) return undefined;
 
-      // Lo snapshot può arrivare dal chiamante: il watcher ne prende UNO per
-      // poll e lo condivide fra le sessioni, invece di uno `ps` per sessione.
       const snapshot = tree ?? await this.processTree();
       if (!snapshot) return undefined;
       const { children, comms } = snapshot;
@@ -164,18 +159,51 @@ export class TmuxClient {
         if (seen.has(pid)) continue;
         seen.add(pid);
         const comm = comms.get(pid) ?? '';
-        if (comm.split('/').pop() === 'claude') {
-          const lsof = await this.sh('lsof', ['-a', '-p', pid, '-d', 'cwd', '-Fn']);
-          if (lsof.code !== 0) return undefined;
-          for (const line of lsof.stdout.split('\n')) {
-            const n = line.match(/^n(.*)$/);
-            if (n) return n[1];
-          }
-          return undefined;
-        }
+        if (comm.split('/').pop() === 'claude') return pid;
         queue.push(...(children.get(pid) ?? []));
       }
       return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  // Cwd REALE del processo claude nel pane. Quando il CLI sposta la sessione in
+  // un git worktree (`cd .claude/worktrees/<nome>`), il cwd del PANE resta
+  // quello di partenza: `pane_current_path` non basta a risolvere il transcript,
+  // che finisce nella dir worktree-encoded di ~/.claude/projects. Il processo
+  // claude (figlio di `ollama launch claude`) invece ha il cwd vero.
+  //
+  // undefined se il processo non c'è o non è leggibile → il chiamante ripiega
+  // sul cwd del pane.
+  async claudeCwd(target: string, tree?: ProcessTree): Promise<string | undefined> {
+    try {
+      const pid = await this.findClaudePid(target, tree);
+      if (!pid) return undefined;
+      const lsof = await this.sh('lsof', ['-a', '-p', pid, '-d', 'cwd', '-Fn']);
+      if (lsof.code !== 0) return undefined;
+      for (const line of lsof.stdout.split('\n')) {
+        const n = line.match(/^n(.*)$/);
+        if (n) return n[1];
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  // Modello del processo claude nel pane, letto dalla riga di comando
+  // (`claude --model <modello>`). undefined se il processo non c'è o non ha
+  // --model (es. `ollama launch claude` lo imposta via env) → il chiamante usa
+  // DEFAULT_MODEL.
+  async claudeModel(target: string, tree?: ProcessTree): Promise<string | undefined> {
+    try {
+      const pid = await this.findClaudePid(target, tree);
+      if (!pid) return undefined;
+      const ps = await this.sh('ps', ['-o', 'args=', '-p', pid]);
+      if (ps.code !== 0) return undefined;
+      const m = ps.stdout.match(/(?:^|\s)--model\s+(\S+)/);
+      return m ? m[1] : undefined;
     } catch {
       return undefined;
     }

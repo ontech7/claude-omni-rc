@@ -20,6 +20,7 @@ function makeWatcher(tmuxSessions: string[] = [], serverUp = true, env: Record<s
     paneCwd: vi.fn(async (t: string) => `/home/user/${t.replace('claude:', '')}`),
     paneCommand: vi.fn(async () => 'ollama'), // default: claude attivo nel pane
     claudeCwd: vi.fn(async (_t: string, _tree?: unknown): Promise<string | undefined> => undefined), // default: nessun processo claude distinguibile
+    claudeModel: vi.fn(async (_t: string, _tree?: unknown): Promise<string | undefined> => undefined), // default: nessun --model leggibile
     processTree: vi.fn(async () => ({ children: new Map<string, string[]>(), comms: new Map<string, string>() })),
   };
   const watcher = new TmuxWatcher({ config, manager, tmux: tmux as any });
@@ -37,6 +38,14 @@ describe('TmuxWatcher', () => {
     expect(manager.findByTmuxTarget('claude:proj2')).toBeDefined();
     expect(manager.findByTmuxTarget('work')).toBeUndefined(); // non claude:* → ignorata
     expect(tmux.paneCwd).toHaveBeenCalled();
+  });
+  it('records the claude --model on registration when readable', async () => {
+    const { manager, watcher, tmux } = makeWatcher(['claude:proj1']);
+    tmux.claudeModel.mockResolvedValue('claude-sonnet-5');
+    manager.setArmed(true);
+    await (watcher as any).poll();
+    const s1 = manager.findByTmuxTarget('claude:proj1');
+    expect(s1?.model).toBe('claude-sonnet-5');
   });
   it('does nothing when disarmed', async () => {
     const { manager, watcher } = makeWatcher(['claude:proj1']);

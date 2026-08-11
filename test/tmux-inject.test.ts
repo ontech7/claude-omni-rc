@@ -168,6 +168,50 @@ describe('TmuxClient.claudeCwd', () => {
   });
 });
 
+describe('TmuxClient.claudeModel', () => {
+  it('parses --model from the claude process command line', async () => {
+    const exec: any = async (args: string[]) => {
+      if (args[0] === 'list-sessions') return { code: 0, stdout: '$0 claude:proj\n', stderr: '' };
+      if (args[0] === 'display-message') return { code: 0, stdout: '100\n', stderr: '' };
+      throw new Error('unexpected tmux call: ' + args.join(' '));
+    };
+    const sh: any = async (cmd: string, args: string[]) => {
+      if (cmd === 'ps' && args[0] === '-o' && args[1] === 'args=') return { code: 0, stdout: '/Users/u/.local/bin/claude --model claude-sonnet-5\n', stderr: '' };
+      if (cmd === 'ps') return { code: 0, stdout: '100 1 -zsh\n200 100 ollama\n300 200 /Users/u/.local/bin/claude\n', stderr: '' };
+      throw new Error('unexpected sh call: ' + cmd);
+    };
+    const client = new TmuxClient(exec, sh);
+    await expect(client.claudeModel('claude:proj')).resolves.toBe('claude-sonnet-5');
+  });
+  it('returns undefined when the claude process has no --model (ollama launch claude)', async () => {
+    const exec: any = async (args: string[]) => {
+      if (args[0] === 'list-sessions') return { code: 0, stdout: '$0 claude:proj\n', stderr: '' };
+      if (args[0] === 'display-message') return { code: 0, stdout: '100\n', stderr: '' };
+      throw new Error('unexpected');
+    };
+    const sh: any = async (cmd: string, args: string[]) => {
+      if (cmd === 'ps' && args[0] === '-o' && args[1] === 'args=') return { code: 0, stdout: '/Users/u/.local/bin/claude\n', stderr: '' };
+      if (cmd === 'ps') return { code: 0, stdout: '100 1 -zsh\n200 100 ollama\n300 200 /Users/u/.local/bin/claude\n', stderr: '' };
+      throw new Error('unexpected sh call: ' + cmd);
+    };
+    const client = new TmuxClient(exec, sh);
+    await expect(client.claudeModel('claude:proj')).resolves.toBeUndefined();
+  });
+  it('returns undefined when no claude process runs in the pane', async () => {
+    const exec: any = async (args: string[]) => {
+      if (args[0] === 'list-sessions') return { code: 0, stdout: '$0 claude:proj\n', stderr: '' };
+      if (args[0] === 'display-message') return { code: 0, stdout: '100\n', stderr: '' };
+      throw new Error('unexpected');
+    };
+    const sh: any = async (cmd: string) => {
+      if (cmd === 'ps') return { code: 0, stdout: '100 1 -zsh\n200 100 ollama\n', stderr: '' };
+      throw new Error('unexpected sh call: ' + cmd);
+    };
+    const client = new TmuxClient(exec, sh);
+    await expect(client.claudeModel('claude:proj')).resolves.toBeUndefined();
+  });
+});
+
 describe('TmuxClient.processTree', () => {
   it('parses the process table once into a reusable snapshot', async () => {
     let psCalls = 0;

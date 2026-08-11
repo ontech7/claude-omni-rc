@@ -1532,11 +1532,15 @@ export class TelegramBot {
   }
 
   // Ollama Cloud (via ollama-usage) o Anthropic (via l'API sperimentale della
-  // Agent SDK) a seconda del provider configurato — stesso criterio usato da
-  // sdk-driver.ts per le sessioni headless.
+  // Agent SDK) a seconda del provider della sessione attiva — stesso criterio
+  // model-aware di omni-rc.sh e sdk-driver.ts (resolveProvider). Senza sessione
+  // attiva si usa DEFAULT_MODEL.
   private async onUsage(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
-    if (isOllamaProvider(this.deps.config)) {
+    const active = this.deps.manager.getActive();
+    const s = active ? this.deps.manager.get(active) : undefined;
+    const model = s?.model ?? this.deps.config.defaultModel;
+    if (isOllamaProvider(this.deps.config, model)) {
       await this.sendOllamaUsage(ctx);
     } else {
       await this.sendAnthropicUsage(ctx);

@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - 2026-08-11
 
 - **Structured log and `/diag`.** The daemon writes one JSON record per event to
   `~/.claude-omni-rc/logs/daemon.jsonl` (levels, size-based rotation). Every
@@ -13,6 +13,19 @@
   API; any other provider (Ollama, a custom proxy) shells out to
   [`ollama-usage`](https://github.com/ontech7/ollama-usage), which must be
   installed and authenticated on the daemon's machine.
+- **`/usage` provider detection is model-aware.** The provider is decided from
+  the active session's model (or `DEFAULT_MODEL`), matching `omni-rc`/headless
+  sessions: an explicit `ANTHROPIC_BASE_URL` (≠ Ollama) wins for every model; a
+  `claude-*` model (or the `opus`/`sonnet`/`haiku`/`fable` aliases) means
+  Anthropic; anything else is Ollama. Headless sessions with a `claude-*` model
+  now route to Anthropic natively instead of Ollama.
+- **The daemon finds `ollama-usage` (and `claude`) under launchd.** The launchd
+  PATH didn't include `~/.local/bin`/`~/bin` (where uv/pipx install tools), so
+  `/usage` reported "not installed" even when it was. The daemon now prepends
+  those dirs to its PATH at startup, and the launchd plist template includes
+  `~/.local/bin` explicitly. Terminal sessions also record their model (parsed
+  from the `claude --model` command line) so `/usage` reflects the active
+  session's provider.
 - **Update check**: the daemon checks GitHub once a day for a newer release
   and, at most once per version, logs and sends a Telegram notice to the bound
   chat. Disable with `CLAUDE_OMNI_RC_NO_UPDATE_CHECK=1`.
