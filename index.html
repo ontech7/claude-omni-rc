@@ -149,6 +149,10 @@
   .cmd button.copied .copy { display: none; }
   .cmd button.copied .check { display: block; }
 
+  /* shrink-to-fit would size this block on the nowrap prompt inside it, which
+     scrolls the whole page sideways under ~560px */
+  .ai-path { width: 100%; max-width: 660px; }
+
   .sub {
     margin-top: 16px;
     color: var(--muted);
@@ -263,6 +267,43 @@
   .term .y { color: #fbbf24; }
   .term .dim { color: #71717a; }
 
+  /* ---------- screenshots ---------- */
+  /* real Telegram captures, framed in the same dark card as .term so the two
+     kinds of proof read as one element; sized in px in the markup so the
+     aspect ratio is reserved before the image loads */
+  .shot { margin: 0; }
+  .shot img { display: block; width: 100%; height: auto; }
+  .shot figcaption {
+    padding: 12px 15px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    color: #a1a1aa;
+    font-size: 13.5px;
+    line-height: 1.55;
+    text-align: left;
+  }
+  .shot figcaption b { color: #e4e4e7; font-weight: 500; }
+  .shot figcaption code {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: #e4e4e7;
+  }
+
+  .shot-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 18px;
+    align-items: start;
+  }
+  .shot-split {
+    display: grid;
+    grid-template-columns: 0.82fr 1fr;
+    gap: 20px;
+    align-items: start;
+  }
+  .shot-split .col { display: grid; gap: 18px; align-content: start; }
+  .shot-split .note { margin-top: 0; }
+  .shot-usage { max-width: 560px; margin: 0 auto; }
+
   .note {
     margin-top: 18px;
     color: var(--muted);
@@ -364,6 +405,7 @@
   @media (max-width: 700px) {
     .steps { grid-template-columns: 1fr; gap: 26px; }
     .types, .models { grid-template-columns: 1fr; gap: 16px; }
+    .shot-row, .shot-split { grid-template-columns: 1fr; gap: 16px; }
   }
   @media (max-width: 560px) {
     .nav-links .optional { display: none; }
@@ -475,18 +517,23 @@
       </li>
     </ol>
 
-    <div class="term">
-      <div class="term-bar"><i></i><i></i><i></i><span>Telegram</span></div>
-      <pre><span class="prompt">@your_bot</span>
-/rc on
-<span class="g">🔓 Remote control ARMED.</span>
-/new write a haiku about tmux
-<span class="b">🆕 Session a1b2c3d4 started.</span>
-🔧 Permission requested — session a1b2c3d4
-Tool: Bash
-{"command":"ollama list"}
-<span class="y">[✓ Approve]  [✗ Reject]</span>
-<span class="g">✅ Ran it.</span></pre>
+    <div class="shot-row">
+      <figure class="term shot">
+        <div class="term-bar"><i></i><i></i><i></i><span>Telegram</span></div>
+        <img src="assets/screenshots/tg-arm.webp" width="900" height="656" loading="lazy" decoding="async"
+             alt="Telegram chat: /start replies “Welcome! State: disarmed”, /rc replies “Remote control ARMED”, and /sessions lists the running claude:deepseek terminal session.">
+        <figcaption><b>Pair, then arm.</b> <code>/start</code> authorises the
+        chat, <code>/rc</code> flips the switch, <code>/sessions</code> picks
+        the session.</figcaption>
+      </figure>
+      <figure class="term shot">
+        <div class="term-bar"><i></i><i></i><i></i><span>Telegram</span></div>
+        <img src="assets/screenshots/tg-session.webp" width="900" height="656" loading="lazy" decoding="async"
+             alt="Telegram chat: a message sent to the selected session is answered by Claude Code running on the machine at home.">
+        <figcaption><b>Then just type.</b> Plain text goes to the active
+        session — a real turn on your machine, answered back in the
+        chat.</figcaption>
+      </figure>
     </div>
   </section>
 
@@ -502,27 +549,35 @@ Tool: Bash
       </p>
     </header>
 
-    <div class="term">
-      <div class="term-bar"><i></i><i></i><i></i><span>Telegram</span></div>
-      <pre><span class="prompt">/sessions</span>
-<span class="dim">▸</span> claude:my-project
-⚙️ Running the test suite
-⚙️ Reading README.md
-12 tests pass, coverage 94%
-<span class="b">❓ Which approach do you prefer?</span>
-1) Refactor the parser
-2) Add a timeout + retry</pre>
-    </div>
+    <div class="shot-split">
+      <figure class="term shot">
+        <div class="term-bar"><i></i><i></i><i></i><span>Telegram</span></div>
+        <img src="assets/screenshots/tg-question.webp" width="900" height="1102" loading="lazy" decoding="async"
+             alt="Telegram chat: a ❓ multiple-choice question from the session, with one button per option plus ✓ Done and ✏️ Other.">
+        <figcaption><b>Questions become buttons.</b> One question at a time,
+        one button per option — plus ✓ Done for multi-select.</figcaption>
+      </figure>
 
-    <p class="note">
-      Files you send are saved to <code>~/.claude-omni-rc/inbox/</code> and forwarded
-      to the session as a path the model can read. Permissions — for headless
-      and terminal sessions alike — arrive as <code>✓ Approve</code> /
-      <code>✗ Reject</code> buttons; unanswered requests expire into a deny.
-      Headless sessions use the provider you configure in <code>.env</code>
-      (Ollama by default), and <code>/new --model &lt;name&gt;</code> picks the
-      model for a single session.
-    </p>
+      <div class="col">
+        <p class="note">
+          Files you send are saved to <code>~/.claude-omni-rc/inbox/</code> and forwarded
+          to the session as a path the model can read. Permissions — for headless
+          and terminal sessions alike — arrive as <code>✓ Approve</code> /
+          <code>✗ Reject</code> buttons; unanswered requests expire into a deny.
+          Headless sessions use the provider you configure in <code>.env</code>
+          (Ollama by default), and <code>/new --model &lt;name&gt;</code> picks the
+          model for a single session.
+        </p>
+        <figure class="term shot">
+          <div class="term-bar"><i></i><i></i><i></i><span>Telegram</span></div>
+          <img src="assets/screenshots/tg-other.webp" width="900" height="480" loading="lazy" decoding="async"
+               alt="Telegram chat: after tapping ✏️ Other the bot asks you to type your answer, with a Cancel button.">
+          <figcaption><b>None of the options fit?</b> ✏️ Other takes free text,
+          and Cancel is always there — a session never parks on a dialog you
+          can't answer.</figcaption>
+        </figure>
+      </div>
+    </div>
   </section>
 
   <section class="section" id="session-types">
@@ -606,6 +661,16 @@ Tool: Bash
       in <code>.env</code> (different from Ollama) overrides both. Terminal and
       headless sessions share the same provider logic.
     </p>
+
+    <figure class="term shot shot-usage" style="margin-top:26px">
+      <div class="term-bar"><i></i><i></i><i></i><span>Telegram</span></div>
+      <img src="assets/screenshots/tg-usage.webp" width="900" height="221" loading="lazy" decoding="async"
+           alt="Telegram chat: /usage replies with the Ollama Cloud usage — 5h at 0% and weekly at 9%, each with its reset time.">
+      <figcaption><b><code>/usage</code> follows the same rule.</b> The 5-hour
+      and weekly windows of whichever provider the active session uses —
+      Anthropic through the Agent SDK, anything else through
+      <code>ollama-usage</code>.</figcaption>
+    </figure>
   </section>
 
   <footer>
