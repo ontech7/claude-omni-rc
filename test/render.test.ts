@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mdToHtml, balanceHtml, splitHtmlMessage, truncateAtWord, htmlEscape } from '../bot/render.js';
+import { mdToHtml, balanceHtml, splitHtmlMessage, truncateAtWord, htmlEscape, shortenPath } from '../bot/render.js';
 
 describe('mdToHtml v2 / balanceHtml', () => {
   it('renders bold, italic and nested ***both***', () => {
@@ -70,5 +70,43 @@ describe('splitHtmlMessage', () => {
     const parts = splitHtmlMessage('x'.repeat(250), 100);
     expect(parts.length).toBeGreaterThan(1);
     expect(parts.join('')).toBe('x'.repeat(250));
+  });
+});
+
+describe('shortenPath', () => {
+  const proj = '/Users/tizio/Progetti/app';
+
+  it('renders relative a path inside the project', () => {
+    expect(shortenPath(`${proj}/bot/telegram.ts`, proj)).toBe('bot/telegram.ts');
+  });
+
+  it('does not confuse a sibling directory with the project prefix', () => {
+    // '/Users/tizio/Progetti/app-2' starts with '/Users/tizio/Progetti/app'
+    expect(shortenPath('/Users/tizio/Progetti/app-2/x.ts', proj)).toContain('app-2');
+  });
+
+  it('replaces home with ~ outside the project', () => {
+    const home = process.env.HOME ?? '/Users/tizio';
+    expect(shortenPath(`${home}/altrove/nota.md`, proj)).toBe('~/altrove/nota.md');
+  });
+
+  it('leaves a path absolute when outside project and home', () => {
+    expect(shortenPath('/etc/hosts', proj)).toBe('/etc/hosts');
+  });
+
+  it('elides middle segments beyond maxLen while keeping the filename', () => {
+    const lungo = `${proj}/` + 'segmento/'.repeat(12) + 'finale.ts';
+    const out = shortenPath(lungo, proj, 50);
+    expect(out.length).toBeLessThanOrEqual(50);
+    expect(out).toContain('…');
+    expect(out.endsWith('finale.ts')).toBe(true);
+  });
+
+  it('returns empty string for empty input', () => {
+    expect(shortenPath('', proj)).toBe('');
+  });
+
+  it('works without projectDir', () => {
+    expect(shortenPath('/etc/hosts')).toBe('/etc/hosts');
   });
 });

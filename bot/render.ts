@@ -152,3 +152,30 @@ export function truncateAtWord(s: string, max: number): string {
   const end = sp > max * 0.5 ? sp : max;
   return s.slice(0, end).trimEnd() + '… (truncated)';
 }
+
+// Absolute paths are the main reason tool calls become unreadable in chat:
+// '/Users/tizio/Progetti/app/bot/telegram.ts' conveys much less than
+// 'bot/telegram.ts'. The boundary is the separator, not the prefix: without
+// checking for '/' a sibling directory ('app-2') would be shortened as if it
+// were inside the project.
+export function shortenPath(p: string, projectDir?: string, maxLen = 50): string {
+  if (!p) return '';
+  let out = p;
+  const strip = (base: string | undefined, replacement: string): boolean => {
+    if (!base) return false;
+    const b = base.endsWith('/') ? base.slice(0, -1) : base;
+    if (out === b) { out = replacement || '.'; return true; }
+    if (out.startsWith(`${b}/`)) { out = replacement + out.slice(b.length + (replacement ? 0 : 1)); return true; }
+    return false;
+  };
+  if (!strip(projectDir, '')) strip(process.env.HOME, '~');
+  if (out.length <= maxLen) return out;
+  // Elision in the middle: the tail (filename) is the part that identifies
+  // the line, the head provides context. The middle is what can be sacrificed.
+  const parts = out.split('/');
+  const last = parts[parts.length - 1];
+  const first = parts.length > 1 ? parts[0] : '';
+  const candidate = first ? `${first}/…/${last}` : `…/${last}`;
+  if (candidate.length <= maxLen) return candidate;
+  return last.length <= maxLen ? last : `…${last.slice(-(maxLen - 1))}`;
+}
