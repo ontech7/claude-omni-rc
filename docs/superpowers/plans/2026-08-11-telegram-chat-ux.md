@@ -1623,83 +1623,57 @@ Da dichiarare esplicitamente al termine, senza dire "fatto" su un'assunzione: CI
 
 ---
 
-## Stato di esecuzione — aggiornato 2026-08-11
+## Stato di esecuzione — completato 2026-08-11
 
 Questa sezione è il punto di ripartenza. Fidati di questa sezione e di
 `git log`, non di ricostruzioni a memoria.
 
-### Fatto
+### Fatto — tutti gli 11 task del piano
 
-- **Task 1 — `bot/render.ts` estratto.** Commit `64467b9`. Revisionato: spec ✅,
-  qualità approvata. 382 test, 0 fallimenti. Spostamento puro verificato riga per
-  riga contro l'originale: nessun corpo di funzione alterato.
-- **Task 2 — `shortenPath()`.** Commit `c93f06a`, più `3da0402` (commento di
-  intestazione tradotto in inglese) e `0a99ffe` (correzione dei due rilievi
-  Important della review). **Chiuso e verificato**: 392 test, 0 fallimenti; la
-  re-review mirata ha confermato ADDRESSED entrambi i rilievi.
-- **Task 3 — catalogo `describeTool` / `renderToolLine`.** Commit `003aeee`.
-  Revisionato: spec ✅, solo rilievi Minor. 409 test, 0 fallimenti.
-- **Task 4 — catalogo collegato al bot, summarizer via Ollama rimosso.**
-  Commit `f252479`, più `7c82498` (rimozione del dead code `lastUserText`
-  segnalato dalla review). 400 test — il calo da 409 è atteso: sono spariti i 9
-  test delle funzioni cancellate. Zero riferimenti residui ai simboli rimossi.
-  Re-review mirata: ADDRESSED, nessuna rottura.
+- **Task 1** — `bot/render.ts` estratto: `64467b9`.
+- **Task 2** — `shortenPath()`: `c93f06a`, `3da0402`, `0a99ffe`.
+- **Task 3** — catalogo `describeTool` / `renderToolLine`: `003aeee`.
+- **Task 4** — catalogo collegato, summarizer via Ollama rimosso: `f252479`,
+  `7c82498`.
+- **Task 5** — `mdToHtml` esteso + invariante dei tag: `f8ee5bc`.
+- **Task 6** — fallimenti delle tool marcati `❌`: `e700ba5`.
+- **Task 7** — bolle tool silenziose, senza anteprime, richiudibili; marcatore
+  `(i/n)`: `88430f4`.
+- **Task 8** — `parentToolUseId` sul bus + evento `session.agent`:
+  `1f6388a`.
+- **Task 9** — `renderAgentCard` / `formatDuration` (puri): `c43983f`.
+- **Task 10** — instradamento dei subagent nella scheda + toggle:
+  `aa9ebba`.
+- **Task 11** — documentazione allineata: `a9be87a`.
 
-### Da verificare PRIMA di proseguire
+**Gate finale (dopo `a9be87a`): typecheck pulito, 435 test, 0 fallimenti**, con
+`env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY npm
+test`. Il gate chiude anche il debito di verifica dei Task 2 e 4 rimasto dalla
+sessione precedente (400/0 con env pulito confermato a inizio sessione).
 
-Il Task 2 **non ha evidenza di test**. L'ambiente di esecuzione ha smesso di
-poter lanciare `node` a metà lavoro (`Tool permission request failed`), quindi
-né l'implementatore né il controller hanno potuto eseguire la suite dopo il
-commit `0a99ffe`. Il codice è stato ispezionato a lettura e la correzione appare
-giusta, ma **letto non è verificato**.
+### Scostamenti dal testo letterale del piano (Task 10)
 
-Primo comando della prossima sessione:
+Due correzioni necessarie, entrambe coperte dal typecheck:
 
-```bash
-cd /Users/ontech7/Documents/PersonalProjects/claude-omni-rc
-export PATH="$HOME/.nvm/versions/node/$(ls ~/.nvm/versions/node | tail -1)/bin:$PATH"
-npm run typecheck && env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY npm test
-```
+1. **`parsed.id` invece di `data.id`** nel caso `agent-toggle` di `onCallback`:
+   il piano scrive `data.id`, ma `data` è la stringa grezza del callback —
+   l'id vive in `parsed`.
+2. **Fallback sulla `taskId` per la fase `done`.** `task_updated` (che porta il
+   terminale `done`) non ha `tool_use_id` nell'SDK, quindi la lookup del piano
+   per chiave (il `toolUseId` della scheda) mancherebbe la scheda e ogni
+   subagent completato resterebbe "⏳" fino al kill di fine turno. Il gestore
+   ora cerca prima per chiave, poi per `taskId` salvata nella entry (e usa la
+   chiave reale per il refresh).
 
-Atteso: **392 test, 0 fallimenti** (382 di base + 7 del Task 2 + 3 aggiunti dal
-fix). Se il numero non torna o qualcosa fallisce, il debito è nel Task 2 e va
-chiuso prima di aprire il Task 3.
+### Non verificato (dichiarazione esplicita)
 
-I due rilievi che il fix `0a99ffe` doveva chiudere:
-1. una `base` che si riduce a stringa vuota (es. `HOME='/'`) faceva match su
-   **qualunque** path assoluto: `/etc/hosts` → `~/etc/hosts`;
-2. il ramo finale di elisione non era coperto da alcun test.
-
-### Da fare
-
-**Task 5 → 11**, nell'ordine del piano. Nessuno è stato iniziato.
-
-Il prossimo è il **Task 5**, ed è il più pericoloso del piano: estende `mdToHtml`
-con tag nuovi (`blockquote`, `s`, `u`) **e** insegna quegli stessi tag a
-`balanceHtml` e `splitHtmlMessage`. I due cambi devono stare nello stesso commit.
-Se si aggiunge un tag senza insegnarlo allo split, i messaggi lunghi vengono
-prodotti malformati, Telegram li rifiuta, e l'invio — che sta dentro un
-`.catch()` — **li perde in silenzio**: nessun errore, nessun log, solo testo che
-non arriva. Il test dell'invariante (`splitHtmlMessage` su un blockquote più
-lungo del limite, con ogni pezzo che deve risultare già bilanciato) non è
-opzionale.
-
-### Nota sull'ambiente, per chi riprende
-
-Verso la fine di questa sessione l'esecuzione di `npm`, `npx`, `node` e `rtk` ha
-cominciato a fallire in modo intermittente con
-`Tool permission request failed: AbortError: Stream closed`, fino a bloccare
-anche le scritture su file via shell. **Non è causato dal codice**: `git` e i
-comandi shell semplici continuavano a funzionare. Se lo incontri, non inseguirlo
-come se fosse un bug del progetto.
-
-Per questo il gate del Task 4 dopo il commit `7c82498` non ha una conferma
-letterale "400/0 con env pulito". L'evidenza raccolta è: typecheck pulito;
-`npx vitest run` con env sporco → 398 verdi e 2 rossi, dove i 2 rossi sono
-esattamente gli env-leak preesistenti di `sdk-driver` documentati sopra; totale
-400, invariato rispetto a prima del fix; `grep lastUserText` a zero match. Il fix
-era una cancellazione di 5 righe di codice morto. **Primo comando utile alla
-ripresa**: rilanciare il gate per chiudere formalmente anche questo.
+CI non ha token bot, tmux né telefono. **Non** sono verificati
+automaticamente: la resa reale su Telegram (evidenziazione della sintassi,
+`blockquote expandable`, comportamento delle notifiche), il toggle della scheda
+agent su un client vero, e il percorso subagent end-to-end con un `Task` reale
+(incluso se l'SDK emetta `task_updated` o `task_notification` come segnale
+terminale: il driver traduce `task_updated`, e il kill di fine turno copre il
+caso in cui non arrivi). Servono un daemon vivo e un telefono.
 
 ### Cose imparate, da non riscoprire
 
