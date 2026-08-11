@@ -421,9 +421,16 @@ describe('TranscriptWatcher (transcript rebind grace window)', () => {
 
     // la nostra sessione resta muta per più della finestra di grazia (l'umano
     // sta pensando alla domanda); il transcript "foreign" nella stessa dir,
-    // attivo di continuo, la supera e vince il binding
+    // attivo di continuo, la supera e vince il binding. Gli diamo contenuto
+    // VERO (non solo la riga "mode" amministrativa) prima dello switch: così,
+    // se in futuro il pin regredisse (es. tornasse a girare a EOF-al-momento-
+    // dello-switch invece che a EOF-al-primo-avvistamento, o peggio rileggesse
+    // la sua storia), questo test lo noterebbe — la riga 'contenuto-foreign'
+    // NON deve mai comparire in `onText`, né ora né dopo.
     const foreignFile = join(mainDir, 'foreign.jsonl');
-    writeFileSync(foreignFile, JSON.stringify({ type: 'mode', sessionId: 'foreign' }) + '\n');
+    writeFileSync(foreignFile,
+      JSON.stringify({ type: 'mode', sessionId: 'foreign' }) + '\n' +
+      JSON.stringify({ type: 'assistant', message: { id: 'f1', stop_reason: 'end_turn', content: [{ type: 'text', text: 'contenuto-foreign' }] } }) + '\n');
     clock = t0 + TRANSCRIPT_SWITCH_GRACE_MS + 5_000;
     utimesSync(foreignFile, new Date(clock), new Date(clock));
 
@@ -443,7 +450,10 @@ describe('TranscriptWatcher (transcript rebind grace window)', () => {
     await (watcher as any).pollSession(s); // il nostro file torna a essere il più recente: il binding rientra
 
     expect(manager.get(s.id)?.transcriptFile).toBe(oursFile);
-    expect(onText).toEqual(['durante-1', 'durante-2']); // recuperate, in ordine, una sola volta
+    // toEqual, non toContain: un array ESATTO — 'contenuto-foreign' (scritto
+    // sul file foreign prima dello switch) non deve comparire da nessuna
+    // parte. Recuperate, in ordine, una sola volta.
+    expect(onText).toEqual(['durante-1', 'durante-2']);
   });
 
   // Fix round 2 — issue Critica C2: con la finestra di grazia, nel momento in

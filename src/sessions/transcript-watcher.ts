@@ -212,6 +212,23 @@ export class TranscriptWatcher {
       // vedi `boundIsQuiet`/`isNewer` sotto per la regola esatta.
       const newest = newestTranscriptFile(dirname(file));
       if (newest && newest !== file) {
+        // Pinniamo il candidato al PRIMO avvistamento, PRIMA di valutare
+        // qualsiasi altra cosa (compreso se il legato è già silenzioso
+        // abbastanza da farlo vincere SUBITO). Se aspettassimo di sapere se
+        // vince (come nel giro precedente di questo fix, che pinnava solo nel
+        // ramo "non vince ancora"), il caso in cui candidato-scoperto e
+        // candidato-promosso coincidono sullo stesso poll — tutt'altro che raro:
+        // è la forma normale di una rotazione quando il file legato era già
+        // fermo da prima che il nuovo comparisse — non avrebbe mai attraversato
+        // quel ramo, e il primo tail per lui nascerebbe solo più tardi, dentro
+        // la chiusura di pollSession più sotto. Pinnarlo qui rende "un tail dal
+        // primo avvistamento" una garanzia strutturale, non un effetto
+        // collaterale implicito di un altro punto del codice — e vale anche se
+        // il controllo sul file legato qui sotto si ferma per un errore
+        // transitorio (vedi il ramo `currentMtime === undefined &&
+        // existsSync(file)`), che altrimenti avrebbe impedito il pin del tutto.
+        this.tailFor(s.id, newest);
+
         const currentMtime = this.mtimeOf(file);
         if (currentMtime === undefined && existsSync(file)) {
           // statSync è appena fallito ma existsSync conferma che il file c'è
@@ -246,17 +263,6 @@ export class TranscriptWatcher {
             log().info('transcript bound', { sessionId: s.id, previous, next: file, reason: 'file-switch' });
             manager.setTranscriptFile(s.id, file);
             manager.persist();
-          } else if (newestMtime !== undefined) {
-            // Non vince ancora, ma "pinniamo" comunque un tail per il candidato
-            // FIN DA ORA (non da quando vincerà): se si tratta di una rotazione
-            // vera, per tutta la finestra di grazia il file nuovo accumula la
-            // conversazione VERA post-rotazione. Se aspettassimo il momento
-            // dello switch per creare il tail (a EOF), quella conversazione
-            // andrebbe persa esattamente come il file vecchio nel bug originale
-            // — solo un minuto più tardi. Pinnarlo qui, quando lo vediamo per
-            // la prima volta, fissa l'offset vicino alla sua nascita: quando
-            // (e se) vincerà, il tail esiste già e riprende da lì.
-            this.tailFor(s.id, newest);
           }
         }
       }
