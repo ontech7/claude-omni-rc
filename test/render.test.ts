@@ -8,14 +8,14 @@ describe('mdToHtml v2 / balanceHtml', () => {
   });
   it('protects code blocks and inline code from formatting', () => {
     expect(mdToHtml('`**code**`')).toBe('<code>**code**</code>');
-    expect(mdToHtml('```js\n# h\n**x**\n```')).toBe('<pre>js\n# h\n**x**\n</pre>');
+    expect(mdToHtml('```js\n# h\n**x**\n```')).toBe('<pre><code class="language-js"># h\n**x**\n</code></pre>');
   });
   it('converts headings outside code to bold', () => {
-    expect(mdToHtml('# not a heading')).toBe('<b>not a heading</b>');
+    expect(mdToHtml('# not a heading')).toBe('\n<b>not a heading</b>');
   });
   it('does not double-wrap a heading that contains bold', () => {
     expect(mdToHtml('# **title**')).toBe('# <b>title</b>');
-    expect(mdToHtml('# plain')).toBe('<b>plain</b>');
+    expect(mdToHtml('# plain')).toBe('\n<b>plain</b>');
   });
   it('leaves unclosed markers literal (no unbalanced HTML)', () => {
     expect(mdToHtml('**unclosed')).toBe('**unclosed');
@@ -236,5 +236,70 @@ describe('renderToolLine', () => {
   it('puts command on second line in code', () => {
     const out = renderToolLine({ icon: '⚡', label: 'Bash', detail: 'Install', code: 'npm ci' });
     expect(out).toBe('⚡ <b>Bash</b> — Install\n<code>npm ci</code>');
+  });
+});
+
+describe('mdToHtml — added constructs', () => {
+  it('puts the language on the code block', () => {
+    expect(mdToHtml('```ts\nconst a = 1\n```')).toContain('<pre><code class="language-ts">');
+  });
+
+  it('ignores an implausible language', () => {
+    expect(mdToHtml('```non un linguaggio\nx\n```')).toContain('<pre>');
+    expect(mdToHtml('```non un linguaggio\nx\n```')).not.toContain('class="language-');
+  });
+
+  it('renders quotes and merges consecutive lines', () => {
+    const out = mdToHtml('> prima\n> seconda');
+    expect(out).toContain('<blockquote>');
+    expect((out.match(/<blockquote>/g) ?? []).length).toBe(1);
+  });
+
+  it('renders strikethrough', () => {
+    expect(mdToHtml('~~via~~')).toContain('<s>via</s>');
+  });
+
+  it('preserves ordered lists', () => {
+    expect(mdToHtml('1. primo\n2. secondo')).toContain('1. primo');
+  });
+
+  it('indents nested lists', () => {
+    expect(mdToHtml('- a\n  - b')).toContain('◦ b');
+  });
+
+  it('never produces a pre inside a blockquote', () => {
+    // Telegram rejects the combination: the renderer must not generate it.
+    const out = mdToHtml('> cit\n\n```\ncodice\n```');
+    expect(/<blockquote>(?:(?!<\/blockquote>)[\s\S])*<pre>/.test(out)).toBe(false);
+  });
+
+  it('aligns tables in a pre block', () => {
+    const out = mdToHtml('| tool | uso |\n|---|---|\n| Read | file |\n| Bash | comandi |');
+    expect(out).toContain('<pre>');
+    expect(out).not.toContain('|---|');            // the separator row disappears
+    expect(out).toMatch(/tool\s+\|\s+uso/);        // columns aligned at fixed width
+    expect(out).toContain('Bash');
+  });
+
+  it('separates headings with a blank line', () => {
+    expect(mdToHtml('testo\n## Titolo')).toContain('\n\n<b>Titolo</b>');
+  });
+});
+
+describe('tag invariant on split and balancing', () => {
+  it('balances an unclosed blockquote', () => {
+    expect(balanceHtml('<blockquote>testo')).toBe('<blockquote>testo</blockquote>');
+  });
+
+  it('splits a long blockquote without losing text or unbalancing tags', () => {
+    const inner = Array.from({ length: 500 }, (_, i) => `riga ${i}`).join('\n');
+    const parts = splitHtmlMessage(`<blockquote>${inner}</blockquote>`);
+    expect(parts.length).toBeGreaterThan(1);
+    for (const p of parts) {
+      expect(p.length).toBeLessThanOrEqual(3800);
+      expect(balanceHtml(p)).toBe(p);              // every chunk is already valid
+      expect(p.startsWith('<blockquote>')).toBe(true); // tag reopened at each chunk
+    }
+    expect(parts.join('')).toContain('riga 499');  // the tail is not lost
   });
 });

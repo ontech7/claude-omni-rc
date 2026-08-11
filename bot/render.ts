@@ -18,20 +18,64 @@ export function mdToHtml(text: string): string {
   // Separatore per i placeholder del codice: un NUL non compare mai nel testo
   // del modello, quindi il ripristino non può corrompere il contenuto.
   const P = String.fromCharCode(0);
-  const protect = (c: string, kind: 'pre' | 'code'): string => {
+  const protect = (c: string, kind: 'pre' | 'code', lang?: string): string => {
     const idx = blocks.length;
-    blocks.push(kind === 'pre' ? `<pre>${c}</pre>` : `<code>${c}</code>`);
+    blocks.push(
+      kind === 'pre'
+        ? (lang ? `<pre><code class="language-${lang}">${c}</code></pre>` : `<pre>${c}</pre>`)
+        : `<code>${c}</code>`);
     return `${P}${idx}${P}`;
   };
   let out = htmlEscape(text);
-  out = out.replace(/```([\s\S]*?)```/g, (_m, c) => protect(c, 'pre'));
+  // The fence's first line is its info string: only a plausible single-token
+  // language earns a class. Anything with spaces ('non un linguaggio') keeps
+  // the classless <pre>, because a bogus class buys nothing and costs width.
+  out = out.replace(/```([^\n]*)\n?([\s\S]*?)```/g, (_m, first: string, c: string) =>
+    protect(c, 'pre', /^[a-z0-9+#-]{1,20}$/.test(first) ? first : undefined));
   out = out.replace(/`([^`\n]+)`/g, (_m, c) => protect(c, 'code'));
+  // A table is readable on Telegram only at fixed width: <pre> is the one
+  // container that preserves it. Columns are capped because on a narrow screen
+  // one long cell would wrap the whole grid. This runs right after code
+  // protection so a pipe inside a fence is already a placeholder and never
+  // looks like a table — and the <pre> it builds goes through the same
+  // protection, so it cannot end up inside a blockquote either.
+  const CELL_MAX = 24;
+  out = out.replace(/(?:^\|.*\|[ \t]*\n?){2,}/gm, table => {
+    const rows = table.trimEnd().split('\n')
+      .map(r => r.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim()));
+    // the separator row ('---', ':--') is not data: it disappears
+    const body = rows.filter(r => !r.every(c => /^:?-{2,}:?$/.test(c)));
+    if (body.length < 2) return table;
+    const cols = Math.max(...body.map(r => r.length));
+    const width: number[] = [];
+    for (let c = 0; c < cols; c++) {
+      width[c] = Math.min(CELL_MAX, Math.max(...body.map(r => (r[c] ?? '').length)));
+    }
+    const rendered = body
+      .map(r => Array.from({ length: cols }, (_, c) => (r[c] ?? '').slice(0, CELL_MAX).padEnd(width[c])).join(' | ').trimEnd())
+      .join('\n');
+    return `${protect(rendered, 'pre')}\n`;
+  });
   out = out
     .replace(/\*\*\*([^*]+)\*\*\*/g, '<b><i>$1</i></b>')
     .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
     .replace(/\*([^*]+)\*/g, '<i>$1</i>');
-  out = out.replace(/^#{1,6}\s+([^<]+)$/gm, '<b>$1</b>');
+  // Nested lists need their own pass: the flat rule below anchors at the line
+  // start, so an indented item is invisible to it. The two rules do not
+  // overlap, so their order does not matter.
+  out = out.replace(/^ {2,}[-*]\s+(.+)$/gm, '  ◦ $1');
   out = out.replace(/^[-*]\s+(.+)$/gm, '• $1');
+  out = out.replace(/~~([^~\n]+)~~/g, '<s>$1</s>');
+  out = out.replace(/^(?:-{3,}|\*{3,})$/gm, '——————');
+  // Quotes: consecutive '>' lines become a single blockquote. Code blocks are
+  // already safe inside placeholders, so a <pre> can never end up in here.
+  out = out.replace(/(?:^&gt;\s?.*(?:\n|$))+/gm, m => {
+    const body = m.replace(/^&gt;\s?/gm, '').replace(/\n$/, '');
+    return `<blockquote>${body}</blockquote>\n`;
+  });
+  // A blank line before a heading separates sections in a linear chat; the
+  // replacement adds it because the line itself carries no preceding space.
+  out = out.replace(/^#{1,6}\s+([^<\n]+)$/gm, '\n<b>$1</b>');
   out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>');
   out = out.replace(new RegExp(`${P}([0-9]+)${P}`, 'g'), (_m, i) => blocks[Number(i)]);
   return balanceHtml(out);
@@ -44,7 +88,9 @@ export function balanceHtml(html: string): string {
   const stack: string[] = [];
   let out = '';
   let last = 0;
-  const re = /<\/?(b|i|code|pre|a)(?:\s[^>]*)?>/g;
+  // Fresh regex per call: HTML_TAG is global and sharing its lastIndex across
+  // re-entrant functions would be an ordering bug.
+  const re = new RegExp(HTML_TAG.source, 'g');
   let m: RegExpExecArray | null;
   while ((m = re.exec(html)) !== null) {
     out += html.slice(last, m.index);
@@ -77,7 +123,13 @@ export function balanceHtml(html: string): string {
 // Il limite duro è 4096: si sta sotto con margine, perché i tag riaperti a
 // inizio chunk e l'escaping HTML aggiungono caratteri.
 export const SEND_MAX_CHARS = 3800;
-const HTML_TAG = /<\/?(b|i|code|pre|a)(?:\s[^>]*)?>/g;
+// The tag list is this module's invariant: mdToHtml may only emit tags that
+// appear here, because balanceHtml and splitHtmlMessage reason over this same
+// list. A tag emitted but not listed crosses the split without being reopened:
+// the message comes out malformed, Telegram rejects it, and the send — which
+// sits inside a .catch() — drops it in silence.
+const TAG_NAMES = 'b|i|code|pre|a|blockquote|s|u';
+const HTML_TAG = new RegExp(`</?(${TAG_NAMES})(?:\\s[^>]*)?>`, 'g');
 
 export function splitHtmlMessage(html: string, max = SEND_MAX_CHARS): string[] {
   if (html.length <= max) return [html];
@@ -86,8 +138,8 @@ export function splitHtmlMessage(html: string, max = SEND_MAX_CHARS): string[] {
   const tokens: { tag?: string; text?: string }[] = [];
   let last = 0;
   let m: RegExpExecArray | null;
-  HTML_TAG.lastIndex = 0;
-  while ((m = HTML_TAG.exec(html)) !== null) {
+  const re = new RegExp(HTML_TAG.source, 'g');
+  while ((m = re.exec(html)) !== null) {
     if (m.index > last) tokens.push({ text: html.slice(last, m.index) });
     tokens.push({ tag: m[0] });
     last = m.index + m[0].length;
