@@ -394,6 +394,11 @@ export interface QuestionFlow {
   // `sets` — permette a showQuestion() di loggare la consegna con lo stesso
   // eventId della riga 'event queued'/'event emitted' che l'ha preceduta.
   eventIds: (string | undefined)[];
+  // Task 8, punto 5: blocco di contesto del pane per ciascun set, parallelo a
+  // `sets` — undefined finché la cattura (fire-and-forget, vedi
+  // attachPaneContext) non è tornata, o per sempre se il set non è di
+  // provenienza hook/terminale o la cattura è fallita.
+  paneContexts: (string | undefined)[];
   setIndex: number;           // set corrente
   qIndex: number;             // domanda corrente nel set
   answers: (PromptAnswer | undefined)[][];  // risposte per set, per domanda (undefined = non risposta)
@@ -428,6 +433,59 @@ export function answersToMessage(questions: PromptQuestion[], answers: (PromptAn
     return `${i + 1}. ${title} → ${a ? answerSummary(a) : '(no answer)'}`;
   });
   return `Answers to your questions:\n${lines.join('\n')}`;
+}
+
+// Task 8, punto 4: chiave di deduplica per una domanda arrivata sul bus.
+// toolUseId se presente (identità univoca della tool_use — sia l'hook che il
+// transcript lo portano per la STESSA domanda); altrimenti una firma del
+// contenuto (sessione + testo di domande e opzioni), per il caso raro in cui
+// l'hook non è riuscito a leggere l'id (variante di payload non prevista).
+// Pura ed esportata: la logica "quale delle due copie vince" NON vive qui —
+// vive nell'ORDINE DI ARRIVO all'handler del bus (vedi registerPromptKey):
+// la prima occorrenza di una chiave è mostrata, la seconda è lo scarto. Dato
+// che l'hook scatta prima che il CLI apra il menu e il transcript scrive la
+// stessa tool_use solo quando il turno si sblocca (l'utente ha già risposto
+// al terminale), la copia dell'hook arriva SEMPRE per prima: non c'è verso di
+// invertire l'esito scambiando l'ordine dei controlli qui dentro, perché qui
+// dentro non c'è nessun controllo sull'ordine — solo sull'identità.
+export function promptDedupeKey(sessionId: string, questions: PromptQuestion[], toolUseId?: string): string {
+  if (toolUseId) return `id:${toolUseId}`;
+  const sig = questions.map(q => `${q.question}|${q.options.map(o => o.label).join(',')}`).join(';');
+  return `sig:${sessionId}:${sig}`;
+}
+
+// Quante chiavi di deduplica tenere per sessione: abbastanza per il caso
+// normale (poche domande in coda contemporaneamente), non un archivio senza
+// fine per una sessione che vive per giorni.
+export const PROMPT_DEDUPE_CAP = 50;
+
+// Quante righe di contesto del pane mostrare sopra una domanda dall'hook:
+// abbastanza per orientarsi, non l'intero pane.
+export const PANE_CONTEXT_LINES = 20;
+
+// Registra `key` nell'elenco delle chiavi già viste (FIFO con cap): se era già
+// presente la domanda è un duplicato (va scartata con motivo
+// 'duplicate-prompt', mai in silenzio) e l'elenco torna invariato; altrimenti
+// viene aggiunta e l'elenco (troncato al cap) torna con lei dentro. Pura: non
+// tocca lo stato del bot, il chiamante (isDuplicatePrompt) si limita a
+// leggere/scrivere la Map per sessione.
+export function registerPromptKey(seen: readonly string[], key: string, cap = PROMPT_DEDUPE_CAP): { duplicate: boolean; seen: string[] } {
+  if (seen.includes(key)) return { duplicate: true, seen: [...seen] };
+  const next = [...seen, key];
+  return { duplicate: false, seen: next.length > cap ? next.slice(next.length - cap) : next };
+}
+
+// Task 8, punto 5: righe di contesto del pane da mostrare sopra una domanda
+// di provenienza hook (il testo che il modello ha scritto prima vive solo nel
+// transcript e arriva in ritardo). Ultime `maxLines` righe NON vuote, ANSI
+// già rimosso da stripAnsi, in un blocco <pre> (larghezza fissa, coerente con
+// /view). Stringa vuota se non resta nulla da mostrare — il chiamante la usa
+// come segnale "niente contesto", non come blocco vuoto.
+export function formatPaneContext(pane: string, maxLines = 20): string {
+  const lines = stripAnsi(pane).split('\n').map(l => l.trimEnd()).filter(l => l.trim().length > 0);
+  const tail = lines.slice(-maxLines);
+  if (!tail.length) return '';
+  return `<pre>${htmlEscape(tail.join('\n'))}</pre>\n\n`;
 }
 
 // Reply numerico dell'utente come fallback ai bottoni: "2" → [2], "1, 3" → [1,3].
@@ -551,7 +609,12 @@ export function narrationPlan(role: 'user' | 'assistant', text: string, burstOpe
 // Perché un evento non è stato consegnato. Ogni `return` silenzioso dei gestori
 // del bus corrisponde a uno di questi motivi: senza un nome, uno scarto è
 // indistinguibile da una perdita.
-export type DropReason = 'not-armed' | 'no-chat-bound' | 'not-active-session' | 'injected-echo';
+// 'duplicate-prompt' (Task 8): la copia dal transcript della stessa domanda
+// già mostrata dall'hook — vedi promptDedupeKey/registerPromptKey. Non passa
+// da gateSessionEvent (non è un gate armed/sessione-attiva, è un'identità
+// già vista), ma condivide il vocabolario di questo tipo per restare
+// cercabile allo stesso modo di ogni altro scarto.
+export type DropReason = 'not-armed' | 'no-chat-bound' | 'not-active-session' | 'injected-echo' | 'duplicate-prompt';
 export type DeliveryGate = { deliver: true } | { deliver: false; reason: DropReason };
 export type GateKind = 'text' | 'tool' | 'error' | 'result' | 'prompt' | 'permission' | 'dialog';
 
@@ -871,6 +934,10 @@ export class TelegramBot {
   // stati: set accodati, una domanda alla volta, multi-select e "Other").
   private questionFlows = new Map<string, QuestionFlow>(); // sessionId → flow
   private flowsByToken = new Map<string, QuestionFlow>(); // token → flow
+  // Task 8, punto 4: chiavi di deduplica già viste per sessione (vedi
+  // promptDedupeKey/registerPromptKey) — riconosce la copia tardiva del
+  // transcript della stessa domanda già mostrata dall'hook.
+  private seenPromptKeys = new Map<string, string[]>();
   // Permessi ExitPlanMode in attesa del testo libero per "Edit plan":
   // sessionId → id della richiesta di permesso.
   private pendingPlanEdits = new Map<string, string>();
@@ -1005,6 +1072,17 @@ export class TelegramBot {
     if (!gate.deliver) log().info('event dropped', { eventId, sessionId, kind, reason: gate.reason });
     return gate;
   }
+
+  // Task 8, punto 4: true se questa chiave è già stata vista per la sessione
+  // (la domanda va scartata come 'duplicate-prompt'), false se è nuova (e la
+  // registra). Wrapper stateful attorno a registerPromptKey (pura, testata
+  // direttamente) — qui vive solo la lettura/scrittura della Map per sessione.
+  private isDuplicatePrompt(sessionId: string, key: string): boolean {
+    const { duplicate, seen } = registerPromptKey(this.seenPromptKeys.get(sessionId) ?? [], key);
+    this.seenPromptKeys.set(sessionId, seen);
+    return duplicate;
+  }
+
   private async forwardText(sessionId: string, text: string, role: 'user' | 'assistant', eventId?: string): Promise<void> {
     const chatId = this.chatId;
     if (!chatId) { log().warn('send skipped', { sessionId, kind: 'text', reason: 'no-chat-bound' }); return; }
@@ -1487,17 +1565,45 @@ export class TelegramBot {
     this.flowsByToken.delete(flow.token);
   }
 
+  // Task 8, punto 5: righe di contesto per un set arrivato dall'hook, su una
+  // sessione terminale. Fire-and-forget rispetto alla domanda — che è già
+  // partita (o accodata) prima che questo venga chiamato: se tmux non
+  // risponde o fallisce, qui si logga soltanto e la domanda resta senza
+  // contesto, mai bloccata né ritentata. Se la cattura torna e la domanda è
+  // ancora quella a schermo (stesso flow, stesso set, prima domanda), il
+  // messaggio viene editato per aggiungere il blocco.
+  private attachPaneContext(flow: QuestionFlow, setIndex: number, sessionId: string, tmuxTarget: string): void {
+    this.deps.tmux.capturePane(tmuxTarget).then(pane => {
+      const block = formatPaneContext(pane, PANE_CONTEXT_LINES);
+      if (!block) return;
+      if (this.questionFlows.get(sessionId) !== flow) return; // flow sostituito/chiuso nel frattempo
+      flow.paneContexts[setIndex] = block;
+      if (flow.setIndex === setIndex && flow.qIndex === 0 && flow.messageId) void this.updateQuestionMessage(flow);
+    }).catch(err => {
+      log().warn('pane context capture failed', { sessionId, err });
+    });
+  }
+
   // Un nuovo set di domande (una chiamata AskUserQuestion) arriva dal bus:
   // accodato al flow della sessione; se il flow è idle, mostra la prima domanda.
-  private async onSessionPrompt(sessionId: string, questions: PromptQuestion[], eventId: string | undefined): Promise<void> {
+  private async onSessionPrompt(sessionId: string, questions: PromptQuestion[], eventId: string | undefined, source: 'transcript' | 'hook' | undefined): Promise<void> {
     let flow = this.questionFlows.get(sessionId);
     if (!flow) {
-      flow = { sessionId, sets: [], eventIds: [], setIndex: 0, qIndex: 0, answers: [], token: randomUUID(), multiSel: [] };
+      flow = { sessionId, sets: [], eventIds: [], paneContexts: [], setIndex: 0, qIndex: 0, answers: [], token: randomUUID(), multiSel: [] };
       this.setFlow(flow);
     }
+    const setIndex = flow.sets.length;
     flow.sets.push(questions);
     flow.eventIds.push(eventId);
+    flow.paneContexts.push(undefined);
     flow.answers.push(questions.map(() => undefined));
+    // Punto 5: solo sessioni terminali e solo domande dall'hook — una sessione
+    // headless non ha un pane da catturare, e una domanda dal transcript
+    // arriva già insieme al testo che la precedeva (non c'è ritardo da colmare).
+    const session = this.deps.manager.get(sessionId);
+    if (source === 'hook' && session?.kind === 'terminal' && session.tmuxTarget) {
+      this.attachPaneContext(flow, setIndex, sessionId, session.tmuxTarget);
+    }
     // La prima domanda di un flow nuovo si mostra subito solo se questa
     // sessione è quella selezionata — altrimenti resta in pending: niente
     // interruzioni per sessioni che non stai guardando (vedi sess:select per
@@ -1531,7 +1637,11 @@ export class TelegramBot {
     const sel = q.multiSelect && flow.multiSel.length
       ? `\n\n<i>Selected: ${flow.multiSel.map(i => htmlEscape(q.options[i].label)).join(', ')}</i>`
       : '';
-    return `❓ <b>${htmlEscape(header)}</b>\n<b>${htmlEscape(title)}</b>${multi}\n${opts}${sel}`;
+    // Punto 5: il contesto compare solo sopra la PRIMA domanda del set — è
+    // uno scatto del pane preso quando l'hook è scattato, non qualcosa che ha
+    // senso ripetere identico sotto ogni domanda successiva dello stesso set.
+    const context = flow.qIndex === 0 ? (flow.paneContexts[flow.setIndex] ?? '') : '';
+    return `${context}❓ <b>${htmlEscape(header)}</b>\n<b>${htmlEscape(title)}</b>${multi}\n${opts}${sel}`;
   }
 
   // Bottoni per la domanda corrente: opzioni (toggle per multi-select), Done e Other.
@@ -2140,8 +2250,25 @@ export class TelegramBot {
       // sia le headless che i transcript delle terminali arrivano come markdown.
       void this.forwardText(e.sessionId, mdToHtml(e.text), e.role, e.eventId);
     });
-    bus.on('session.prompt', ({ sessionId, questions, eventId }) => {
+    bus.on('session.prompt', ({ sessionId, questions, eventId, toolUseId, source }) => {
       if (!this.passes('prompt', sessionId, eventId).deliver) return;
+      // Task 8, punto 4: la stessa domanda arriva due volte — dall'hook (in
+      // tempo) e poi dal transcript (quando il turno si sblocca). La chiave è
+      // calcolata qui, all'arrivo sul bus: chi arriva prima la registra come
+      // vista e passa, chi arriva dopo la trova già vista e viene scartato.
+      // Verso: l'hook scatta PRIMA che il CLI apra il menu, il transcript
+      // scrive la tool_use solo DOPO che l'utente ha già risposto al
+      // terminale — quindi la prima occorrenza è sempre quella dell'hook, e
+      // 'duplicate-prompt' cade sempre sulla copia (onesta ma tardiva) del
+      // transcript. Nessun ramo qui sceglie in base a `source`: è l'ordine di
+      // arrivo reale a decidere, e quell'ordine non si può invertire senza
+      // invertire la causa che lo produce (l'utente che risponde prima al
+      // terminale che al pane).
+      const dedupeKey = promptDedupeKey(sessionId, questions, toolUseId);
+      if (this.isDuplicatePrompt(sessionId, dedupeKey)) {
+        log().info('event dropped', { eventId, sessionId, kind: 'prompt', reason: 'duplicate-prompt', toolUseId, source });
+        return;
+      }
       // L'evento va SEMPRE registrato (mai scartato, a differenza di
       // session.text/session.tool che restano solo sulla sessione attiva): a
       // differenza dei permessi/dialoghi, AskUserQuestion non ha timeout, quindi
@@ -2160,7 +2287,7 @@ export class TelegramBot {
       // oppure 'event queued' con il motivo.
       // Fix 2: flusso domande multiple — accoda il set e mostra una domanda alla
       // volta (single-select, multi-select con toggle+Done, "Other" a testo libero).
-      this.track(this.onSessionPrompt(sessionId, questions, eventId), 'prompt flow');
+      this.track(this.onSessionPrompt(sessionId, questions, eventId, source), 'prompt flow');
     });
     bus.on('session.tool', e => {
       if (!this.passes('tool', e.sessionId, e.eventId).deliver) return;

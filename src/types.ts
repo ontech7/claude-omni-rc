@@ -52,7 +52,21 @@ export interface UserDialog {
 export type BusEvent =
   | { type: 'session.updated'; sessionId: string }
   | { type: 'session.text'; sessionId: string; role: 'user' | 'assistant'; text: string; eventId?: string }
-  | { type: 'session.prompt'; sessionId: string; questions: PromptQuestion[]; eventId?: string }
+  | {
+      type: 'session.prompt';
+      sessionId: string;
+      questions: PromptQuestion[];
+      eventId?: string;
+      // Task 8: id della tool_use AskUserQuestion che ha generato la domanda —
+      // chiave di deduplica primaria fra la copia dell'hook e quella (più
+      // tardiva) del transcript, che portano lo stesso toolUseId.
+      toolUseId?: string;
+      // Da dove arriva questa copia: l'hook scatta prima che il CLI apra il
+      // menu (in tempo per Telegram), il transcript solo quando il turno si
+      // sblocca (l'utente ha già risposto al terminale). Serve al bot per il
+      // contesto del pane (solo 'hook') e alla diagnosi nel log.
+      source?: 'transcript' | 'hook';
+    }
   | {
       type: 'session.tool';
       sessionId: string;

@@ -19,7 +19,10 @@ export interface TranscriptToolEvent {
   result?: unknown;
   isError?: boolean;
 }
-export interface TranscriptPromptEvent { type: 'prompt'; questions: PromptQuestion[] }
+// toolUseId: id della tool_use AskUserQuestion che ha generato la domanda —
+// Task 8 lo usa per deduplicare contro la copia (più tempestiva) emessa
+// dall'hook, che porta lo stesso id.
+export interface TranscriptPromptEvent { type: 'prompt'; questions: PromptQuestion[]; toolUseId?: string }
 export interface TranscriptErrorEvent { type: 'error'; message: string }
 export type TranscriptEvent = TranscriptTextEvent | TranscriptToolEvent | TranscriptPromptEvent | TranscriptErrorEvent;
 
@@ -323,7 +326,7 @@ export class TranscriptParser {
             if (!this.seenTool.has(key)) {
               this.seenTool.add(key);
               const questions = parseAskUserQuestions(b.input);
-              if (questions.length) events.push({ type: 'prompt', questions });
+              if (questions.length) events.push({ type: 'prompt', questions, toolUseId: b.id });
             }
             continue;
           }

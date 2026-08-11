@@ -104,9 +104,13 @@ describe('TranscriptParser', () => {
     });
     const p = new TranscriptParser();
     const events = p.consumeLine(askLine);
+    // Task 8: l'evento porta anche l'id della tool_use (toolUseId) — la
+    // chiave di deduplica primaria contro la copia (più tempestiva)
+    // dell'hook, che riceve lo stesso id.
     expect(events).toEqual([{
       type: 'prompt',
       questions: [{ header: 'Lingua', question: 'Che lingua?', multiSelect: false, options: [{ label: 'Italiano', description: 'IT' }, { label: 'Inglese', description: undefined }] }],
+      toolUseId: 'call_m7up16lr',
     }]);
     expect(p.state).toBe('awaiting');
     expect(p.consumeLine(askLine)).toEqual([]); // già visto

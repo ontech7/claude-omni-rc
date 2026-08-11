@@ -67,7 +67,7 @@ export function createDaemon(
 
   const reaper = setInterval(() => manager.reapIdle(), 1000);
   reaper.unref();
-  const api = startApi(config.apiPort, { manager, permissionFlow, config });
+  const api = startApi(config.apiPort, { manager, permissionFlow, config, bus });
 
   // Check versione su GitHub (vedi update.ts): al riavvio e poi ogni 24h. Log +
   // notifica Telegram, una volta per versione — mai bloccante sull'avvio.

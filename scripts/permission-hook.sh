@@ -28,12 +28,18 @@ if [ -n "${TMUX:-}" ]; then
   SID="$(tmux display-message -p '#S' 2>/dev/null || true)"
 fi
 
-# Extracts tool_name + tool_input from the hook JSON (node is required by the installer).
+# Extracts tool_name + tool_input + tool_use_id from the hook JSON (node is
+# required by the installer). L'id della tool call serve al daemon per la
+# deduplica con la copia che il transcript scriverà più tardi (Task 8): non
+# tutte le versioni del CLI lo chiamano allo stesso modo, quindi si provano le
+# varianti note e si lascia vuoto se nessuna è presente — mai un errore qui,
+# l'hook resta fail-open.
 PAYLOAD="$(SID="$SID" BODY="$BODY" node -e '
 const body = (() => { try { return JSON.parse(process.env.BODY || "{}"); } catch { return {}; } })();
 const toolName = body.tool_name ?? body.toolName ?? "tool";
 const input = body.tool_input ?? body.input ?? {};
-console.log(JSON.stringify({ toolName, input, sessionId: process.env.SID || "" }));
+const toolUseId = body.tool_use_id ?? body.toolUseId ?? "";
+console.log(JSON.stringify({ toolName, input, sessionId: process.env.SID || "", toolUseId }));
 ' 2>/dev/null)" || exit 0
 
 # Long-poll: stays open until the user decides (or times out → deny).

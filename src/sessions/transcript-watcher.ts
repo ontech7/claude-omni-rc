@@ -290,8 +290,12 @@ export class TranscriptWatcher {
     manager.touch(s.id);
     if (ev.type === 'prompt') {
       manager.setStatus(s.id, 'awaiting-input');
-      log().info('event emitted', { eventId, sessionId: s.id, source: 'transcript', kind: 'prompt', questions: ev.questions.length });
-      bus.emit({ type: 'session.prompt', sessionId: s.id, questions: ev.questions, eventId });
+      // Task 8: questa copia arriva SOLO quando il turno si sblocca (l'utente
+      // ha già risposto al terminale) — tardiva per definizione. toolUseId e
+      // source: 'transcript' permettono al bot di riconoscerla come il
+      // duplicato della copia già mostrata dall'hook e scartarla.
+      log().info('event emitted', { eventId, sessionId: s.id, source: 'transcript', kind: 'prompt', questions: ev.questions.length, toolUseId: ev.toolUseId });
+      bus.emit({ type: 'session.prompt', sessionId: s.id, questions: ev.questions, eventId, toolUseId: ev.toolUseId, source: 'transcript' });
       return;
     }
     if (ev.type === 'error') {

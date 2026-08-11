@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { resolveHeadlessProjectDir, isPrivateChat, splitHtmlMessage, parseCommand, parseNewFlags, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToInjection, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport } from '../bot/telegram.js';
+import { resolveHeadlessProjectDir, isPrivateChat, splitHtmlMessage, parseCommand, parseNewFlags, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToInjection, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, formatPaneContext } from '../bot/telegram.js';
 import type { ToolBurstSink } from '../bot/telegram.js';
 
 describe('formatPct / formatResetAt', () => {
@@ -612,6 +612,77 @@ describe('gateSessionEvent', () => {
   it('reports not-active-session over injected-echo — the echo reason must only ever describe the selected session', () => {
     expect(gateSessionEvent({ ...base, sessionId: 's2', isInjectedEcho: true }))
       .toEqual({ deliver: false, reason: 'not-active-session' });
+  });
+});
+
+describe('promptDedupeKey', () => {
+  const q = [{ question: 'Deploy now?', options: [{ label: 'Yes' }, { label: 'No' }] }];
+
+  it('keys on toolUseId when present, regardless of content', () => {
+    expect(promptDedupeKey('s1', q, 'toolu_1')).toBe(promptDedupeKey('s1', [{ question: 'other', options: [] }], 'toolu_1'));
+  });
+
+  it('falls back to a content signature (session + questions/options) when toolUseId is absent', () => {
+    expect(promptDedupeKey('s1', q)).toBe(promptDedupeKey('s1', q));
+    expect(promptDedupeKey('s1', q)).not.toBe(promptDedupeKey('s2', q)); // sessione diversa → chiave diversa
+    expect(promptDedupeKey('s1', q)).not.toBe(promptDedupeKey('s1', [{ question: 'different', options: [] }]));
+  });
+});
+
+describe('registerPromptKey', () => {
+  it('registers a new key as not-duplicate and adds it to the seen list', () => {
+    const { duplicate, seen } = registerPromptKey([], 'id:toolu_1');
+    expect(duplicate).toBe(false);
+    expect(seen).toEqual(['id:toolu_1']);
+  });
+
+  it('reports a key already in the list as duplicate, without changing the list', () => {
+    const { duplicate, seen } = registerPromptKey(['id:toolu_1'], 'id:toolu_1');
+    expect(duplicate).toBe(true);
+    expect(seen).toEqual(['id:toolu_1']);
+  });
+
+  it('evicts the oldest key once the cap is exceeded (FIFO)', () => {
+    const { seen } = registerPromptKey(['a', 'b'], 'c', 2);
+    expect(seen).toEqual(['b', 'c']);
+  });
+
+  // Task 8, direzione della deduplica: la prima occorrenza di una chiave (la
+  // domanda arrivata dall'hook, che scatta prima che il CLI apra il menu)
+  // passa; la seconda occorrenza della STESSA chiave (la stessa domanda
+  // riscritta dal transcript quando il turno si sblocca, più tardi) è quella
+  // scartata. Invertire l'ordine delle due chiamate qui sotto riprodurrebbe
+  // esattamente il bug originale (mostrare solo la copia tardiva).
+  it('first arrival (hook) wins, second arrival (transcript) of the same key is the duplicate', () => {
+    let seen: string[] = [];
+    const hookArrival = registerPromptKey(seen, 'id:toolu_1');
+    expect(hookArrival.duplicate).toBe(false); // la domanda dall'hook viene mostrata
+    seen = hookArrival.seen;
+    const transcriptArrival = registerPromptKey(seen, 'id:toolu_1');
+    expect(transcriptArrival.duplicate).toBe(true); // la copia dal transcript viene scartata
+  });
+});
+
+describe('formatPaneContext', () => {
+  it('strips ANSI, drops empty lines, and wraps the last N non-empty lines in a fixed-width block', () => {
+    const pane = '\x1b[32m$ npm test\x1b[0m\n\n  passing (12)\n\n';
+    const out = formatPaneContext(pane, 20);
+    expect(out).toContain('<pre>');
+    expect(out).toContain('$ npm test');
+    expect(out).toContain('passing (12)');
+    expect(out).not.toContain('\x1b');
+  });
+
+  it('keeps only the last maxLines non-empty lines', () => {
+    const pane = Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n');
+    const out = formatPaneContext(pane, 5);
+    expect(out).toContain('line 29');
+    expect(out).not.toContain('line 24');
+  });
+
+  it('returns an empty string when there is nothing to show — the caller treats this as "no context", not an empty block', () => {
+    expect(formatPaneContext('\n\n   \n')).toBe('');
+    expect(formatPaneContext('')).toBe('');
   });
 });
 
