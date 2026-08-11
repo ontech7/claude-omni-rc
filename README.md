@@ -147,11 +147,16 @@ own. A session appears via `claude:*` tmux discovery, the `SessionStart` hook,
 or `/attach`, whatever model backs it.
 
 - **Chat, not screen** — the daemon tails the conversation the CLI writes and
-  streams it as a chat: markdown-rendered replies, your prompts echoed, tool
-  calls grouped into one `⚙️` bubble per work burst. Notifications are
-  event-driven (`❓` questions, permission buttons, `❌` on serious errors), with
-  no status chatter in between. History is never replayed: streaming starts
-  when you select the session with `/sessions`.
+  streams it as a chat: markdown-rendered replies (code blocks with their
+  language, quotes, tables), your prompts echoed, and each tool call described
+  in words — `📖 Read · bot/telegram.ts` or `⚡ Bash` with the command on its
+  own line — instead of a wall of JSON. Paths are shortened relative to the
+  project, Skills, MCP servers and subagents are recognized, and failed calls
+  are marked `❌`. Per work burst the calls gather into one **silent** bubble
+  that collapses into a `▸ N steps` expandable blockquote when the turn ends.
+  Notifications are event-driven (`❓` questions, permission buttons, `❌` on
+  serious errors), with no status chatter in between. History is never
+  replayed: streaming starts when you select the session with `/sessions`.
 - **Multiple-choice questions** arrive as a `❓` message, one question at a time
   (single-select, multi-select with toggle + Done, and a free-text "Other"
   option). Question sets are queued and shown in sequence; tap an option, or
@@ -178,6 +183,13 @@ or `/attach`, whatever model backs it.
   automatically** — the model's plan is accepted without a prompt, so you cannot
   review or edit it from Telegram. Use `--standard` (or `/new` without `--auto`)
   when you want to approve plans yourself.
+- **Subagent cards** — in headless sessions a subagent's activity gets its own
+  `🤖 Agent` card instead of mixing into the main chat. Collapsed it shows the
+  agent type, the task and its progress (`⏳ 7 steps · 42s`); tap `👁 Details`
+  to expand its tool calls, `🙈 Hide` to collapse again, and the card flips to
+  `✅` (or `❌` on failure) when the subagent finishes. **Headless only**:
+  a subagent inside a terminal session has no card and shows just the `🤖
+  Agent` line in the stream.
 - **`/view`** grabs the raw current screen whenever you want the terminal.
 
 ### Remote permissions

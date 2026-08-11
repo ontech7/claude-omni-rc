@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+- **Readable tool calls.** Tool calls are described in words instead of raw
+  JSON: an icon and name per tool (`📖 Read`, `⚡ Bash`, `🧩 Skill`,
+  `🔌 MCP <server>`), the target (file, pattern, query, subagent type) in a
+  `code` chip, the human `description` the CLI writes, and the Bash command on
+  its own line. Absolute paths are shortened relative to the project (or to
+  `~`); failed calls are marked `❌` with the first line of the error.
+- **Extended markdown.** Replies render fenced code with the language hint,
+  blockquotes, strikethrough, nested lists, horizontal rules and aligned
+  tables; headings get a blank line before them so sections separate.
+- **Tool-bubble hygiene.** Tool bubbles are silent (`disable_notification`) and
+  preview-free, and at the end of a turn they collapse into a `▸ N steps`
+  expandable blockquote. Split messages carry a `(i/n)` continuation marker;
+  link previews are disabled on every streamed message.
+- **Subagent cards.** In headless sessions each subagent's activity lives in
+  its own `🤖 Agent` card — collapsed it shows the type, the task and its
+  progress, `👁 Details` expands the tool calls, and it flips to `✅`/`❌`
+  when done — instead of mixing into the main chat. Terminal sessions keep
+  only the `🤖 Agent` line.
+- **Behavior change:** the Ollama-based tool-call summarizer is removed. The
+  CLI already writes a human `description` on Bash calls, so summarizing cost a
+  local model call (with a 5s timeout per call) for a worse result.
+
 ## [0.4.0] - 2026-08-11
 
 - **`/settings` command.** See and change the curated user settings from the

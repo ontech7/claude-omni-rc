@@ -53,6 +53,7 @@ npm install
 | pick the provider for an `omni-rc` session | no `-m` → Ollama (`DEFAULT_MODEL` from `.env`); `-m claude-*`/`opus`/`sonnet`/`haiku`/`fable` → Anthropic; `ANTHROPIC_BASE_URL` in `.env` overrides both |
 | started claude without tmux and want remote control | you can't move a running process into tmux — restart it with `omni-rc <name>`; the `SessionStart` hook warns you when a session starts outside tmux |
 | see what the model is writing | select the session with `/sessions`: its messages stream as a chat automatically |
+| see a subagent's work in a headless session | a `🤖 Agent` card appears per subagent with its progress; `👁 Details` / `🙈 Hide` expand/collapse its tool calls (headless only — a subagent in a terminal session shows just the `🤖 Agent` line) |
 | answer a multiple-choice question | the question arrives as a `❓` message with one button per option; tap it (or reply with the option number/text) |
 | auto-attach every session on start | `./install.sh` already adds the `SessionStart` + `PermissionRequest` hooks (see `~/.claude/settings.json`) |
 | attach a terminal (tmux) session | from Telegram: `/attach <project>` (session must be named `claude:<project>`) |
