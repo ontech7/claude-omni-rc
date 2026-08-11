@@ -1635,7 +1635,15 @@ Questa sezione è il punto di ripartenza. Fidati di questa sezione e di
   riga contro l'originale: nessun corpo di funzione alterato.
 - **Task 2 — `shortenPath()`.** Commit `c93f06a`, più `3da0402` (commento di
   intestazione tradotto in inglese) e `0a99ffe` (correzione dei due rilievi
-  Important della review).
+  Important della review). **Chiuso e verificato**: 392 test, 0 fallimenti; la
+  re-review mirata ha confermato ADDRESSED entrambi i rilievi.
+- **Task 3 — catalogo `describeTool` / `renderToolLine`.** Commit `003aeee`.
+  Revisionato: spec ✅, solo rilievi Minor. 409 test, 0 fallimenti.
+- **Task 4 — catalogo collegato al bot, summarizer via Ollama rimosso.**
+  Commit `f252479`, più `7c82498` (rimozione del dead code `lastUserText`
+  segnalato dalla review). 400 test — il calo da 409 è atteso: sono spariti i 9
+  test delle funzioni cancellate. Zero riferimenti residui ai simboli rimossi.
+  Re-review mirata: ADDRESSED, nessuna rottura.
 
 ### Da verificare PRIMA di proseguire
 
@@ -1664,7 +1672,34 @@ I due rilievi che il fix `0a99ffe` doveva chiudere:
 
 ### Da fare
 
-Task 3 → 11, nell'ordine del piano. Nessuno è stato iniziato.
+**Task 5 → 11**, nell'ordine del piano. Nessuno è stato iniziato.
+
+Il prossimo è il **Task 5**, ed è il più pericoloso del piano: estende `mdToHtml`
+con tag nuovi (`blockquote`, `s`, `u`) **e** insegna quegli stessi tag a
+`balanceHtml` e `splitHtmlMessage`. I due cambi devono stare nello stesso commit.
+Se si aggiunge un tag senza insegnarlo allo split, i messaggi lunghi vengono
+prodotti malformati, Telegram li rifiuta, e l'invio — che sta dentro un
+`.catch()` — **li perde in silenzio**: nessun errore, nessun log, solo testo che
+non arriva. Il test dell'invariante (`splitHtmlMessage` su un blockquote più
+lungo del limite, con ogni pezzo che deve risultare già bilanciato) non è
+opzionale.
+
+### Nota sull'ambiente, per chi riprende
+
+Verso la fine di questa sessione l'esecuzione di `npm`, `npx`, `node` e `rtk` ha
+cominciato a fallire in modo intermittente con
+`Tool permission request failed: AbortError: Stream closed`, fino a bloccare
+anche le scritture su file via shell. **Non è causato dal codice**: `git` e i
+comandi shell semplici continuavano a funzionare. Se lo incontri, non inseguirlo
+come se fosse un bug del progetto.
+
+Per questo il gate del Task 4 dopo il commit `7c82498` non ha una conferma
+letterale "400/0 con env pulito". L'evidenza raccolta è: typecheck pulito;
+`npx vitest run` con env sporco → 398 verdi e 2 rossi, dove i 2 rossi sono
+esattamente gli env-leak preesistenti di `sdk-driver` documentati sopra; totale
+400, invariato rispetto a prima del fix; `grep lastUserText` a zero match. Il fix
+era una cancellazione di 5 righe di codice morto. **Primo comando utile alla
+ripresa**: rilanciare il gate per chiudere formalmente anche questo.
 
 ### Cose imparate, da non riscoprire
 
