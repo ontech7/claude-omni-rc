@@ -13,7 +13,9 @@ import { createShExec } from '../src/sessions/tmux-inject.js';
 import type { OllamaClient } from '../src/ollama.js';
 import type { Inbox } from '../src/input.js';
 import type { SettingsStore } from '../src/settings.js';
-import type { Session, SessionKind, SessionStatus, PermissionRequest, PromptQuestion, PromptAnswer, UserDialog } from '../src/types.js';
+import type { Session, SessionKind, SessionStatus, PermissionRequest, PromptQuestion, PromptAnswer, UserDialog, EffortLevel } from '../src/types.js';
+import { EFFORT_LEVELS } from '../src/types.js';
+import { SETTINGS_KEYS, parseSettingsValue, type SettingsKey, type UserSettings } from '../src/settings.js';
 import type { RecentMessage } from '../src/sessions/transcript.js';
 import { readRecentMessages, resolveSessionTranscript } from '../src/sessions/transcript.js';
 import { isOllamaProvider, fetchOllamaUsage, fetchAnthropicUsage } from '../src/usage.js';
@@ -74,6 +76,61 @@ export function parseNewFlags(raw: string): { mode?: 'auto' | 'standard'; model?
     break;
   }
   return { ...(mode ? { mode } : {}), ...(model ? { model } : {}), text };
+}
+
+// ---------- /settings ----------
+
+// Sottoinsieme delle chiavi curate (SettingsStore) con una riga leggibile per
+// il report. La fonte si deriva dal contenuto del file: settings[key] presente
+// → 'settings.json', assente → '.env / default' (il config è già fuso).
+export const SETTINGS_LABELS: Record<SettingsKey, string> = {
+  defaultModel: 'default model for headless sessions',
+  defaultPermissionMode: 'permission mode for /new without a flag',
+  maxHeadlessSessions: 'concurrent headless sessions',
+  permissionTimeoutSeconds: 'unanswered permission denies after (seconds)',
+  armedOnStart: 'arm the remote control on daemon start',
+  noUpdateCheck: 'disable the daily GitHub release check',
+  defaultEffort: 'reasoning effort for headless sessions',
+};
+
+export type SettingsCommand =
+  | { kind: 'all' }
+  | { kind: 'show'; key: SettingsKey }
+  | { kind: 'set'; key: SettingsKey; value: string }
+  | { kind: 'reset'; key: SettingsKey }
+  | { kind: 'invalid'; reason: string };
+
+export function parseSettingsCommand(raw: string): SettingsCommand {
+  const tokens = raw.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return { kind: 'all' };
+  if (tokens[0] === 'reset') {
+    const key = tokens[1] as SettingsKey;
+    if (tokens.length !== 2 || !(SETTINGS_KEYS as readonly string[]).includes(key)) {
+      return { kind: 'invalid', reason: `expected /settings reset <key>; known keys: ${SETTINGS_KEYS.join(', ')}` };
+    }
+    return { kind: 'reset', key };
+  }
+  const key = tokens[0] as SettingsKey;
+  if (!(SETTINGS_KEYS as readonly string[]).includes(key)) {
+    return { kind: 'invalid', reason: `unknown setting "${tokens[0]}"; known keys: ${SETTINGS_KEYS.join(', ')}` };
+  }
+  if (tokens.length === 1) return { kind: 'show', key };
+  return { kind: 'set', key, value: tokens.slice(1).join(' ') };
+}
+
+function settingsLine(key: SettingsKey, settings: UserSettings, config: Config): string {
+  const value = String(config[key]);
+  const source = settings[key] !== undefined ? 'settings.json' : '.env / default';
+  return `<code>${htmlEscape(key)}</code> = <code>${htmlEscape(value)}</code> <i>(${htmlEscape(source)})</i> — ${htmlEscape(SETTINGS_LABELS[key])}`;
+}
+
+export function formatSettingsReport(settings: UserSettings, config: Config): string {
+  const rows = SETTINGS_KEYS.map(key => settingsLine(key, settings, config)).join('\n');
+  return `<b>Settings</b>\n${rows}\n\n<i>Changes apply at the next daemon restart.</i>`;
+}
+
+export function formatSettingsKey(key: SettingsKey, settings: UserSettings, config: Config): string {
+  return `${settingsLine(key, settings, config)}\n\nSet it: <code>/settings ${htmlEscape(key)} &lt;value&gt;</code> · reset: <code>/settings reset ${htmlEscape(key)}</code>`;
 }
 
 // Dove gira una sessione headless. Senza WORKSPACE_DIRS il vecchio fallback era
@@ -1114,6 +1171,7 @@ export class TelegramBot {
       { command: 'history', description: 'Show the last messages of a session' },
       { command: 'delete', description: 'Delete a session' },
       { command: 'usage', description: 'Check provider usage (5h / weekly)' },
+      { command: 'settings', description: 'View / change user settings' },
       { command: 'help', description: 'Show all commands' },
     ]).catch(this.logCatch('setMyCommands'));
     await this.bot.start({ drop_pending_updates: true });
@@ -1348,7 +1406,7 @@ export class TelegramBot {
     const bot = this.bot;
     bot.command('start', ctx => this.safe(ctx, 'start', () => this.onStart(ctx)));
     bot.command('help', ctx => this.safe(ctx, 'help', async () => {
-      if (this.authorize(ctx)) await this.send(ctx, 'Commands: /rc [on|off|status] (no arg toggles) · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /usage · /diag · /help');
+      if (this.authorize(ctx)) await this.send(ctx, 'Commands: /rc [on|off|status] (no arg toggles) · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /usage · /diag · /settings · /help');
     }));
     bot.command('rc', ctx => this.safe(ctx, 'rc', () => this.onRc(ctx)));
     bot.command('sessions', ctx => this.safe(ctx, 'sessions', () => this.onSessions(ctx)));
@@ -1360,6 +1418,7 @@ export class TelegramBot {
     bot.command('history', ctx => this.safe(ctx, 'history', () => this.onHistory(ctx)));
     bot.command('delete', ctx => this.safe(ctx, 'delete', () => this.onDelete(ctx)));
     bot.command('usage', ctx => this.safe(ctx, 'usage', () => this.onUsage(ctx)));
+    bot.command('settings', ctx => this.safe(ctx, 'settings', () => this.onSettings(ctx)));
     bot.command('diag', ctx => this.safe(ctx, 'diag', async () => {
       if (!this.authorize(ctx)) return;
       const sessions = this.deps.manager.list();
@@ -1471,6 +1530,42 @@ export class TelegramBot {
     await ctx.reply(sessionListText(list, this.deps.manager.getActive()), {
       parse_mode: 'HTML', reply_markup: kb,
     });
+  }
+
+  private async onSettings(ctx: Context): Promise<void> {
+    if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
+    const raw = ctx.match?.toString().trim() ?? '';
+    const cmd = parseSettingsCommand(raw);
+    const settings = this.deps.settingsStore.load();
+    switch (cmd.kind) {
+      case 'all':
+        await this.send(ctx, formatSettingsReport(settings, this.deps.config));
+        return;
+      case 'show':
+        await this.send(ctx, formatSettingsKey(cmd.key, settings, this.deps.config));
+        return;
+      case 'set': {
+        const parsed = parseSettingsValue(cmd.key, cmd.value);
+        if (!parsed.ok) {
+          await this.send(ctx, `❌ Invalid value for <code>${htmlEscape(cmd.key)}</code>: ${htmlEscape(parsed.error)}.`);
+          return;
+        }
+        const next = { ...settings, ...parsed.settings };
+        this.deps.settingsStore.save(next);
+        await this.send(ctx, `✅ <code>${htmlEscape(cmd.key)}</code> = <code>${htmlEscape(cmd.value.trim())}</code> saved. Applies at the next daemon restart.`);
+        return;
+      }
+      case 'reset': {
+        const next = { ...settings };
+        delete next[cmd.key];
+        this.deps.settingsStore.save(next);
+        await this.send(ctx, `↩️ <code>${htmlEscape(cmd.key)}</code> reset to the .env / default value. Applies at the next daemon restart.`);
+        return;
+      }
+      case 'invalid':
+        await this.send(ctx, `❌ ${htmlEscape(cmd.reason)}`);
+        return;
+    }
   }
 
   private async onNew(ctx: Context): Promise<void> {

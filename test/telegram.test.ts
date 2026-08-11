@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
-import { resolveHeadlessProjectDir, isPrivateChat, splitHtmlMessage, parseCommand, parseNewFlags, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToKeys, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, formatPaneContext, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
+import { resolveHeadlessProjectDir, isPrivateChat, splitHtmlMessage, parseCommand, parseNewFlags, parseSettingsCommand, formatSettingsReport, formatSettingsKey, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToKeys, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, formatPaneContext, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
 import type { ToolBurstSink, PromptKeyEntry } from '../bot/telegram.js';
+import { loadConfig } from '../src/config.js';
 
 describe('formatPct / formatResetAt', () => {
   it('formats a rounded percentage, or an em-dash when absent', () => {
@@ -39,6 +40,52 @@ describe('parseNewFlags', () => {
     expect(parseNewFlags('--model deepseek-v4-flash:cloud refactor')).toEqual({ model: 'deepseek-v4-flash:cloud', text: 'refactor' });
     expect(parseNewFlags('--standard --model claude-sonnet-4-5 fix the bug')).toEqual({ mode: 'standard', model: 'claude-sonnet-4-5', text: 'fix the bug' });
     expect(parseNewFlags('--model m1 --auto go')).toEqual({ mode: 'auto', model: 'm1', text: 'go' });
+  });
+});
+
+describe('parseSettingsCommand', () => {
+  it('returns all for an empty argument', () => {
+    expect(parseSettingsCommand('')).toEqual({ kind: 'all' });
+    expect(parseSettingsCommand('   ')).toEqual({ kind: 'all' });
+  });
+  it('shows a single known key', () => {
+    expect(parseSettingsCommand('defaultModel')).toEqual({ kind: 'show', key: 'defaultModel' });
+  });
+  it('sets a value, joining the rest of the line', () => {
+    expect(parseSettingsCommand('defaultModel claude-opus-5')).toEqual({ kind: 'set', key: 'defaultModel', value: 'claude-opus-5' });
+    expect(parseSettingsCommand('maxHeadlessSessions 3')).toEqual({ kind: 'set', key: 'maxHeadlessSessions', value: '3' });
+  });
+  it('resets a key', () => {
+    expect(parseSettingsCommand('reset defaultEffort')).toEqual({ kind: 'reset', key: 'defaultEffort' });
+  });
+  it('rejects an unknown key with the known list', () => {
+    const c = parseSettingsCommand('bogus');
+    expect(c.kind).toBe('invalid');
+  });
+  it('rejects a reset without a known key', () => {
+    expect(parseSettingsCommand('reset').kind).toBe('invalid');
+    expect(parseSettingsCommand('reset bogus').kind).toBe('invalid');
+  });
+});
+
+describe('formatSettingsReport', () => {
+  const config = loadConfig({}, { defaultModel: 'claude-opus-5' });
+  it('lists every curated key with its effective value and source', () => {
+    const out = formatSettingsReport({ defaultModel: 'claude-opus-5' }, config);
+    expect(out).toContain('defaultModel');
+    expect(out).toContain('claude-opus-5');
+    expect(out).toContain('settings.json');
+  });
+  it('marks keys that come from .env / default and escapes dynamic values', () => {
+    const out = formatSettingsReport({}, config);
+    expect(out).toContain('.env / default');
+    expect(out).toContain('next daemon restart');
+    expect(out).not.toContain('<script>');
+  });
+  it('formats a single key via formatSettingsKey', () => {
+    const out = formatSettingsKey('defaultEffort', {}, config);
+    expect(out).toContain('defaultEffort');
+    expect(out).toContain('/settings reset defaultEffort');
   });
 });
 
