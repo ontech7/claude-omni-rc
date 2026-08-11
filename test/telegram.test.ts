@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { resolveHeadlessProjectDir, isPrivateChat, splitHtmlMessage, parseCommand, parseNewFlags, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToInjection, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, formatPaneContext, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
+import { resolveHeadlessProjectDir, isPrivateChat, splitHtmlMessage, parseCommand, parseNewFlags, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToKeys, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, formatPaneContext, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
 import type { ToolBurstSink, PromptKeyEntry } from '../bot/telegram.js';
 
 describe('formatPct / formatResetAt', () => {
@@ -125,13 +125,122 @@ describe('question flow helpers', () => {
   it('answerSummary renders option labels and free text', () => {
     expect(answerSummary({ kind: 'option', labels: ['A', 'C'] })).toBe('A, C');
     expect(answerSummary({ kind: 'other', text: 'custom' })).toBe('custom');
+    // opzioni togglate + testo libero insieme (multi-select con Other).
+    expect(answerSummary({ kind: 'option', labels: ['A'], extraText: 'custom' })).toBe('A, custom');
+    expect(answerSummary({ kind: 'option', labels: [], extraText: 'custom' })).toBe('custom');
   });
 
-  it('answerToInjection maps labels to 1-based numbers, comma-separated for multi', () => {
-    expect(answerToInjection(q, { kind: 'option', labels: ['B'] })).toBe('2');
-    expect(answerToInjection(q, { kind: 'option', labels: ['A', 'C'] })).toBe('1, 3');
-    expect(answerToInjection(q, { kind: 'other', text: 'custom' })).toBe('custom');
-    expect(answerToInjection(q, { kind: 'option', labels: ['unknown'] })).toBe('');
+  it('answerToKeys: single-select navigates Down to the option and presses Enter', () => {
+    const key = (k: string) => ({ kind: 'key' as const, key: k });
+    // A è la prima opzione (riga 1): nessun Down, Enter subito.
+    expect(answerToKeys(q, { kind: 'option', labels: ['A'] })).toEqual([key('Enter')]);
+    // B è la seconda (riga 2): un Down, poi Enter.
+    expect(answerToKeys(q, { kind: 'option', labels: ['B'] })).toEqual([key('Down'), key('Enter')]);
+    // C è la terza (riga 3): due Down, poi Enter.
+    expect(answerToKeys(q, { kind: 'option', labels: ['C'] })).toEqual([key('Down'), key('Down'), key('Enter')]);
+  });
+
+  it('answerToKeys: multiSelect toggles by number, then Submit + confirmation', () => {
+    const key = (k: string) => ({ kind: 'key' as const, key: k });
+    const mq = { question: 'Pick', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] };
+    // N=3: toggle di B e C coi tasti 2 e 3, poi Down×(N+1)=4 fino a Submit,
+    // Enter (schermata di conferma) e Enter (invia).
+    expect(answerToKeys(mq, { kind: 'option', labels: ['B', 'C'] })).toEqual([
+      key('2'), key('3'),
+      key('Down'), key('Down'), key('Down'), key('Down'),
+      key('Enter'), key('Enter'),
+    ]);
+    // Una sola opzione: un solo toggle, stesso percorso Submit.
+    expect(answerToKeys(mq, { kind: 'option', labels: ['A'] })).toEqual([
+      key('1'),
+      key('Down'), key('Down'), key('Down'), key('Down'),
+      key('Enter'), key('Enter'),
+    ]);
+  });
+
+  it('answerToKeys: other free text goes to "Type something" and confirms', () => {
+    // single-select: Down×N (riga "Type something."), testo, Enter (invia subito).
+    expect(answerToKeys(q, { kind: 'other', text: 'custom' })).toEqual([
+      { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Down' },
+      { kind: 'text', text: 'custom' },
+      { kind: 'key', key: 'Enter' },
+    ]);
+    // multi-select: dopo il testo, Down (→Submit), Enter (conferma), Enter (invia).
+    const mq = { question: 'Pick', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] };
+    expect(answerToKeys(mq, { kind: 'other', text: 'x' })).toEqual([
+      { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Down' },
+      { kind: 'text', text: 'x' },
+      { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Enter' }, { kind: 'key', key: 'Enter' },
+    ]);
+  });
+
+  it('answerToKeys: unknown labels produce no keys (nothing to inject)', () => {
+    expect(answerToKeys(q, { kind: 'option', labels: ['unknown'] })).toEqual([]);
+  });
+
+  it('answerToKeys: multiSelect with toggled options AND free text toggles the options, then types into "Type something"', () => {
+    const key = (k: string) => ({ kind: 'key' as const, key: k });
+    const mq = { question: 'Pick', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] };
+    // N=3: toggle di A (tasto 1), Down×3 fino a "Type something", testo,
+    // Down (→Submit), Enter, Enter (review). Ultima domanda di un set di 1.
+    expect(answerToKeys(mq, { kind: 'option', labels: ['A'], extraText: 'custom' })).toEqual([
+      key('1'),
+      key('Down'), key('Down'), key('Down'),
+      { kind: 'text', text: 'custom' },
+      key('Down'), key('Enter'), key('Enter'),
+    ]);
+    // Non-ultima di un set di 3: un solo Enter finale (su Next).
+    expect(answerToKeys(mq, { kind: 'option', labels: ['A'], extraText: 'custom' }, { isLast: false, setSize: 3 })).toEqual([
+      key('1'),
+      key('Down'), key('Down'), key('Down'),
+      { kind: 'text', text: 'custom' },
+      key('Down'), key('Enter'),
+    ]);
+  });
+
+  it('answerToKeys: multiSelect in a NON-last position uses a single Enter on Next (no review yet)', () => {
+    const key = (k: string) => ({ kind: 'key' as const, key: k });
+    const mq = { question: 'Pick', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] };
+    // set di 3 domande, questa è la prima: isLast=false → un solo Enter finale.
+    expect(answerToKeys(mq, { kind: 'option', labels: ['B'] }, { isLast: false, setSize: 3 })).toEqual([
+      key('2'),
+      key('Down'), key('Down'), key('Down'), key('Down'),
+      key('Enter'),
+    ]);
+    // last in un set di 3 → Submit + Enter (review) + Enter (conferma).
+    expect(answerToKeys(mq, { kind: 'option', labels: ['B'] }, { isLast: true, setSize: 3 })).toEqual([
+      key('2'),
+      key('Down'), key('Down'), key('Down'), key('Down'),
+      key('Enter'), key('Enter'),
+    ]);
+  });
+
+  it('answerToKeys: single-select as the last question of a multi-question set adds the review Enter', () => {
+    const key = (k: string) => ({ kind: 'key' as const, key: k });
+    // ultima domanda di un set di 2 → select + Enter (review) + Enter (conferma).
+    expect(answerToKeys(q, { kind: 'option', labels: ['B'] }, { isLast: true, setSize: 2 })).toEqual([
+      key('Down'), key('Enter'), key('Enter'),
+    ]);
+    // domanda intermedia di un set di 3 → select + Enter, avanza soltanto.
+    expect(answerToKeys(q, { kind: 'option', labels: ['B'] }, { isLast: false, setSize: 3 })).toEqual([
+      key('Down'), key('Enter'),
+    ]);
+  });
+
+  it('answerToKeys: other free text honors the set position too', () => {
+    // other su multiSelect non-ultima: Down×N, testo, Down (→Next), Enter.
+    const mq = { question: 'Pick', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] };
+    expect(answerToKeys(mq, { kind: 'other', text: 'x' }, { isLast: false, setSize: 3 })).toEqual([
+      { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Down' },
+      { kind: 'text', text: 'x' },
+      { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Enter' },
+    ]);
+    // other su single-select ultima di un set di 2: Down×N, testo, Enter, Enter (review).
+    expect(answerToKeys(q, { kind: 'other', text: 'custom' }, { isLast: true, setSize: 2 })).toEqual([
+      { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Down' },
+      { kind: 'text', text: 'custom' },
+      { kind: 'key', key: 'Enter' }, { kind: 'key', key: 'Enter' },
+    ]);
   });
 
   it('answersToMessage builds one line per question with the answer summary', () => {
@@ -618,14 +727,16 @@ describe('gateSessionEvent', () => {
 describe('promptDedupeKey', () => {
   const q = [{ question: 'Deploy now?', options: [{ label: 'Yes' }, { label: 'No' }] }];
 
-  it('keys on toolUseId when present, regardless of content', () => {
-    expect(promptDedupeKey('s1', q, 'toolu_1')).toBe(promptDedupeKey('s1', [{ question: 'other', options: [] }], 'toolu_1'));
-  });
-
-  it('falls back to a content signature (session + questions/options) when toolUseId is absent', () => {
+  // La chiave è SEMPRE la firma del contenuto: l'hook di 2.1.227 non porta il
+  // tool_use_id nel payload, quindi la firma è l'unica chiave condivisa fra la
+  // copia dell'hook e quella del transcript della STESSA domanda. Se la chiave
+  // dipendesse dal toolUseId, le due copie non colliderebbero mai e la domanda
+  // arriverebbe due volte (bug "è arrivata doppia").
+  it('keys on the content signature, ignoring any toolUseId — the hook and transcript copies of the same question must collide', () => {
     expect(promptDedupeKey('s1', q)).toBe(promptDedupeKey('s1', q));
+    expect(promptDedupeKey('s1', q)).toBe(promptDedupeKey('s1', [{ question: 'Deploy now?', options: [{ label: 'Yes' }, { label: 'No' }] }]));
     expect(promptDedupeKey('s1', q)).not.toBe(promptDedupeKey('s2', q)); // sessione diversa → chiave diversa
-    expect(promptDedupeKey('s1', q)).not.toBe(promptDedupeKey('s1', [{ question: 'different', options: [] }]));
+    expect(promptDedupeKey('s1', q)).not.toBe(promptDedupeKey('s1', [{ question: 'different', options: [] }])); // contenuto diverso → chiave diversa
   });
 });
 
@@ -647,21 +758,6 @@ describe('registerPromptKey', () => {
   it('evicts the oldest key once the cap is exceeded (FIFO)', () => {
     const { seen } = registerPromptKey([entry('a', 1), entry('b', 2)], 'c', { cap: 2, now: 3 });
     expect(seen).toEqual([entry('b', 2), entry('c', 3)]);
-  });
-
-  // Task 8, direzione della deduplica: la prima occorrenza di una chiave (la
-  // domanda arrivata dall'hook, che scatta prima che il CLI apra il menu)
-  // passa; la seconda occorrenza della STESSA chiave (la stessa domanda
-  // riscritta dal transcript quando il turno si sblocca, più tardi) è quella
-  // scartata. Invertire l'ordine delle due chiamate qui sotto riprodurrebbe
-  // esattamente il bug originale (mostrare solo la copia tardiva).
-  it('first arrival (hook) wins, second arrival (transcript) of the same id: key is the duplicate', () => {
-    let seen: PromptKeyEntry[] = [];
-    const hookArrival = registerPromptKey(seen, 'id:toolu_1', { now: 1000 });
-    expect(hookArrival.duplicate).toBe(false); // la domanda dall'hook viene mostrata
-    seen = hookArrival.seen;
-    const transcriptArrival = registerPromptKey(seen, 'id:toolu_1', { now: 1500 });
-    expect(transcriptArrival.duplicate).toBe(true); // la copia dal transcript viene scartata
   });
 
   // Fix round 1 (Important) — reproduction dell'issue segnalata dalla review:

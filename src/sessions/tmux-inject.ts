@@ -5,6 +5,13 @@ export interface ExecResult { code: number; stdout: string; stderr: string; }
 export type ExecFn = (args: string[], opts?: { input?: string }) => Promise<ExecResult>;
 export type ShExecFn = (cmd: string, args: string[], opts?: { input?: string }) => Promise<ExecResult>;
 
+// Passo di una sequenza di tasti per rispondere a un menu del CLI: un tasto
+// nominato (Down/Enter/… o un carattere) oppure un blocco di testo letterale
+// (digitato con send-keys -l, per il campo "Type something" della domanda).
+export type QuestionKey =
+  | { kind: 'key'; key: string }
+  | { kind: 'text'; text: string };
+
 // Esegue un comando di sistema (ps, lsof, …) con lo stesso contratto di ExecFn
 // (codice d'uscita + stdout/stderr + timeout). Serve a ispezionare i processi,
 // che il solo client tmux non può fare.
@@ -194,5 +201,28 @@ export class TmuxClient {
     const t = await this.resolveTarget(target);
     const r = await this.exec(['send-keys', '-t', t, keys]);
     if (r.code !== 0) throw new Error(`tmux send-keys failed: ${r.stderr}`);
+  }
+
+  // Sequenza di tasti per rispondere a un menu interattivo del CLI (domande
+  // AskUserQuestion). I tasti vanno inviati UNO ALLA VOLTA con una pausa fra
+  // l'uno e l'altro: il menu Ink scarta i tasti che arrivano in blocco nella
+  // stessa chiamata send-keys (verificato sul CLI reale). I blocchi di testo
+  // vanno con -l (letterali, senza interpretazione shell né bracketed paste:
+  // il paste corrompe il menu — la sequenza ESC di chiusura vale come Esc).
+  async sendKeySeq(target: string, seq: QuestionKey[], opts: { delayMs?: number } = {}): Promise<void> {
+    const t = await this.resolveTarget(target);
+    // 500ms verificati sul CLI reale: a 250ms i tasti successivi al primo
+    // venivano scartati (il menu Ink non ha finito di rendere il cambio di
+    // stato quando arriva il tasto dopo), e il single-select rispondeva
+    // all'opzione di default invece di quella scelta.
+    const delayMs = opts.delayMs ?? 500;
+    for (const step of seq) {
+      const args = step.kind === 'key'
+        ? ['send-keys', '-t', t, step.key]
+        : ['send-keys', '-l', '-t', t, step.text];
+      const r = await this.exec(args);
+      if (r.code !== 0) throw new Error(`tmux send-keys failed: ${r.stderr}`);
+      if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
   }
 }

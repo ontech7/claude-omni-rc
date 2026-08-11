@@ -35,8 +35,11 @@ export interface PromptQuestion {
 
 // Risposta dell'utente a una domanda: una o più opzioni selezionate, oppure
 // testo libero (l'opzione "Other" che il CLI aggiunge sempre automaticamente).
+// `extraText` sulle opzioni copre il caso multi-select in cui l'utente ha
+// togglato delle opzioni E ha scritto un testo libero: il CLI li registra
+// entrambi (es. "A, custom text"), quindi vanno iniettati insieme.
 export type PromptAnswer =
-  | { kind: 'option'; labels: string[] }
+  | { kind: 'option'; labels: string[]; extraText?: string }
   | { kind: 'other'; text: string };
 
 // Dialogo bloccante che il CLI chiede di renderizzare (request_user_dialog).

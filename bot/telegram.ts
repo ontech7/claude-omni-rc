@@ -8,7 +8,7 @@ import type { SessionManager } from '../src/sessions/manager.js';
 import type { PermissionFlow } from '../src/permissions.js';
 import type { DialogFlow } from '../src/dialogs.js';
 import type { SdkDriver } from '../src/sessions/sdk-driver.js';
-import type { TmuxClient } from '../src/sessions/tmux-inject.js';
+import type { TmuxClient, QuestionKey } from '../src/sessions/tmux-inject.js';
 import { createShExec } from '../src/sessions/tmux-inject.js';
 import type { OllamaClient } from '../src/ollama.js';
 import type { Inbox } from '../src/input.js';
@@ -404,6 +404,12 @@ export interface QuestionFlow {
   answers: (PromptAnswer | undefined)[][];  // risposte per set, per domanda (undefined = non risposta)
   token: string;              // token callback
   messageId?: number;         // messaggio Telegram della domanda corrente
+  // Guardia anti-race: true mentre l'invio async di showQuestion è in volo.
+  // `messageId` viene assegnato solo a invio completato, quindi da solo non
+  // basta — due set ravvicinati (es. copia hook + copia transcript della stessa
+  // domanda che passano la dedupe in finestre diverse) potrebbero entrambi
+  // passare la condizione "flow idle" e mandare due messaggi.
+  displaying?: boolean;
   chatId?: number;
   multiSel: number[];         // opzioni togglate per la multi-select corrente
   awaitingOther?: { setIndex: number; qIndex: number };  // in attesa di testo libero
@@ -411,18 +417,76 @@ export interface QuestionFlow {
 
 // Riepilogo leggibile di una risposta (per l'acknowledgment e la consegna).
 export function answerSummary(a: PromptAnswer): string {
-  return a.kind === 'option' ? a.labels.join(', ') : a.text;
+  if (a.kind === 'option') {
+    const labels = a.labels.join(', ');
+    return a.extraText ? `${labels}${labels ? ', ' : ''}${a.extraText}` : labels;
+  }
+  return a.text;
 }
 
-// Testo da iniettare nel pane tmux per rispondere a una domanda: il numero
-// dell'opzione (1-based) per le opzioni, i numeri separati da virgola per la
-// multi-select, il testo libero per "Other". Il menu del CLI mostra i numeri.
-export function answerToInjection(q: PromptQuestion, a: PromptAnswer): string {
-  if (a.kind === 'other') return a.text;
-  const nums = a.labels
-    .map(label => q.options.findIndex(o => o.label === label) + 1)
-    .filter(n => n > 0);
-  return nums.join(', ');
+// Sequenza di tasti da iniettare nel pane tmux per rispondere a una domanda
+// del menu del CLI (AskUserQuestion). Il menu è interattivo (↑/↓ + Enter): i
+// numeri NON selezionano (nel single-select non fanno nulla, nel multi-select
+// togglano soltanto e serve un'azione + una schermata di conferma), e il
+// bracketed paste lo corrompe (la sequenza ESC di chiusura vale come Esc).
+// Coreografie verificate sul CLI 2.1.227 (menu reale in tmux), anche per i SET
+// con più domande (in quel caso il menu ha un'azione "Next" finché non si è
+// all'ULTIMA domanda, poi l'azione diventa "Submit" e a fine set compare la
+// review "Submit answers / Cancel" da confermare con un Enter finale):
+//   single:      Down×i + Enter  (+ Enter se ultima domanda di un set >1)
+//   multi:       tasto (i+1) per ogni opzione togglata (il cursore resta in
+//                alto) + Down×(N+1) fino all'azione (Next o Submit)
+//                + Enter (+ Enter se ultima: Submit + review)
+//   other:       Down×N fino alla riga "Type something", testo libero,
+//                (multi: Down all'azione) + Enter (+ Enter se ultima)
+// ctx: isLast=true quando la domanda è l'ultima del suo set (la review finale
+// appare SOLO per l'ultima domanda), setSize = numero di domande nel set
+// (una singola domanda single-select non mostra review → un solo Enter).
+// Limite noto: il toggle numerico del multi è a una cifra (1–9); una domanda
+// con più di 9 opzioni è fuori scope (rara in AskUserQuestion).
+export function answerToKeys(q: PromptQuestion, a: PromptAnswer, ctx: { isLast: boolean; setSize: number } = { isLast: true, setSize: 1 }): QuestionKey[] {
+  const key = (k: string): QuestionKey => ({ kind: 'key', key: k });
+  const downs = (n: number): QuestionKey[] => Array.from({ length: n }, () => key('Down'));
+  // La review "Submit answers / Cancel" (un Enter per confermare, opzione 1
+  // già evidenziata) compare per l'ultima domanda se è multiSelect (l'azione
+  // Submit la apre) oppure se il set ha più domande (la chiusura del set la
+  // mostra comunque, anche per single-select).
+  const needsReviewEnter = ctx.isLast && (q.multiSelect || ctx.setSize > 1);
+  if (a.kind === 'other') {
+    // "Type something" è la riga N+1 (le N opzioni + quella aggiunta dal CLI).
+    const seq: QuestionKey[] = [...downs(q.options.length), { kind: 'text', text: a.text }];
+    if (q.multiSelect) seq.push(key('Down')); // → Next (set >1) o Submit (ultima)
+    seq.push(key('Enter'));
+    if (needsReviewEnter) seq.push(key('Enter'));
+    return seq;
+  }
+  const indices = a.labels.map(label => q.options.findIndex(o => o.label === label)).filter(i => i >= 0);
+  // Nessuna opzione valida e nessun testo libero da scrivere: niente da iniettare
+  // (la domanda resta aperta perché l'utente risponda dal terminale).
+  if (!indices.length && !a.extraText) return [];
+  if (q.multiSelect) {
+    const toggles = indices.map(i => key(String(i + 1)));
+    const seq: QuestionKey[] = [...toggles];
+    if (a.extraText) {
+      // Opzioni togglate + testo libero insieme (es. "A, custom text"): il CLI
+      // li accetta entrambi — si togglano le opzioni, si naviga alla riga
+      // "Type something" (N+1, quindi N Down dalla riga 1) e si digita il
+      // testo, poi all'azione.
+      seq.push(...downs(q.options.length));
+      seq.push({ kind: 'text', text: a.extraText });
+      seq.push(key('Down')); // → Next (set >1) o Submit (ultima)
+    } else {
+      // Dal cursore (riga 1, i numeri non lo spostano) all'azione (Next o
+      // Submit): N opzioni + "Type something" = N+1 Down.
+      seq.push(...downs(q.options.length + 1));
+    }
+    seq.push(key('Enter'));
+    if (needsReviewEnter) seq.push(key('Enter'));
+    return seq;
+  }
+  const seq: QuestionKey[] = [...downs(indices[0]), key('Enter')];
+  if (needsReviewEnter) seq.push(key('Enter'));
+  return seq;
 }
 
 // Messaggio unico con tutte le risposte di un set, per le sessioni headless.
@@ -448,8 +512,17 @@ export function answersToMessage(questions: PromptQuestion[], answers: (PromptAn
 // al terminale), la copia dell'hook arriva SEMPRE per prima: non c'è verso di
 // invertire l'esito scambiando l'ordine dei controlli qui dentro, perché qui
 // dentro non c'è nessun controllo sull'ordine — solo sull'identità.
-export function promptDedupeKey(sessionId: string, questions: PromptQuestion[], toolUseId?: string): string {
-  if (toolUseId) return `id:${toolUseId}`;
+// Chiave di deduplica per una domanda arrivata sul bus: SOLO la firma del
+// contenuto (sessione + testo di domande e opzioni). L'hook PermissionRequest
+// di 2.1.227 non porta il tool_use_id nel payload (scatta prima che il
+// tool_use esista: può solo dire "ask"), quindi il toolUseId non può essere la
+// chiave condivisa fra la copia dell'hook e quella del transcript — la firma di
+// contenuto sì, ed è l'unica che collida fra le due sorgenti. La one-shot +
+// age-bound di registerPromptKey (commit 0892a7e) copre il caso di domande
+// identiche ripetute nella stessa sessione: per le terminali la prima copia
+// registra, la seconda (il duplicato) consuma la chiave, la domanda ripetuta
+// successiva riparte pulita.
+export function promptDedupeKey(sessionId: string, questions: PromptQuestion[]): string {
   const sig = questions.map(q => `${q.question}|${q.options.map(o => o.label).join(',')}`).join(';');
   return `sig:${sessionId}:${sig}`;
 }
@@ -1654,8 +1727,11 @@ export class TelegramBot {
     // La prima domanda di un flow nuovo si mostra subito solo se questa
     // sessione è quella selezionata — altrimenti resta in pending: niente
     // interruzioni per sessioni che non stai guardando (vedi sess:select per
-    // il recupero quando l'utente ci passa sopra).
-    if (sessionId === this.deps.manager.getActive() && flow.setIndex === 0 && flow.qIndex === 0 && !flow.messageId) {
+    // il recupero quando l'utente ci passa sopra). `!flow.displaying` chiude la
+    // finestra di race fra il controllo e l'assegnazione di messageId (l'invio
+    // di showQuestion è async): senza, due set ravvicinati manderebbero due
+    // messaggi per la stessa domanda.
+    if (sessionId === this.deps.manager.getActive() && flow.setIndex === 0 && flow.qIndex === 0 && !flow.messageId && !flow.displaying) {
       await this.showQuestion(flow);
     } else {
       // C2: prima qui non c'era nessun record — il set resta accodato invece di
@@ -1730,12 +1806,20 @@ export class TelegramBot {
     // finiva solo accodato — un operatore avrebbe letto "delivering" per
     // qualcosa che non era ancora successo.
     log().info('event delivering', { eventId, sessionId: flow.sessionId, kind: 'prompt', setIndex: flow.setIndex, qIndex: flow.qIndex });
-    const id = await this.sendChunked(this.chatId, text, { reply_markup: kb }, { eventId, sessionId: flow.sessionId });
-    if (id) {
-      flow.messageId = id;
-      // I3: chiude la catena per questa domanda — consegna riuscita, con l'id
-      // del messaggio Telegram risultante.
-      log().info('event delivered', { eventId, sessionId: flow.sessionId, kind: 'prompt', messageId: id });
+    // La guardia anti-race va alzata PRIMA dell'await: messa qui, nel corpo di
+    // showQuestion, è sincrona rispetto alla condizione "flow idle" di
+    // onSessionPrompt (l'await di showQuestion la esegue nello stesso tick).
+    flow.displaying = true;
+    try {
+      const id = await this.sendChunked(this.chatId, text, { reply_markup: kb }, { eventId, sessionId: flow.sessionId });
+      if (id) {
+        flow.messageId = id;
+        // I3: chiude la catena per questa domanda — consegna riuscita, con l'id
+        // del messaggio Telegram risultante.
+        log().info('event delivered', { eventId, sessionId: flow.sessionId, kind: 'prompt', messageId: id });
+      }
+    } finally {
+      flow.displaying = false;
     }
   }
 
@@ -1843,12 +1927,20 @@ export class TelegramBot {
     await this.updateQuestionMessage(flow);
   }
 
-  // Testo libero arrivato da onMessage mentre awaitingOther è attivo.
+  // Testo libero arrivato da onMessage mentre awaitingOther è attivo. Su una
+  // multi-select l'utente può aver togglato delle opzioni PRIMA di usare
+  // "Other": il CLI le registra insieme al testo (es. "A, custom text"), quindi
+  // la risposta combina le opzioni togglate con il testo libero.
   private async answerOther(flow: QuestionFlow, text: string): Promise<void> {
     const { setIndex, qIndex } = flow.awaitingOther!;
-    flow.answers[setIndex][qIndex] = { kind: 'other', text };
+    const q = flow.sets[setIndex][qIndex];
+    const a: PromptAnswer = (q.multiSelect && flow.multiSel.length)
+      ? { kind: 'option', labels: flow.multiSel.map(i => q.options[i].label), extraText: text }
+      : { kind: 'other', text };
+    flow.answers[setIndex][qIndex] = a;
     flow.awaitingOther = undefined;
-    await this.acknowledgeAnswer(flow, text);
+    flow.multiSel = []; // consumata: non deve trapelare nella prossima domanda
+    await this.acknowledgeAnswer(flow, answerSummary(a));
     await this.recordAndAdvance(flow);
   }
 
@@ -1857,9 +1949,10 @@ export class TelegramBot {
   private async recordAndAdvance(flow: QuestionFlow): Promise<void> {
     const session = this.deps.manager.get(flow.sessionId);
     if (session?.kind === 'terminal') {
-      const q = flow.sets[flow.setIndex][flow.qIndex];
+      const set = flow.sets[flow.setIndex];
+      const q = set[flow.qIndex];
       const a = flow.answers[flow.setIndex][flow.qIndex];
-      if (a) await this.deliverAnswer(session, q, a);
+      if (a) await this.deliverAnswer(session, q, a, { isLast: flow.qIndex === set.length - 1, setSize: set.length });
     }
     await this.advance(flow);
   }
@@ -1867,6 +1960,11 @@ export class TelegramBot {
   // Avanza alla prossima domanda/set; a set completo consegna (headless) e
   // passa al set successivo; a fine coda pulisce il flow.
   private async advance(flow: QuestionFlow): Promise<void> {
+    // Le opzioni togglate appartengono alla domanda appena risposta: azzerarle
+    // qui (oltre che in doneMultiSelect/answerOther) impedisce che trapelino
+    // nella prossima domanda multi-select come pre-selezionate (bug "Coniglio
+    // già selezionato").
+    flow.multiSel = [];
     const set = flow.sets[flow.setIndex];
     if (flow.qIndex < set.length - 1) {
       flow.qIndex++;
@@ -1886,13 +1984,18 @@ export class TelegramBot {
     }
   }
 
-  // Iniezione tmux della risposta a una domanda (terminali).
-  private async deliverAnswer(session: Session, q: PromptQuestion, a: PromptAnswer): Promise<void> {
+  // Iniezione tmux della risposta a una domanda (terminali): il menu del CLI è
+  // interattivo, quindi si invia la sequenza di tasti di answerToKeys (mai il
+  // paste numerico, che il menu corrompe). `recordInjected` registra il
+  // riepilogo solo per coerenza col resto dei testi iniettati (il menu non
+  // echeggia i tasti nel transcript, quindi l'echo non va soppresso davvero).
+  private async deliverAnswer(session: Session, q: PromptQuestion, a: PromptAnswer, ctx: { isLast: boolean; setSize: number }): Promise<void> {
     if (session.kind !== 'terminal' || !session.tmuxTarget) return;
-    const text = answerToInjection(q, a);
+    const seq = answerToKeys(q, a, ctx);
+    if (!seq.length) return;
     try {
-      await this.deps.tmux.injectText(session.tmuxTarget, text);
-      this.recordInjected(session.id, text);
+      await this.deps.tmux.sendKeySeq(session.tmuxTarget, seq);
+      this.recordInjected(session.id, answerSummary(a));
     } catch (e) {
       // I4: instradato su log().error — stesso catch, stesso momento.
       log().error('deliverAnswer failed', { sessionId: session.id, err: e });
@@ -2299,19 +2402,18 @@ export class TelegramBot {
     });
     bus.on('session.prompt', ({ sessionId, questions, eventId, toolUseId, source }) => {
       if (!this.passes('prompt', sessionId, eventId).deliver) return;
-      // Task 8, punto 4: la stessa domanda arriva due volte — dall'hook (in
-      // tempo) e poi dal transcript (quando il turno si sblocca). La chiave è
-      // calcolata qui, all'arrivo sul bus: chi arriva prima la registra come
-      // vista e passa, chi arriva dopo la trova già vista e viene scartato.
-      // Verso: l'hook scatta PRIMA che il CLI apra il menu, il transcript
-      // scrive la tool_use solo DOPO che l'utente ha già risposto al
-      // terminale — quindi la prima occorrenza è sempre quella dell'hook, e
-      // 'duplicate-prompt' cade sempre sulla copia (onesta ma tardiva) del
-      // transcript. Nessun ramo qui sceglie in base a `source`: è l'ordine di
-      // arrivo reale a decidere, e quell'ordine non si può invertire senza
-      // invertire la causa che lo produce (l'utente che risponde prima al
-      // terminale che al pane).
-      const dedupeKey = promptDedupeKey(sessionId, questions, toolUseId);
+      // Task 8, punto 4: la stessa domanda arriva due volte — dall'hook e poi
+      // dal transcript (stessa tool_use, due sorgenti). La chiave è SOLO la
+      // firma di contenuto (promptDedupeKey): l'hook di 2.1.227 non porta il
+      // tool_use_id, quindi la firma è l'unica chiave condivisa fra le due
+      // copie. Chi arriva prima la registra come vista e passa, chi arriva
+      // dopo la trova già vista e viene scartato. Verso verificato sul CLI
+      // reale: in 2.1.227 il transcript scrive la tool_use PRIMA che l'hook
+      // scatti (la copia transcript arriva ~9ms prima, non dopo) — la prima
+      // occorrenza è quindi quella del transcript, e 'duplicate-prompt' cade
+      // sulla copia (redundante) dell'hook. Nessun ramo qui sceglie in base a
+      // `source`: è l'ordine di arrivo reale a decidere.
+      const dedupeKey = promptDedupeKey(sessionId, questions);
       if (this.isDuplicatePrompt(sessionId, dedupeKey)) {
         log().info('event dropped', { eventId, sessionId, kind: 'prompt', reason: 'duplicate-prompt', toolUseId, source });
         return;
