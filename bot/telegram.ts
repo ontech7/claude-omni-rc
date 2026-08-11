@@ -128,8 +128,9 @@ export function parseSettingsCommand(raw: string): SettingsCommand {
 }
 
 function settingsLine(key: SettingsKey, settings: UserSettings, config: Config): string {
-  const value = String(config[key]);
-  const source = settings[key] !== undefined ? 'settings.json' : '.env / default';
+  const stored = settings[key];
+  const value = stored !== undefined ? String(stored) : String(config[key]);
+  const source = stored !== undefined ? 'settings.json' : '.env / default';
   return `<code>${htmlEscape(key)}</code> = <code>${htmlEscape(value)}</code> <i>(${htmlEscape(source)})</i> — ${htmlEscape(SETTINGS_LABELS[key])}`;
 }
 

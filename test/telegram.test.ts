@@ -87,6 +87,12 @@ describe('formatSettingsReport', () => {
     expect(out).toContain('next daemon restart');
     expect(out).not.toContain('<script>');
   });
+  it('shows the stored value, not the boot value, when a key is present in settings.json', () => {
+    const boot = loadConfig({ DEFAULT_MODEL: 'from-env' }); // valore di boot diverso dal file
+    const out = formatSettingsReport({ defaultModel: 'claude-opus-5' }, boot);
+    expect(out).toContain('claude-opus-5');
+    expect(out).not.toContain('from-env');
+  });
   it('formats a single key via formatSettingsKey', () => {
     const out = formatSettingsKey('defaultEffort', {}, config);
     expect(out).toContain('defaultEffort');

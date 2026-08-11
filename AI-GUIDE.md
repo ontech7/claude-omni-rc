@@ -76,9 +76,9 @@ npm install
   the active session's screen is streamed.
 - `/view` — send the active session's current screen (tmux pane).
 - `/new [--auto|--standard] [--model <name>] [--effort <level>] <text>` — create a headless
-  session and send it the prompt (automode by default: permissions
-  auto-approved; `--standard` for approve/reject buttons; `--model` to pick
-  the model for this session; `--effort` to set the reasoning effort). Headless
+  session and send it the prompt (standard by default: approve/reject buttons;
+  `--auto` for automode; `--model` to pick the model for this session;
+  `--effort` to set the reasoning effort). Headless
   sessions use the provider configured in `.env` (`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`),
   falling back to Ollama when unset.
 - `/attach <project>` — attach the `claude:<project>` tmux session.
