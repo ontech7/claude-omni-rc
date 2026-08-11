@@ -2,14 +2,26 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-11
+
 - **`/settings` command.** See and change the curated user settings from the
-  phone (`/settings`, `/settings <key> <value>`, `/settings reset <key>`). They
-  are stored in `<STATE_DIR>/settings.json` with precedence over `.env` and
-  apply at the next daemon restart. New `DEFAULT_EFFORT` setting and a
-  `--effort` flag on `/new`.
+  phone: `/settings` lists them with their current value and where it comes
+  from, `/settings <key> <value>` changes one (validated, with a readable
+  error), `/settings reset <key>` puts a key back to its `.env` default.
+  Changes are stored in `<STATE_DIR>/settings.json` with precedence over `.env`
+  and apply at the next daemon restart. The curated keys cover the default
+  model, the permission mode, the headless-session limit, the permission
+  timeout, armed-on-start, the update check and the reasoning effort.
+- **Reasoning effort per session.** Headless sessions now carry a reasoning
+  effort: a new `DEFAULT_EFFORT` setting (default `medium`) plus a per-session
+  `--effort <low|medium|high|xhigh>` flag on `/new`, passed to the model via
+  the Agent SDK. Terminal sessions have it read from the running claude
+  process (`--reasoning-effort`) when present.
 - **`/diag` in the command menu and enriched.** `/diag` now appears in the
   Telegram command autocomplete and reports, per session, the model, the
-  reasoning effort and the git branch when available.
+  reasoning effort and the git branch when available (`—` when it can't tell).
+  The branch is resolved live from the session's working directory, so a
+  session that moved into a git worktree stays truthful.
 
 ## [0.3.0] - 2026-08-11
 
