@@ -1620,3 +1620,76 @@ git commit -m "docs: allinea la documentazione alla nuova resa della chat Telegr
 ## Cosa non è verificabile in CI
 
 Da dichiarare esplicitamente al termine, senza dire "fatto" su un'assunzione: CI non ha token bot, né tmux, né telefono. **Non** sono verificati automaticamente: la resa reale su Telegram (evidenziazione della sintassi, `blockquote expandable`, comportamento delle notifiche), il toggle della scheda agent su un client vero, e il percorso subagent end-to-end con un `Task` reale. Servono un daemon vivo e un telefono.
+
+---
+
+## Stato di esecuzione — aggiornato 2026-08-11
+
+Questa sezione è il punto di ripartenza. Fidati di questa sezione e di
+`git log`, non di ricostruzioni a memoria.
+
+### Fatto
+
+- **Task 1 — `bot/render.ts` estratto.** Commit `64467b9`. Revisionato: spec ✅,
+  qualità approvata. 382 test, 0 fallimenti. Spostamento puro verificato riga per
+  riga contro l'originale: nessun corpo di funzione alterato.
+- **Task 2 — `shortenPath()`.** Commit `c93f06a`, più `3da0402` (commento di
+  intestazione tradotto in inglese) e `0a99ffe` (correzione dei due rilievi
+  Important della review).
+
+### Da verificare PRIMA di proseguire
+
+Il Task 2 **non ha evidenza di test**. L'ambiente di esecuzione ha smesso di
+poter lanciare `node` a metà lavoro (`Tool permission request failed`), quindi
+né l'implementatore né il controller hanno potuto eseguire la suite dopo il
+commit `0a99ffe`. Il codice è stato ispezionato a lettura e la correzione appare
+giusta, ma **letto non è verificato**.
+
+Primo comando della prossima sessione:
+
+```bash
+cd /Users/ontech7/Documents/PersonalProjects/claude-omni-rc
+export PATH="$HOME/.nvm/versions/node/$(ls ~/.nvm/versions/node | tail -1)/bin:$PATH"
+npm run typecheck && env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY npm test
+```
+
+Atteso: **392 test, 0 fallimenti** (382 di base + 7 del Task 2 + 3 aggiunti dal
+fix). Se il numero non torna o qualcosa fallisce, il debito è nel Task 2 e va
+chiuso prima di aprire il Task 3.
+
+I due rilievi che il fix `0a99ffe` doveva chiudere:
+1. una `base` che si riduce a stringa vuota (es. `HOME='/'`) faceva match su
+   **qualunque** path assoluto: `/etc/hosts` → `~/etc/hosts`;
+2. il ramo finale di elisione non era coperto da alcun test.
+
+### Da fare
+
+Task 3 → 11, nell'ordine del piano. Nessuno è stato iniziato.
+
+### Cose imparate, da non riscoprire
+
+- **I numeri di riga scadono.** Sono verificati contro `3f7f406`. `main` si è già
+  mosso una volta sotto questo piano. Localizza per nome di simbolo.
+- **I due fallimenti di `test/sdk-driver.test.ts` non sono tuoi.** `runTurn` fa
+  `{...process.env}` e la shell del daemon esporta `ANTHROPIC_BASE_URL`, quindi
+  `resolveProvider` sceglie il provider sbagliato. Passano in CI. Usa sempre le
+  `env -u` del comando qui sopra. **Non correggerli**: fuori scope.
+- **Il piano contraddice sé stesso sui commenti.** I blocchi di codice del piano
+  hanno commenti in italiano, ma i Global Constraints e il `CLAUDE.md` impongono
+  commenti nuovi in inglese. Vince il vincolo: prendi dal piano il *contenuto*
+  del commento, scrivilo in **inglese**. I commenti italiani preesistenti nel
+  codice si lasciano invariati.
+- **Rilievi Minor differiti** (da triare alla review finale, non bloccanti):
+  `shortenPath` non è testata con `projectDir` con slash finale, con path uguale
+  a `projectDir`, con `HOME` assente; `maxLen <= 0` rompe la garanzia
+  "output ≤ maxLen"; alcune descrizioni di test sono in inglese sgrammaticato.
+
+### Se il lavoro passa a una sessione headless via `/new`
+
+`resolveHeadlessProjectDir` usa sempre `workspaceDirs[0]`. Con l'attuale
+`WORKSPACE_DIRS=/Users/ontech7/.claude-omni-rc` una sessione `/new` **non
+vedrebbe questo repo**. Va messo il repo per primo e riavviato il daemon:
+
+```
+WORKSPACE_DIRS=/Users/ontech7/Documents/PersonalProjects/claude-omni-rc:/Users/ontech7/.claude-omni-rc
+```
