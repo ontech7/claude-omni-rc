@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { LOG_LEVELS, type LogLevel } from './log.js';
 
 export interface Config {
   telegramBotToken: string;
@@ -27,6 +28,13 @@ export interface Config {
   cwdRefreshMs: number;
   // Disabilita il check periodico di nuove versioni su GitHub (vedi src/update.ts).
   noUpdateCheck: boolean;
+  // Log strutturato (vedi src/log.ts). Il file affianca daemon.log/daemon.err.log
+  // di launchd: quelli restano l'output grezzo del processo, questo è il tracciato
+  // leggibile a macchina degli eventi.
+  logLevel: LogLevel;
+  logFile: string;
+  logMaxBytes: number;
+  logKeep: number;
 }
 
 function expandHome(p: string): string {
@@ -40,6 +48,11 @@ function parseNum(env: NodeJS.ProcessEnv, key: string, fallback: number): number
   if (raw === undefined || raw === '') return fallback;
   const n = Number(raw);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function parseLevel(env: NodeJS.ProcessEnv, key: string, fallback: LogLevel): LogLevel {
+  const raw = (env[key] ?? '').trim().toLowerCase();
+  return (LOG_LEVELS as string[]).includes(raw) ? (raw as LogLevel) : fallback;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -64,5 +77,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     pollIntervalMs: parseNum(env, 'POLL_INTERVAL_MS', 500),
     cwdRefreshMs: parseNum(env, 'CWD_REFRESH_MS', 10_000),
     noUpdateCheck: Boolean(env.CLAUDE_OMNI_RC_NO_UPDATE_CHECK),
+    logLevel: parseLevel(env, 'LOG_LEVEL', 'info'),
+    logFile: expandHome(env.LOG_FILE ?? join(stateDir, 'logs', 'daemon.jsonl')),
+    logMaxBytes: parseNum(env, 'LOG_MAX_BYTES', 5_000_000),
+    logKeep: parseNum(env, 'LOG_KEEP', 3),
   };
 }

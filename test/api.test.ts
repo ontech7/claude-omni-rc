@@ -20,7 +20,7 @@ function makeApi(env: Record<string, string> = {}, flowOpts: { canNotify?: () =>
     setStatus: (id, s) => manager.setStatus(id, s),
     ...flowOpts,
   });
-  const api = startApi(0, { manager, permissionFlow, config });
+  const api = startApi(0, { manager, permissionFlow, config, bus });
   return { manager, permissionFlow, api, dir, bus };
 }
 
@@ -154,5 +154,81 @@ describe('startApi', () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe('allow');
     expect(permissionEvents).toBe(0); // nessuna notifica di permesso
+  });
+
+  // Task 8: l'hook AskUserQuestion è la sola sorgente che arriva in tempo per
+  // Telegram (il transcript scrive la stessa tool_use solo quando il turno si
+  // sblocca). Qui si verifica che l'API emetta la domanda sul bus SENZA
+  // attendere nulla — la risposta 'allow' arriva comunque subito — con le
+  // domande corrette, il toolUseId ricevuto e source: 'hook'.
+  it('emits session.prompt for AskUserQuestion with valid questions, and answers allow without waiting', async () => {
+    const { manager, api, bus } = makeApi();
+    open.push(api);
+    await api.ready;
+    manager.setArmed(true);
+    let captured: { sessionId: string; questions: unknown; toolUseId?: string; source?: string } | undefined;
+    bus.on('session.prompt', e => { captured = e; });
+    const started = Date.now();
+    const res = await fetch(`http://127.0.0.1:${api.port()}/api/permission`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        toolName: 'AskUserQuestion',
+        toolUseId: 'toolu_abc123',
+        sessionId: 'claude:proj',
+        input: { questions: [{ question: 'Deploy now?', options: [{ label: 'Yes' }, { label: 'No' }] }] },
+      }),
+    });
+    expect(Date.now() - started).toBeLessThan(500); // nessuna attesa nel ramo AskUserQuestion
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('allow');
+    expect(captured).toBeDefined();
+    expect(captured!.toolUseId).toBe('toolu_abc123');
+    expect(captured!.source).toBe('hook');
+    expect(captured!.questions).toEqual([{ question: 'Deploy now?', multiSelect: false, options: [{ label: 'Yes', description: undefined }, { label: 'No', description: undefined }] }]);
+  });
+
+  it('answers allow and emits nothing for AskUserQuestion without valid questions', async () => {
+    const { manager, api, bus } = makeApi();
+    open.push(api);
+    await api.ready;
+    manager.setArmed(true);
+    let promptEvents = 0;
+    bus.on('session.prompt', () => { promptEvents++; });
+    const res = await fetch(`http://127.0.0.1:${api.port()}/api/permission`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ toolName: 'AskUserQuestion', input: { questions: [] } }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('allow');
+    expect(promptEvents).toBe(0);
+  });
+
+  it('answers ask and emits nothing for AskUserQuestion when disarmed', async () => {
+    const { api, bus } = makeApi();
+    open.push(api);
+    await api.ready;
+    let promptEvents = 0;
+    bus.on('session.prompt', () => { promptEvents++; });
+    const res = await fetch(`http://127.0.0.1:${api.port()}/api/permission`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ toolName: 'AskUserQuestion', input: { questions: [{ question: 'x', options: [{ label: 'a' }] }] } }),
+    });
+    expect(await res.text()).toBe('ask');
+    expect(promptEvents).toBe(0);
+  });
+
+  it('answers ask and emits nothing for AskUserQuestion when armed but no chat is connected', async () => {
+    const { manager, api, bus } = makeApi({}, { canNotify: () => false });
+    open.push(api);
+    await api.ready;
+    manager.setArmed(true);
+    let promptEvents = 0;
+    bus.on('session.prompt', () => { promptEvents++; });
+    const res = await fetch(`http://127.0.0.1:${api.port()}/api/permission`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ toolName: 'AskUserQuestion', input: { questions: [{ question: 'x', options: [{ label: 'a' }] }] } }),
+    });
+    expect(await res.text()).toBe('ask');
+    expect(promptEvents).toBe(0);
   });
 });

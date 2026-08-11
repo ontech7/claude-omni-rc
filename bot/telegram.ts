@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { existsSync } from 'node:fs';
 import { Bot, Context, InlineKeyboard } from 'grammy';
 import type { Bus } from '../src/bus.js';
@@ -8,14 +8,16 @@ import type { SessionManager } from '../src/sessions/manager.js';
 import type { PermissionFlow } from '../src/permissions.js';
 import type { DialogFlow } from '../src/dialogs.js';
 import type { SdkDriver } from '../src/sessions/sdk-driver.js';
-import type { TmuxClient } from '../src/sessions/tmux-inject.js';
+import type { TmuxClient, QuestionKey } from '../src/sessions/tmux-inject.js';
 import { createShExec } from '../src/sessions/tmux-inject.js';
 import type { OllamaClient } from '../src/ollama.js';
 import type { Inbox } from '../src/input.js';
-import type { Session, PermissionRequest, PromptQuestion, PromptAnswer, UserDialog } from '../src/types.js';
+import type { Session, SessionKind, SessionStatus, PermissionRequest, PromptQuestion, PromptAnswer, UserDialog } from '../src/types.js';
 import type { RecentMessage } from '../src/sessions/transcript.js';
 import { readRecentMessages, resolveSessionTranscript } from '../src/sessions/transcript.js';
 import { isOllamaProvider, fetchOllamaUsage, fetchAnthropicUsage } from '../src/usage.js';
+import { log } from '../src/log.js';
+import { CURRENT_VERSION } from '../src/update.js';
 
 // ---------- pure helpers ----------
 
@@ -388,11 +390,26 @@ export function promptLayout(questions: PromptQuestion[], token: string, maxButt
 export interface QuestionFlow {
   sessionId: string;
   sets: PromptQuestion[][];   // coda dei set
+  // I2/C2: eventId del session.prompt che ha generato ciascun set, parallelo a
+  // `sets` — permette a showQuestion() di loggare la consegna con lo stesso
+  // eventId della riga 'event queued'/'event emitted' che l'ha preceduta.
+  eventIds: (string | undefined)[];
+  // Task 8, punto 5: blocco di contesto del pane per ciascun set, parallelo a
+  // `sets` — undefined finché la cattura (fire-and-forget, vedi
+  // attachPaneContext) non è tornata, o per sempre se il set non è di
+  // provenienza hook/terminale o la cattura è fallita.
+  paneContexts: (string | undefined)[];
   setIndex: number;           // set corrente
   qIndex: number;             // domanda corrente nel set
   answers: (PromptAnswer | undefined)[][];  // risposte per set, per domanda (undefined = non risposta)
   token: string;              // token callback
   messageId?: number;         // messaggio Telegram della domanda corrente
+  // Guardia anti-race: true mentre l'invio async di showQuestion è in volo.
+  // `messageId` viene assegnato solo a invio completato, quindi da solo non
+  // basta — due set ravvicinati (es. copia hook + copia transcript della stessa
+  // domanda che passano la dedupe in finestre diverse) potrebbero entrambi
+  // passare la condizione "flow idle" e mandare due messaggi.
+  displaying?: boolean;
   chatId?: number;
   multiSel: number[];         // opzioni togglate per la multi-select corrente
   awaitingOther?: { setIndex: number; qIndex: number };  // in attesa di testo libero
@@ -400,18 +417,76 @@ export interface QuestionFlow {
 
 // Riepilogo leggibile di una risposta (per l'acknowledgment e la consegna).
 export function answerSummary(a: PromptAnswer): string {
-  return a.kind === 'option' ? a.labels.join(', ') : a.text;
+  if (a.kind === 'option') {
+    const labels = a.labels.join(', ');
+    return a.extraText ? `${labels}${labels ? ', ' : ''}${a.extraText}` : labels;
+  }
+  return a.text;
 }
 
-// Testo da iniettare nel pane tmux per rispondere a una domanda: il numero
-// dell'opzione (1-based) per le opzioni, i numeri separati da virgola per la
-// multi-select, il testo libero per "Other". Il menu del CLI mostra i numeri.
-export function answerToInjection(q: PromptQuestion, a: PromptAnswer): string {
-  if (a.kind === 'other') return a.text;
-  const nums = a.labels
-    .map(label => q.options.findIndex(o => o.label === label) + 1)
-    .filter(n => n > 0);
-  return nums.join(', ');
+// Sequenza di tasti da iniettare nel pane tmux per rispondere a una domanda
+// del menu del CLI (AskUserQuestion). Il menu è interattivo (↑/↓ + Enter): i
+// numeri NON selezionano (nel single-select non fanno nulla, nel multi-select
+// togglano soltanto e serve un'azione + una schermata di conferma), e il
+// bracketed paste lo corrompe (la sequenza ESC di chiusura vale come Esc).
+// Coreografie verificate sul CLI 2.1.227 (menu reale in tmux), anche per i SET
+// con più domande (in quel caso il menu ha un'azione "Next" finché non si è
+// all'ULTIMA domanda, poi l'azione diventa "Submit" e a fine set compare la
+// review "Submit answers / Cancel" da confermare con un Enter finale):
+//   single:      Down×i + Enter  (+ Enter se ultima domanda di un set >1)
+//   multi:       tasto (i+1) per ogni opzione togglata (il cursore resta in
+//                alto) + Down×(N+1) fino all'azione (Next o Submit)
+//                + Enter (+ Enter se ultima: Submit + review)
+//   other:       Down×N fino alla riga "Type something", testo libero,
+//                (multi: Down all'azione) + Enter (+ Enter se ultima)
+// ctx: isLast=true quando la domanda è l'ultima del suo set (la review finale
+// appare SOLO per l'ultima domanda), setSize = numero di domande nel set
+// (una singola domanda single-select non mostra review → un solo Enter).
+// Limite noto: il toggle numerico del multi è a una cifra (1–9); una domanda
+// con più di 9 opzioni è fuori scope (rara in AskUserQuestion).
+export function answerToKeys(q: PromptQuestion, a: PromptAnswer, ctx: { isLast: boolean; setSize: number } = { isLast: true, setSize: 1 }): QuestionKey[] {
+  const key = (k: string): QuestionKey => ({ kind: 'key', key: k });
+  const downs = (n: number): QuestionKey[] => Array.from({ length: n }, () => key('Down'));
+  // La review "Submit answers / Cancel" (un Enter per confermare, opzione 1
+  // già evidenziata) compare per l'ultima domanda se è multiSelect (l'azione
+  // Submit la apre) oppure se il set ha più domande (la chiusura del set la
+  // mostra comunque, anche per single-select).
+  const needsReviewEnter = ctx.isLast && (q.multiSelect || ctx.setSize > 1);
+  if (a.kind === 'other') {
+    // "Type something" è la riga N+1 (le N opzioni + quella aggiunta dal CLI).
+    const seq: QuestionKey[] = [...downs(q.options.length), { kind: 'text', text: a.text }];
+    if (q.multiSelect) seq.push(key('Down')); // → Next (set >1) o Submit (ultima)
+    seq.push(key('Enter'));
+    if (needsReviewEnter) seq.push(key('Enter'));
+    return seq;
+  }
+  const indices = a.labels.map(label => q.options.findIndex(o => o.label === label)).filter(i => i >= 0);
+  // Nessuna opzione valida e nessun testo libero da scrivere: niente da iniettare
+  // (la domanda resta aperta perché l'utente risponda dal terminale).
+  if (!indices.length && !a.extraText) return [];
+  if (q.multiSelect) {
+    const toggles = indices.map(i => key(String(i + 1)));
+    const seq: QuestionKey[] = [...toggles];
+    if (a.extraText) {
+      // Opzioni togglate + testo libero insieme (es. "A, custom text"): il CLI
+      // li accetta entrambi — si togglano le opzioni, si naviga alla riga
+      // "Type something" (N+1, quindi N Down dalla riga 1) e si digita il
+      // testo, poi all'azione.
+      seq.push(...downs(q.options.length));
+      seq.push({ kind: 'text', text: a.extraText });
+      seq.push(key('Down')); // → Next (set >1) o Submit (ultima)
+    } else {
+      // Dal cursore (riga 1, i numeri non lo spostano) all'azione (Next o
+      // Submit): N opzioni + "Type something" = N+1 Down.
+      seq.push(...downs(q.options.length + 1));
+    }
+    seq.push(key('Enter'));
+    if (needsReviewEnter) seq.push(key('Enter'));
+    return seq;
+  }
+  const seq: QuestionKey[] = [...downs(indices[0]), key('Enter')];
+  if (needsReviewEnter) seq.push(key('Enter'));
+  return seq;
 }
 
 // Messaggio unico con tutte le risposte di un set, per le sessioni headless.
@@ -422,6 +497,115 @@ export function answersToMessage(questions: PromptQuestion[], answers: (PromptAn
     return `${i + 1}. ${title} → ${a ? answerSummary(a) : '(no answer)'}`;
   });
   return `Answers to your questions:\n${lines.join('\n')}`;
+}
+
+// Task 8, punto 4: chiave di deduplica per una domanda arrivata sul bus.
+// toolUseId se presente (identità univoca della tool_use — sia l'hook che il
+// transcript lo portano per la STESSA domanda); altrimenti una firma del
+// contenuto (sessione + testo di domande e opzioni), per il caso raro in cui
+// l'hook non è riuscito a leggere l'id (variante di payload non prevista).
+// Pura ed esportata: la logica "quale delle due copie vince" NON vive qui —
+// vive nell'ORDINE DI ARRIVO all'handler del bus (vedi registerPromptKey):
+// la prima occorrenza di una chiave è mostrata, la seconda è lo scarto. Dato
+// che l'hook scatta prima che il CLI apra il menu e il transcript scrive la
+// stessa tool_use solo quando il turno si sblocca (l'utente ha già risposto
+// al terminale), la copia dell'hook arriva SEMPRE per prima: non c'è verso di
+// invertire l'esito scambiando l'ordine dei controlli qui dentro, perché qui
+// dentro non c'è nessun controllo sull'ordine — solo sull'identità.
+// Chiave di deduplica per una domanda arrivata sul bus: SOLO la firma del
+// contenuto (sessione + testo di domande e opzioni). L'hook PermissionRequest
+// di 2.1.227 non porta il tool_use_id nel payload (scatta prima che il
+// tool_use esista: può solo dire "ask"), quindi il toolUseId non può essere la
+// chiave condivisa fra la copia dell'hook e quella del transcript — la firma di
+// contenuto sì, ed è l'unica che collida fra le due sorgenti. La one-shot +
+// age-bound di registerPromptKey (commit 0892a7e) copre il caso di domande
+// identiche ripetute nella stessa sessione: per le terminali la prima copia
+// registra, la seconda (il duplicato) consuma la chiave, la domanda ripetuta
+// successiva riparte pulita.
+export function promptDedupeKey(sessionId: string, questions: PromptQuestion[]): string {
+  const sig = questions.map(q => `${q.question}|${q.options.map(o => o.label).join(',')}`).join(';');
+  return `sig:${sessionId}:${sig}`;
+}
+
+// Quante chiavi di deduplica tenere per sessione: abbastanza per il caso
+// normale (poche domande in coda contemporaneamente), non un archivio senza
+// fine per una sessione che vive per giorni.
+export const PROMPT_DEDUPE_CAP = 50;
+
+// Fix round 1 (Important): quanto restare in vita una chiave 'sig:' (fallback
+// senza toolUseId) in attesa della sua eventuale copia dal transcript, se
+// quella copia non arriva mai — sessione finita, cancellata, o /stop mentre
+// la domanda era ancora in sospeso. Senza un bound la chiave resterebbe
+// registrata per sempre e la PROSSIMA domanda con lo stesso testo/opzioni
+// (es. un "Continue? Yes/No" ripetuto) verrebbe scartata a torto come falso
+// duplicato — la stessa sparizione muta che questo task esiste per
+// eliminare, reintrodotta nel percorso degradato. Deliberatamente largo:
+// AskUserQuestion non ha un timeout proprio (vedi il commento in
+// subscribeBus), e rispondere a mano al terminale può richiedere molti
+// minuti — un bound stretto scadrebbe mentre l'utente sta ancora decidendo,
+// riaprendo esattamente lo stesso buco. 30 minuti è il compromesso: molto
+// più lungo di qualunque tempo di risposta plausibile, ma non "per sempre".
+export const PROMPT_DEDUPE_MAX_AGE_MS = 30 * 60_000;
+
+// Un ingresso della cache di deduplica: la chiave e il momento in cui è stata
+// registrata (serve alla scadenza per età delle chiavi 'sig:', vedi sopra).
+export interface PromptKeyEntry { key: string; at: number }
+
+// Registra `key` nell'elenco delle chiavi già viste per una sessione (FIFO
+// con cap): se era già presente la domanda è un duplicato (va scartata con
+// motivo 'duplicate-prompt', mai in silenzio); altrimenti viene aggiunta.
+// Pura: non tocca lo stato del bot, il chiamante (isDuplicatePrompt) si
+// limita a leggere/scrivere la Map per sessione.
+//
+// Le due famiglie di chiavi (vedi promptDedupeKey) si comportano diversamente
+// su un hit:
+// - 'id:' (toolUseId, univoco per tool call): resta registrata esattamente
+//   come prima di questo fix — nessun rischio di collisione fra domande
+//   diverse, quindi nessun bisogno di consumarla né di farla scadere.
+// - 'sig:' (fallback quando l'hook non ha un toolUseId leggibile): è
+//   ONE-SHOT. La firma è solo testo+opzioni, quindi una domanda IDENTICA ma
+//   successiva nella stessa sessione produce la STESSA chiave. Lasciarla
+//   registrata per sempre scarterebbe quella domanda successiva come falso
+//   duplicato — per questo un hit su una chiave 'sig:' la CONSUME (la
+//   rimuove): sopprime esattamente la sua copia dal transcript, poi la
+//   sessione riparte pulita per la prossima domanda con la stessa firma. Le
+//   chiavi 'sig:' scadono anche per età (PROMPT_DEDUPE_MAX_AGE_MS) nel caso
+//   quella copia non arrivi mai.
+export function registerPromptKey(
+  seen: readonly PromptKeyEntry[],
+  key: string,
+  opts: { cap?: number; maxAgeMs?: number; now?: number } = {},
+): { duplicate: boolean; seen: PromptKeyEntry[] } {
+  const cap = opts.cap ?? PROMPT_DEDUPE_CAP;
+  const maxAgeMs = opts.maxAgeMs ?? PROMPT_DEDUPE_MAX_AGE_MS;
+  const now = opts.now ?? Date.now();
+  // La scadenza per età riguarda SOLO le 'sig:' — le 'id:' restano com'erano.
+  const alive = seen.filter(e => !e.key.startsWith('sig:') || now - e.at < maxAgeMs);
+  const idx = alive.findIndex(e => e.key === key);
+  if (idx !== -1) {
+    const oneShot = key.startsWith('sig:');
+    const next = oneShot ? alive.filter((_, i) => i !== idx) : alive;
+    return { duplicate: true, seen: next };
+  }
+  const next = [...alive, { key, at: now }];
+  return { duplicate: false, seen: next.length > cap ? next.slice(next.length - cap) : next };
+}
+
+// Quante righe di contesto del pane mostrare sopra una domanda dall'hook:
+// abbastanza per orientarsi, non l'intero pane.
+export const PANE_CONTEXT_LINES = 20;
+
+// Task 8, punto 5: righe di contesto del pane da mostrare sopra una domanda
+// di provenienza hook (il testo che il modello ha scritto prima vive solo nel
+// transcript e arriva in ritardo). Ultime `maxLines` righe NON vuote, ANSI
+// già rimosso da stripAnsi, in un blocco <pre> (larghezza fissa, coerente con
+// /view). Stringa vuota se non resta nulla da mostrare — il chiamante la usa
+// come segnale "niente contesto", non come blocco vuoto.
+export function formatPaneContext(pane: string, maxLines = 20): string {
+  const lines = stripAnsi(pane).split('\n').map(l => l.trimEnd()).filter(l => l.trim().length > 0);
+  const tail = lines.slice(-maxLines);
+  if (!tail.length) return '';
+  return `<pre>${htmlEscape(tail.join('\n'))}</pre>\n\n`;
 }
 
 // Reply numerico dell'utente come fallback ai bottoni: "2" → [2], "1, 3" → [1,3].
@@ -542,6 +726,56 @@ export function narrationPlan(role: 'user' | 'assistant', text: string, burstOpe
   return 'separate';
 }
 
+// Perché un evento non è stato consegnato. Ogni `return` silenzioso dei gestori
+// del bus corrisponde a uno di questi motivi: senza un nome, uno scarto è
+// indistinguibile da una perdita.
+// 'duplicate-prompt' (Task 8): la copia dal transcript della stessa domanda
+// già mostrata dall'hook — vedi promptDedupeKey/registerPromptKey. Non passa
+// da gateSessionEvent (non è un gate armed/sessione-attiva, è un'identità
+// già vista), ma condivide il vocabolario di questo tipo per restare
+// cercabile allo stesso modo di ogni altro scarto.
+export type DropReason = 'not-armed' | 'no-chat-bound' | 'not-active-session' | 'injected-echo' | 'duplicate-prompt';
+export type DeliveryGate = { deliver: true } | { deliver: false; reason: DropReason };
+export type GateKind = 'text' | 'tool' | 'error' | 'result' | 'prompt' | 'permission' | 'dialog';
+
+export interface GateInput {
+  kind: GateKind;
+  armed: boolean;
+  sessionId: string;
+  activeSessionId?: string;
+  isInjectedEcho?: boolean;
+}
+
+// Testo, tool, errori e risultati sono uno *stream*: riguardano solo la sessione
+// che stai guardando. Domande, permessi e dialoghi sono *bloccanti*: scartarli
+// perché la sessione non è selezionata la lascerebbe in attesa per sempre, senza
+// modo di rispondere da Telegram — quindi passano sempre, e sono le rispettive
+// code a decidere quando mostrarli.
+const STREAM_KINDS: ReadonlySet<GateKind> = new Set<GateKind>(['text', 'tool', 'error', 'result']);
+
+// `no-chat-bound` non compare qui di proposito: la mancanza di una chat collegata
+// non ferma i gestori (che continuano a chiudere la bolla e a ripulire i flow),
+// ferma l'invio — quindi va registrata dove l'invio avviene davvero, non qui.
+//
+// `not-active-session` è testato PRIMA di `injected-echo` di proposito: il
+// gestore di `session.text` chiude la bolla tool e scarta le summary pendenti
+// solo quando il motivo riportato è proprio l'echo, non per qualunque scarto.
+// Se l'echo vincesse anche su una sessione non selezionata, quell'evento
+// riporterebbe 'injected-echo' e il gestore chiuderebbe/ripulirebbe una
+// sessione che non è quella dell'iniezione in corso (es. injection instradata
+// su list()[0] o sul flow di una domanda, che non è detto siano la sessione
+// selezionata) — un vero side effect su dati di un'altra sessione, non un
+// semplice mancato inoltro. Riportare 'injected-echo' solo per la sessione che
+// sarebbe stata comunque consegnata tiene il motivo allineato all'unico caso
+// in cui il gestore deve intervenire.
+export function gateSessionEvent(input: GateInput): DeliveryGate {
+  if (!input.armed) return { deliver: false, reason: 'not-armed' };
+  if (!STREAM_KINDS.has(input.kind)) return { deliver: true };
+  if (input.sessionId !== input.activeSessionId) return { deliver: false, reason: 'not-active-session' };
+  if (input.isInjectedEcho) return { deliver: false, reason: 'injected-echo' };
+  return { deliver: true };
+}
+
 // Indicatore "sta scrivendo…" di Telegram: la bolla del chat action dura ~5s,
 // quindi va rinnovata. start() invia subito e poi a intervalli; stop() ferma.
 export class TypingIndicator {
@@ -593,6 +827,55 @@ export function sessionListText(sessions: Session[], activeId?: string): string 
       return `${marker} <b>${title}</b> · ${s.kind} · ${detail} — ${s.status} · ${relativeTime(s.lastActivity)}`;
     })
     .join('\n');
+}
+
+// Fotografia dello stato del daemon, resa per Telegram. Serve nella situazione
+// in cui il servizio è utile: sei fuori casa, qualcosa non arriva, e non hai un
+// terminale per guardare i log.
+export interface DiagSession {
+  id: string;
+  kind: SessionKind;
+  status: SessionStatus;
+  title: string;
+  transcript?: string;
+  hasTmux: boolean;
+}
+
+export interface DiagSnapshot {
+  version: string;
+  armed: boolean;
+  chatBound: boolean;
+  activeSessionId?: string;
+  sessions: DiagSession[];
+  pending: { permissions: number; dialogs: number; questionFlows: number };
+  recentErrors: string[];
+}
+
+export function diagReport(s: DiagSnapshot): string {
+  const head = [
+    `🩺 <b>claude-omni-rc ${htmlEscape(s.version)}</b>`,
+    `state: ${s.armed ? 'armed' : 'disarmed'} · chat ${s.chatBound ? 'bound' : 'not bound'}`,
+    `selected: ${s.activeSessionId ? `<code>${htmlEscape(s.activeSessionId.slice(0, 8))}</code>` : '—'}`,
+  ].join('\n');
+
+  const sessions = s.sessions.length
+    ? s.sessions.map(x => {
+        const bits = [x.kind, x.status, x.hasTmux ? 'tmux' : 'no-tmux', x.transcript ? 'transcript' : 'no-transcript'];
+        return `• <code>${htmlEscape(x.id.slice(0, 8))}</code> ${htmlEscape(x.title)} — ${htmlEscape(bits.join(' · '))}`;
+      }).join('\n')
+    : 'no sessions tracked';
+
+  const pending = `permissions ${s.pending.permissions} · dialogs ${s.pending.dialogs} · questions ${s.pending.questionFlows}`;
+
+  // M3: ogni riga è un record JSON completo con stack trace espansa — senza
+  // troncamento venti di queste bastano a spaccare /diag in dieci-più messaggi
+  // Telegram per un solo comando. Il ring in log().recentErrors() resta intatto:
+  // si tronca solo la resa qui, col marcatore esplicito di truncateAtWord.
+  const errors = s.recentErrors.length
+    ? s.recentErrors.map(l => `<code>${htmlEscape(truncateAtWord(l, 300))}</code>`).join('\n')
+    : 'no recent errors';
+
+  return `${head}\n\n<b>Sessions</b>\n${sessions}\n\n<b>Pending</b>\n${htmlEscape(pending)}\n\n<b>Recent errors</b>\n${errors}`;
 }
 
 // spec §8: mai inoltrare blocchi immagine a modelli text-only.
@@ -739,6 +1022,11 @@ export class SummarizeQueue {
 
 // ---------- bot ----------
 
+// I2: correlazione opzionale per gli invii — non ogni chiamante ha un eventId
+// (es. le notifiche di livello daemon), quindi entrambi i campi restano
+// opzionali invece di forzare un valore inventato.
+interface SendCorrelation { eventId?: string; sessionId?: string }
+
 export interface BotDeps {
   config: Config;
   bus: Bus;
@@ -766,6 +1054,10 @@ export class TelegramBot {
   // stati: set accodati, una domanda alla volta, multi-select e "Other").
   private questionFlows = new Map<string, QuestionFlow>(); // sessionId → flow
   private flowsByToken = new Map<string, QuestionFlow>(); // token → flow
+  // Task 8, punto 4: chiavi di deduplica già viste per sessione (vedi
+  // promptDedupeKey/registerPromptKey) — riconosce la copia tardiva del
+  // transcript della stessa domanda già mostrata dall'hook.
+  private seenPromptKeys = new Map<string, PromptKeyEntry[]>();
   // Permessi ExitPlanMode in attesa del testo libero per "Edit plan":
   // sessionId → id della richiesta di permesso.
   private pendingPlanEdits = new Map<string, string>();
@@ -800,7 +1092,9 @@ export class TelegramBot {
     this.bot = new Bot(deps.config.telegramBotToken, { client: { timeoutSeconds: 35 } });
     // senza bot.catch, grammy STOPPA il bot al primo errore di middleware non
     // gestito → il daemon moriva (spec §3.1). Ora logghiamo e si va avanti.
-    this.bot.catch(err => { console.error('claude-omni-rc bot error:', (err as { error?: unknown })?.error ?? err); });
+    // I4: console.error non raggiunge daemon.jsonl né /diag — solo daemon.err.log.
+    // Stesso catch, stesso momento: cambia solo dove finisce il report.
+    this.bot.catch(err => { log().error('telegram bot error', { err: (err as { error?: unknown })?.error ?? err }); });
     this.register();
     this.subscribeBus();
   }
@@ -836,12 +1130,18 @@ export class TelegramBot {
 
   // Invio sequenziale dei chunk (l'ordine conta) con gli extra — tastiera
   // inclusa — solo sull'ultimo. Ritorna l'id dell'ultimo messaggio inviato.
-  private async sendChunked(chatId: number, text: string, extra: Record<string, unknown> = {}): Promise<number | undefined> {
+  // I2: `correlation` propaga eventId/sessionId fin qui quando il chiamante li
+  // ha — così 'telegram send failed' (l'ultimo anello della catena) resta
+  // agganciabile allo stesso eventId della riga 'event delivering' che l'ha
+  // preceduto. Un chiamante senza quei valori (es. notify per un avviso di
+  // daemon) non li propaga: il record dice onestamente che non c'erano,
+  // invece di inventarli.
+  private async sendChunked(chatId: number, text: string, extra: Record<string, unknown> = {}, correlation: SendCorrelation = {}): Promise<number | undefined> {
     const parts = splitHtmlMessage(text);
     let lastId: number | undefined;
     for (let i = 0; i < parts.length; i++) {
       const opts = { parse_mode: 'HTML' as const, ...(i === parts.length - 1 ? extra : {}) };
-      const msg = await this.bot.api.sendMessage(chatId, parts[i], opts).catch(err => { this.logCatch('send')(err); return undefined; });
+      const msg = await this.bot.api.sendMessage(chatId, parts[i], opts).catch(err => { log().error('telegram send failed', { ...correlation, chatId, part: i, of: parts.length, err }); return undefined; });
       if (msg) lastId = msg.message_id;
     }
     return lastId;
@@ -850,7 +1150,7 @@ export class TelegramBot {
   // Pubblico: usato anche da daemon.ts per l'avviso "nuova versione disponibile".
   notify(text: string): void {
     const chatId = this.chatId;
-    if (!chatId) return;
+    if (!chatId) { log().warn('send skipped', { kind: 'notice', reason: 'no-chat-bound' }); return; }
     this.track(this.sendChunked(chatId, text), 'notify');
   }
 
@@ -858,7 +1158,9 @@ export class TelegramBot {
   // risale al middleware di grammy (che senza bot.catch fermerebbe la coda).
   private safe(ctx: Context, label: string, fn: () => Promise<unknown>): Promise<unknown> {
     return Promise.resolve().then(fn).catch(err => {
-      console.error(`handler ${label} failed:`, err);
+      // I4: instradato su log().error (prima console.error, invisibile a
+      // daemon.jsonl e /diag) — stesso catch, stesso momento.
+      log().error('handler failed', { label, err });
       return this.send(ctx, '❌ Something went wrong. Check the daemon log.').catch(() => undefined);
     });
   }
@@ -866,15 +1168,44 @@ export class TelegramBot {
   // Aggiunge il log a un'operazione fire-and-forget: niente unhandled rejection
   // (in Node 22 una promise rifiutata non gestita uccide il processo).
   private track(p: Promise<unknown>, label: string): void {
-    void p.catch(err => console.error(`background ${label} failed:`, err));
+    // I4: idem — il flusso domande (session.prompt) passa proprio da qui
+    // (this.track(this.onSessionPrompt(...), 'prompt flow')), quindi un throw
+    // dentro il flow era invisibile sia al log strutturato che a /diag.
+    void p.catch(err => log().error('background task failed', { label, err }));
   }
 
   private logCatch(label: string): (err: unknown) => void {
-    return err => console.error(label, err);
+    return err => log().error(label, { err });
   }
-  private async forwardText(sessionId: string, text: string, role: 'user' | 'assistant'): Promise<void> {
+
+  // Applica il gate e registra l'esito. Restituisce il gate stesso: i
+  // chiamanti che devono distinguere il motivo (es. session.text con l'echo)
+  // guardano `.reason`, gli altri si limitano a `.deliver`.
+  private passes(kind: GateKind, sessionId: string, eventId: string | undefined, isInjectedEcho = false): DeliveryGate {
+    const gate = gateSessionEvent({
+      kind,
+      armed: this.deps.manager.isArmed(),
+      sessionId,
+      activeSessionId: this.deps.manager.getActive(),
+      isInjectedEcho,
+    });
+    if (!gate.deliver) log().info('event dropped', { eventId, sessionId, kind, reason: gate.reason });
+    return gate;
+  }
+
+  // Task 8, punto 4: true se questa chiave è già stata vista per la sessione
+  // (la domanda va scartata come 'duplicate-prompt'), false se è nuova (e la
+  // registra). Wrapper stateful attorno a registerPromptKey (pura, testata
+  // direttamente) — qui vive solo la lettura/scrittura della Map per sessione.
+  private isDuplicatePrompt(sessionId: string, key: string): boolean {
+    const { duplicate, seen } = registerPromptKey(this.seenPromptKeys.get(sessionId) ?? [], key);
+    this.seenPromptKeys.set(sessionId, seen);
+    return duplicate;
+  }
+
+  private async forwardText(sessionId: string, text: string, role: 'user' | 'assistant', eventId?: string): Promise<void> {
     const chatId = this.chatId;
-    if (!chatId) return;
+    if (!chatId) { log().warn('send skipped', { sessionId, kind: 'text', reason: 'no-chat-bound' }); return; }
     const last = this.lastMsg.get(sessionId);
     const now = Date.now();
     // concatena solo messaggi dello stesso ruolo (un turno con più blocchi text
@@ -885,14 +1216,25 @@ export class TelegramBot {
     if (last && last.role === role && now - last.at < 10_000 && merged.length <= SEND_MAX_CHARS) {
       const ok = await this.throttler.throttled(() =>
         this.bot.api.editMessageText(chatId, last.messageId, merged, { parse_mode: 'HTML' }).then(() => true).catch(() => false));
-      if (ok) { last.text = merged; last.at = now; return; }
+      if (ok) {
+        last.text = merged; last.at = now;
+        // I3: chiude la catena — l'edit è andato a buon fine, quindi l'evento è
+        // stato DAVVERO consegnato (non solo tentato). messageId è quello esteso,
+        // lo stesso di prima dell'edit.
+        log().info('event delivered', { eventId, sessionId, kind: 'text', messageId: last.messageId });
+        return;
+      }
     }
     // testo lungo → più messaggi; il tracking punta all'ultimo, che è quello
     // che eventuali blocchi successivi dello stesso turno estenderanno.
     const parts = splitHtmlMessage(text);
-    const messageId = await this.sendChunked(chatId, text);
+    const messageId = await this.sendChunked(chatId, text, {}, { eventId, sessionId });
     if (messageId !== undefined) {
       this.lastMsg.set(sessionId, { messageId, text: parts[parts.length - 1], at: now, role });
+      // I3: idem, per il path "nuovo messaggio" — un fallimento qui è già
+      // loggato dentro sendChunked (I2), quindi il silenzio in questo punto
+      // significa davvero successo, non un'assenza di segnale.
+      log().info('event delivered', { eventId, sessionId, kind: 'text', messageId });
     }
   }
 
@@ -905,19 +1247,29 @@ export class TelegramBot {
       agg = new ToolBurstAggregator({
         edit: async (messageId, text) => {
           const chatId = this.chatId;
-          if (!chatId) return false;
+          if (!chatId) { log().warn('send skipped', { sessionId, kind: 'tool', reason: 'no-chat-bound' }); return false; }
           const ok = await this.throttler.throttled(() =>
             this.bot.api.editMessageText(chatId, messageId, text, { parse_mode: 'HTML' })
               .then(() => true)
-              .catch(err => { console.error('claude-omni-rc tool edit failed:', err); return false; }));
+              // C1: il sink non ha l'eventId (non è instradato dentro push(), fuori
+              // scope per questa fase) — sessionId + kind bastano a legare questo
+              // fallimento alla riga 'event merged into tool bubble' che lo precede.
+              // Il valore di ritorno resta false: nessun cambio di comportamento.
+              .catch(err => { log().error('tool bubble edit failed', { sessionId, kind: 'tool', err }); return false; }));
           return ok ?? false;
         },
         send: async text => {
           const chatId = this.chatId;
-          if (!chatId) return undefined;
+          if (!chatId) { log().warn('send skipped', { sessionId, kind: 'tool', reason: 'no-chat-bound' }); return undefined; }
           // anche il send passa dal throttler: massimo 1 op/sec per chat (niente 429).
+          // C1: prima questo fallimento era doppiamente inghiottito (qui e dentro
+          // EditThrottler.throttled) senza lasciare traccia — un testo fuso nella
+          // bubble tool spariva senza nessuna riga di log dopo 'event merged into
+          // tool bubble'. Il valore di ritorno resta undefined: nessun cambio di
+          // comportamento, solo il record in più.
           const msg = await this.throttler.throttled(() =>
-            this.bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' }).catch(() => undefined));
+            this.bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' })
+              .catch(err => { log().error('tool bubble send failed', { sessionId, kind: 'tool', err }); return undefined; }));
           return msg?.message_id;
         },
       });
@@ -994,7 +1346,7 @@ export class TelegramBot {
     const bot = this.bot;
     bot.command('start', ctx => this.safe(ctx, 'start', () => this.onStart(ctx)));
     bot.command('help', ctx => this.safe(ctx, 'help', async () => {
-      if (this.authorize(ctx)) await this.send(ctx, 'Commands: /rc [on|off|status] (no arg toggles) · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /usage · /help');
+      if (this.authorize(ctx)) await this.send(ctx, 'Commands: /rc [on|off|status] (no arg toggles) · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /usage · /diag · /help');
     }));
     bot.command('rc', ctx => this.safe(ctx, 'rc', () => this.onRc(ctx)));
     bot.command('sessions', ctx => this.safe(ctx, 'sessions', () => this.onSessions(ctx)));
@@ -1006,6 +1358,30 @@ export class TelegramBot {
     bot.command('history', ctx => this.safe(ctx, 'history', () => this.onHistory(ctx)));
     bot.command('delete', ctx => this.safe(ctx, 'delete', () => this.onDelete(ctx)));
     bot.command('usage', ctx => this.safe(ctx, 'usage', () => this.onUsage(ctx)));
+    bot.command('diag', ctx => this.safe(ctx, 'diag', async () => {
+      if (!this.authorize(ctx)) return;
+      const sessions = this.deps.manager.list();
+      await this.send(ctx, diagReport({
+        version: CURRENT_VERSION,
+        armed: this.deps.manager.isArmed(),
+        chatBound: this.chatId !== undefined,
+        activeSessionId: this.deps.manager.getActive(),
+        sessions: sessions.map(x => ({
+          id: x.id,
+          kind: x.kind,
+          status: x.status,
+          title: x.title,
+          transcript: x.transcriptFile ? basename(x.transcriptFile) : undefined,
+          hasTmux: Boolean(x.tmuxTarget),
+        })),
+        pending: {
+          permissions: this.deps.permissionFlow.pendingCount(),
+          dialogs: this.deps.dialogFlow.pendingCount(),
+          questionFlows: this.questionFlows.size,
+        },
+        recentErrors: log().recentErrors(),
+      }));
+    }));
     bot.on('callback_query:data', ctx => this.safe(ctx, 'callback', () => this.onCallback(ctx)));
     bot.on('message:text', ctx => this.safe(ctx, 'message', () => this.onMessage(ctx)));
     bot.on('message:photo', ctx => this.safe(ctx, 'photo', () => this.onPhoto(ctx)));
@@ -1156,11 +1532,15 @@ export class TelegramBot {
   }
 
   // Ollama Cloud (via ollama-usage) o Anthropic (via l'API sperimentale della
-  // Agent SDK) a seconda del provider configurato — stesso criterio usato da
-  // sdk-driver.ts per le sessioni headless.
+  // Agent SDK) a seconda del provider della sessione attiva — stesso criterio
+  // model-aware di omni-rc.sh e sdk-driver.ts (resolveProvider). Senza sessione
+  // attiva si usa DEFAULT_MODEL.
   private async onUsage(ctx: Context): Promise<void> {
     if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
-    if (isOllamaProvider(this.deps.config)) {
+    const active = this.deps.manager.getActive();
+    const s = active ? this.deps.manager.get(active) : undefined;
+    const model = s?.model ?? this.deps.config.defaultModel;
+    if (isOllamaProvider(this.deps.config, model)) {
       await this.sendOllamaUsage(ctx);
     } else {
       await this.sendAnthropicUsage(ctx);
@@ -1309,22 +1689,63 @@ export class TelegramBot {
     this.flowsByToken.delete(flow.token);
   }
 
+  // Task 8, punto 5: righe di contesto per un set arrivato dall'hook, su una
+  // sessione terminale. Fire-and-forget rispetto alla domanda — che è già
+  // partita (o accodata) prima che questo venga chiamato: se tmux non
+  // risponde o fallisce, qui si logga soltanto e la domanda resta senza
+  // contesto, mai bloccata né ritentata. Se la cattura torna e la domanda è
+  // ancora quella a schermo (stesso flow, stesso set, prima domanda), il
+  // messaggio viene editato per aggiungere il blocco.
+  private attachPaneContext(flow: QuestionFlow, setIndex: number, sessionId: string, tmuxTarget: string): void {
+    this.deps.tmux.capturePane(tmuxTarget).then(pane => {
+      const block = formatPaneContext(pane, PANE_CONTEXT_LINES);
+      if (!block) return;
+      if (this.questionFlows.get(sessionId) !== flow) return; // flow sostituito/chiuso nel frattempo
+      flow.paneContexts[setIndex] = block;
+      if (flow.setIndex === setIndex && flow.qIndex === 0 && flow.messageId) void this.updateQuestionMessage(flow);
+    }).catch(err => {
+      log().warn('pane context capture failed', { sessionId, err });
+    });
+  }
+
   // Un nuovo set di domande (una chiamata AskUserQuestion) arriva dal bus:
   // accodato al flow della sessione; se il flow è idle, mostra la prima domanda.
-  private async onSessionPrompt(sessionId: string, questions: PromptQuestion[]): Promise<void> {
+  private async onSessionPrompt(sessionId: string, questions: PromptQuestion[], eventId: string | undefined, source: 'transcript' | 'hook' | undefined): Promise<void> {
     let flow = this.questionFlows.get(sessionId);
     if (!flow) {
-      flow = { sessionId, sets: [], setIndex: 0, qIndex: 0, answers: [], token: randomUUID(), multiSel: [] };
+      flow = { sessionId, sets: [], eventIds: [], paneContexts: [], setIndex: 0, qIndex: 0, answers: [], token: randomUUID(), multiSel: [] };
       this.setFlow(flow);
     }
+    const setIndex = flow.sets.length;
     flow.sets.push(questions);
+    flow.eventIds.push(eventId);
+    flow.paneContexts.push(undefined);
     flow.answers.push(questions.map(() => undefined));
+    // Punto 5: solo sessioni terminali e solo domande dall'hook — una sessione
+    // headless non ha un pane da catturare, e una domanda dal transcript
+    // arriva già insieme al testo che la precedeva (non c'è ritardo da colmare).
+    const session = this.deps.manager.get(sessionId);
+    if (source === 'hook' && session?.kind === 'terminal' && session.tmuxTarget) {
+      this.attachPaneContext(flow, setIndex, sessionId, session.tmuxTarget);
+    }
     // La prima domanda di un flow nuovo si mostra subito solo se questa
     // sessione è quella selezionata — altrimenti resta in pending: niente
     // interruzioni per sessioni che non stai guardando (vedi sess:select per
-    // il recupero quando l'utente ci passa sopra).
-    if (sessionId === this.deps.manager.getActive() && flow.setIndex === 0 && flow.qIndex === 0 && !flow.messageId) {
+    // il recupero quando l'utente ci passa sopra). `!flow.displaying` chiude la
+    // finestra di race fra il controllo e l'assegnazione di messageId (l'invio
+    // di showQuestion è async): senza, due set ravvicinati manderebbero due
+    // messaggi per la stessa domanda.
+    if (sessionId === this.deps.manager.getActive() && flow.setIndex === 0 && flow.qIndex === 0 && !flow.messageId && !flow.displaying) {
       await this.showQuestion(flow);
+    } else {
+      // C2: prima qui non c'era nessun record — il set resta accodato invece di
+      // essere mostrato, e senza questa riga un operatore che segue l'eventId
+      // vedrebbe la catena finire nel nulla dopo 'event emitted'/'event queued'.
+      // Due cause distinte, nominate esplicitamente (non un generico "queued"):
+      // la sessione non è quella selezionata, oppure questo stesso flow ha già
+      // una domanda a schermo (nuovo set in coda dietro quella corrente).
+      const reason = sessionId !== this.deps.manager.getActive() ? 'not-active-session' : 'question-on-screen';
+      log().info('event queued', { eventId, sessionId, kind: 'prompt', reason });
     }
   }
 
@@ -1343,7 +1764,11 @@ export class TelegramBot {
     const sel = q.multiSelect && flow.multiSel.length
       ? `\n\n<i>Selected: ${flow.multiSel.map(i => htmlEscape(q.options[i].label)).join(', ')}</i>`
       : '';
-    return `❓ <b>${htmlEscape(header)}</b>\n<b>${htmlEscape(title)}</b>${multi}\n${opts}${sel}`;
+    // Punto 5: il contesto compare solo sopra la PRIMA domanda del set — è
+    // uno scatto del pane preso quando l'hook è scattato, non qualcosa che ha
+    // senso ripetere identico sotto ogni domanda successiva dello stesso set.
+    const context = flow.qIndex === 0 ? (flow.paneContexts[flow.setIndex] ?? '') : '';
+    return `${context}❓ <b>${htmlEscape(header)}</b>\n<b>${htmlEscape(title)}</b>${multi}\n${opts}${sel}`;
   }
 
   // Bottoni per la domanda corrente: opzioni (toggle per multi-select), Done e Other.
@@ -1369,12 +1794,37 @@ export class TelegramBot {
 
   // Invia un nuovo messaggio per la domanda corrente.
   private async showQuestion(flow: QuestionFlow): Promise<void> {
-    if (!this.chatId) return;
+    // C2: prima questo `return` silenzioso era l'unico sito di invio del file
+    // senza il record 'send skipped' aggiunto altrove in questo branch —
+    // stesso motivo ('no-chat-bound'), stessa forma degli altri.
+    if (!this.chatId) { log().warn('send skipped', { sessionId: flow.sessionId, kind: 'prompt', reason: 'no-chat-bound' }); return; }
+    const eventId = flow.eventIds[flow.setIndex];
     const q = flow.sets[flow.setIndex][flow.qIndex];
     const text = this.renderQuestion(flow, q);
     const kb = this.buildQuestionKeyboard(flow, q);
-    const id = await this.sendChunked(this.chatId, text, { reply_markup: kb });
-    if (id) flow.messageId = id;
+    // C2: 'event delivering' è stato spostato qui da subscribeBus — questo è il
+    // solo punto in cui una domanda viene DAVVERO mostrata (chiamato dal ramo
+    // "flow idle" di onSessionPrompt, da advance() per la domanda/set successivo,
+    // e dal recupero di una domanda in pending su sess:select). Prima veniva
+    // loggato incondizionatamente all'arrivo dell'evento, anche quando il set
+    // finiva solo accodato — un operatore avrebbe letto "delivering" per
+    // qualcosa che non era ancora successo.
+    log().info('event delivering', { eventId, sessionId: flow.sessionId, kind: 'prompt', setIndex: flow.setIndex, qIndex: flow.qIndex });
+    // La guardia anti-race va alzata PRIMA dell'await: messa qui, nel corpo di
+    // showQuestion, è sincrona rispetto alla condizione "flow idle" di
+    // onSessionPrompt (l'await di showQuestion la esegue nello stesso tick).
+    flow.displaying = true;
+    try {
+      const id = await this.sendChunked(this.chatId, text, { reply_markup: kb }, { eventId, sessionId: flow.sessionId });
+      if (id) {
+        flow.messageId = id;
+        // I3: chiude la catena per questa domanda — consegna riuscita, con l'id
+        // del messaggio Telegram risultante.
+        log().info('event delivered', { eventId, sessionId: flow.sessionId, kind: 'prompt', messageId: id });
+      }
+    } finally {
+      flow.displaying = false;
+    }
   }
 
   // Edita il messaggio corrente (toggle multi-select, cancel Other).
@@ -1481,12 +1931,20 @@ export class TelegramBot {
     await this.updateQuestionMessage(flow);
   }
 
-  // Testo libero arrivato da onMessage mentre awaitingOther è attivo.
+  // Testo libero arrivato da onMessage mentre awaitingOther è attivo. Su una
+  // multi-select l'utente può aver togglato delle opzioni PRIMA di usare
+  // "Other": il CLI le registra insieme al testo (es. "A, custom text"), quindi
+  // la risposta combina le opzioni togglate con il testo libero.
   private async answerOther(flow: QuestionFlow, text: string): Promise<void> {
     const { setIndex, qIndex } = flow.awaitingOther!;
-    flow.answers[setIndex][qIndex] = { kind: 'other', text };
+    const q = flow.sets[setIndex][qIndex];
+    const a: PromptAnswer = (q.multiSelect && flow.multiSel.length)
+      ? { kind: 'option', labels: flow.multiSel.map(i => q.options[i].label), extraText: text }
+      : { kind: 'other', text };
+    flow.answers[setIndex][qIndex] = a;
     flow.awaitingOther = undefined;
-    await this.acknowledgeAnswer(flow, text);
+    flow.multiSel = []; // consumata: non deve trapelare nella prossima domanda
+    await this.acknowledgeAnswer(flow, answerSummary(a));
     await this.recordAndAdvance(flow);
   }
 
@@ -1495,9 +1953,10 @@ export class TelegramBot {
   private async recordAndAdvance(flow: QuestionFlow): Promise<void> {
     const session = this.deps.manager.get(flow.sessionId);
     if (session?.kind === 'terminal') {
-      const q = flow.sets[flow.setIndex][flow.qIndex];
+      const set = flow.sets[flow.setIndex];
+      const q = set[flow.qIndex];
       const a = flow.answers[flow.setIndex][flow.qIndex];
-      if (a) await this.deliverAnswer(session, q, a);
+      if (a) await this.deliverAnswer(session, q, a, { isLast: flow.qIndex === set.length - 1, setSize: set.length });
     }
     await this.advance(flow);
   }
@@ -1505,6 +1964,11 @@ export class TelegramBot {
   // Avanza alla prossima domanda/set; a set completo consegna (headless) e
   // passa al set successivo; a fine coda pulisce il flow.
   private async advance(flow: QuestionFlow): Promise<void> {
+    // Le opzioni togglate appartengono alla domanda appena risposta: azzerarle
+    // qui (oltre che in doneMultiSelect/answerOther) impedisce che trapelino
+    // nella prossima domanda multi-select come pre-selezionate (bug "Coniglio
+    // già selezionato").
+    flow.multiSel = [];
     const set = flow.sets[flow.setIndex];
     if (flow.qIndex < set.length - 1) {
       flow.qIndex++;
@@ -1524,15 +1988,21 @@ export class TelegramBot {
     }
   }
 
-  // Iniezione tmux della risposta a una domanda (terminali).
-  private async deliverAnswer(session: Session, q: PromptQuestion, a: PromptAnswer): Promise<void> {
+  // Iniezione tmux della risposta a una domanda (terminali): il menu del CLI è
+  // interattivo, quindi si invia la sequenza di tasti di answerToKeys (mai il
+  // paste numerico, che il menu corrompe). `recordInjected` registra il
+  // riepilogo solo per coerenza col resto dei testi iniettati (il menu non
+  // echeggia i tasti nel transcript, quindi l'echo non va soppresso davvero).
+  private async deliverAnswer(session: Session, q: PromptQuestion, a: PromptAnswer, ctx: { isLast: boolean; setSize: number }): Promise<void> {
     if (session.kind !== 'terminal' || !session.tmuxTarget) return;
-    const text = answerToInjection(q, a);
+    const seq = answerToKeys(q, a, ctx);
+    if (!seq.length) return;
     try {
-      await this.deps.tmux.injectText(session.tmuxTarget, text);
-      this.recordInjected(session.id, text);
+      await this.deps.tmux.sendKeySeq(session.tmuxTarget, seq);
+      this.recordInjected(session.id, answerSummary(a));
     } catch (e) {
-      console.error('deliverAnswer failed:', e);
+      // I4: instradato su log().error — stesso catch, stesso momento.
+      log().error('deliverAnswer failed', { sessionId: session.id, err: e });
     }
   }
 
@@ -1588,7 +2058,9 @@ export class TelegramBot {
     this.deps.permissionFlow.arm(permission.id);
     const kb = permissionKeyboard(permission);
     if (this.chatId) {
-      this.track(this.sendChunked(this.chatId, permissionMessage(permission), { reply_markup: kb }), 'permission send');
+      // I2: session.permission non porta ancora un eventId (Fase 2) — si propaga
+      // solo il sessionId, quel che c'è.
+      this.track(this.sendChunked(this.chatId, permissionMessage(permission), { reply_markup: kb }, { sessionId: permission.sessionId }), 'permission send');
     }
   }
 
@@ -1893,35 +2365,63 @@ export class TelegramBot {
     const bus = this.deps.bus;
     // constraint 8: da disattivo nessun relay — ogni handler del bus è gated su armed.
     bus.on('session.updated', ({ sessionId }) => {
+      // Esente di proposito dal gate/log di questo branch: non è instradato verso
+      // Telegram (l'unico effetto è l'indicatore "sta scrivendo…"), ed è l'evento
+      // a frequenza più alta sul bus — gatarlo e loggarlo raddoppierebbe il
+      // volume dei log senza aggiungere nulla alla diagnosi. I due `return` qui
+      // sotto assomigliano a quelli che questo branch esiste per eliminare, ma
+      // non lo sono: non c'è consegna da tracciare.
       if (!this.deps.manager.isArmed()) return;
       if (sessionId !== this.deps.manager.getActive()) return;
       this.syncTyping();
     });
     bus.on('session.text', e => {
-      if (!this.deps.manager.isArmed()) return;
-      if (e.sessionId !== this.deps.manager.getActive()) return; // solo la sessione selezionata
-      if (e.role === 'assistant') this.typing.stop(); // il testo è già l'indicatore
-      // Fix 1: l'echo di un testo iniettato dal bot non viene reinoltrato.
-      if (e.role === 'user' && this.isInjectedEcho(e.sessionId, e.text)) {
-        this.toolBurst(e.sessionId).close();
-        this.resetSummarize(e.sessionId);
+      const echo = e.role === 'user' && this.isInjectedEcho(e.sessionId, e.text);
+      const gate = this.passes('text', e.sessionId, e.eventId, echo);
+      if (!gate.deliver) {
+        // Fix 1: l'echo di un testo iniettato dal bot non viene reinoltrato, e
+        // solo in quel caso (motivo == 'injected-echo', non un qualunque
+        // scarto) la bolla tool va chiusa e le summary pendenti scartate — per
+        // un evento scartato per altro motivo (disarmato, sessione non
+        // selezionata) questa sessione potrebbe non essere quella in cui
+        // l'iniezione sta effettivamente avvenendo.
+        if (gate.reason === 'injected-echo') { this.toolBurst(e.sessionId).close(); this.resetSummarize(e.sessionId); }
         return;
       }
+      if (e.role === 'assistant') this.typing.stop(); // il testo è già l'indicatore
       const burst = this.toolBurst(e.sessionId);
       if (narrationPlan(e.role, e.text, burst.isOpen()) === 'merge') {
         // narrazione breve del modello mentre la bubble tool è aperta: si fonde
         // dentro (niente messaggio extra) — il grouping non si rompe più a ogni
         // "Ora leggo X…" tra una tool call e l'altra.
+        log().info('event merged into tool bubble', { eventId: e.eventId, sessionId: e.sessionId, kind: 'text' });
         void burst.push(mdToHtml(e.text));
         return;
       }
       burst.close();
       this.resetSummarize(e.sessionId);
+      log().info('event delivering', { eventId: e.eventId, sessionId: e.sessionId, kind: 'text', role: e.role });
       // sia le headless che i transcript delle terminali arrivano come markdown.
-      void this.forwardText(e.sessionId, mdToHtml(e.text), e.role);
+      void this.forwardText(e.sessionId, mdToHtml(e.text), e.role, e.eventId);
     });
-    bus.on('session.prompt', ({ sessionId, questions }) => {
-      if (!this.deps.manager.isArmed()) return;
+    bus.on('session.prompt', ({ sessionId, questions, eventId, toolUseId, source }) => {
+      if (!this.passes('prompt', sessionId, eventId).deliver) return;
+      // Task 8, punto 4: la stessa domanda arriva due volte — dall'hook e poi
+      // dal transcript (stessa tool_use, due sorgenti). La chiave è SOLO la
+      // firma di contenuto (promptDedupeKey): l'hook di 2.1.227 non porta il
+      // tool_use_id, quindi la firma è l'unica chiave condivisa fra le due
+      // copie. Chi arriva prima la registra come vista e passa, chi arriva
+      // dopo la trova già vista e viene scartato. Verso verificato sul CLI
+      // reale: in 2.1.227 il transcript scrive la tool_use PRIMA che l'hook
+      // scatti (la copia transcript arriva ~9ms prima, non dopo) — la prima
+      // occorrenza è quindi quella del transcript, e 'duplicate-prompt' cade
+      // sulla copia (redundante) dell'hook. Nessun ramo qui sceglie in base a
+      // `source`: è l'ordine di arrivo reale a decidere.
+      const dedupeKey = promptDedupeKey(sessionId, questions);
+      if (this.isDuplicatePrompt(sessionId, dedupeKey)) {
+        log().info('event dropped', { eventId, sessionId, kind: 'prompt', reason: 'duplicate-prompt', toolUseId, source });
+        return;
+      }
       // L'evento va SEMPRE registrato (mai scartato, a differenza di
       // session.text/session.tool che restano solo sulla sessione attiva): a
       // differenza dei permessi/dialoghi, AskUserQuestion non ha timeout, quindi
@@ -1932,13 +2432,19 @@ export class TelegramBot {
       // (mostrata quando l'utente ci seleziona sopra, vedi sess:select).
       this.toolBurst(sessionId).close();
       this.resetSummarize(sessionId);
+      // C2: 'event delivering' NON viene più loggato qui — a questo punto non è
+      // ancora vero: onSessionPrompt può accodare il set invece di mostrarlo
+      // (sessione non selezionata, o un'altra domanda già a schermo). Il log
+      // onesto per questo bivio è dentro onSessionPrompt stesso: 'event
+      // delivering' (via showQuestion, solo quando la domanda è DAVVERO mostrata)
+      // oppure 'event queued' con il motivo.
       // Fix 2: flusso domande multiple — accoda il set e mostra una domanda alla
       // volta (single-select, multi-select con toggle+Done, "Other" a testo libero).
-      this.track(this.onSessionPrompt(sessionId, questions), 'prompt flow');
+      this.track(this.onSessionPrompt(sessionId, questions, eventId, source), 'prompt flow');
     });
     bus.on('session.tool', e => {
-      if (!this.deps.manager.isArmed()) return;
-      if (e.kind === 'tool_use' && e.sessionId === this.deps.manager.getActive() && e.input) {
+      if (!this.passes('tool', e.sessionId, e.eventId).deliver) return;
+      if (e.kind === 'tool_use' && e.input) {
         this.typing.start(); // il modello sta lavorando di nuovo
         // riassunto leggibile via LLM nella lingua della conversazione (niente
         // JSON grezzo); fallback a summarizeTool se Ollama non risponde.
@@ -1949,7 +2455,7 @@ export class TelegramBot {
       }
     });
     bus.on('session.permission', ({ permission }) => {
-      if (!this.deps.manager.isArmed()) return;
+      if (!this.passes('permission', permission.sessionId, undefined).deliver) return;
       this.toolBurst(permission.sessionId).close();
       this.resetSummarize(permission.sessionId);
       // Stessa logica delle domande (onSessionPrompt): mostrata subito solo se
@@ -1969,7 +2475,7 @@ export class TelegramBot {
       }
     });
     bus.on('session.dialog', ({ sessionId, dialog }) => {
-      if (!this.deps.manager.isArmed()) return;
+      if (!this.passes('dialog', sessionId, undefined).deliver) return;
       this.toolBurst(sessionId).close();
       this.resetSummarize(sessionId);
       const known = this.deps.manager.get(sessionId);
@@ -1982,7 +2488,7 @@ export class TelegramBot {
       }
     });
     bus.on('session.result', e => {
-      if (!this.deps.manager.isArmed() || e.sessionId !== this.deps.manager.getActive()) return;
+      if (!this.passes('result', e.sessionId, undefined).deliver) return;
       this.typing.stop(); // fine turno: niente più "sta scrivendo"
       this.toolBurst(e.sessionId).close(); // fine turno headless: chiude la raffica di tool
       this.resetSummarize(e.sessionId); // scarta le summary pendenti
@@ -1993,7 +2499,7 @@ export class TelegramBot {
       this.notify('✅ Turn complete.');
     });
     bus.on('session.error', e => {
-      if (!this.deps.manager.isArmed() || e.sessionId !== this.deps.manager.getActive()) return;
+      if (!this.passes('error', e.sessionId, e.eventId).deliver) return;
       this.typing.stop(); // errore: niente più "sta scrivendo"
       this.toolBurst(e.sessionId).close();
       this.resetSummarize(e.sessionId);

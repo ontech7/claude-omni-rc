@@ -140,6 +140,7 @@ reattached.
 | `/history [id]` | last messages of a session |
 | `/delete [id]` | delete a session (headless: stops it; terminal: untracks only) |
 | `/usage` | 5h / weekly usage for the configured provider |
+| `/diag` | daemon state, sessions, pending interactions and recent errors |
 | `/help` | list the commands |
 
 Plain text goes to the active session — a new turn for headless sessions, typed
@@ -230,9 +231,12 @@ on the machine. See [SECURITY.md](SECURITY.md) for what that implies.
 
 ### Usage windows (`/usage`)
 
-`/usage` checks the 5-hour and weekly windows for whichever provider is
-currently configured — the same detection `omni-rc`/headless sessions use
-(`ANTHROPIC_BASE_URL` unset → Ollama; set → that provider):
+`/usage` checks the 5-hour and weekly windows for whichever provider the
+**active session** uses (or `DEFAULT_MODEL` when there is no active session) —
+the same model-aware detection `omni-rc`/headless sessions use: an explicit
+`ANTHROPIC_BASE_URL` (≠ Ollama) wins for every model; a model starting with
+`claude-` (or the `opus`/`sonnet`/`haiku`/`fable` aliases) means Anthropic;
+anything else is Ollama.
 
 - **Anthropic** (a claude.ai Pro/Max/Team/Enterprise session): read via the
   Agent SDK's experimental `/usage` control API — no extra install needed. API
@@ -242,7 +246,8 @@ currently configured — the same detection `omni-rc`/headless sessions use
   [`ollama-usage`](https://github.com/ontech7/ollama-usage) installed and
   authenticated (`ollama-usage auth`) **on the machine running the daemon** —
   `/usage` shells out to `ollama-usage --json`. If it's missing, the bot
-  replies with the install command.
+  replies with the install command. The daemon's PATH includes `~/.local/bin`
+  and `~/bin` (where `ollama-usage` is typically installed) even under launchd.
 
 ### Media
 
@@ -296,9 +301,15 @@ and one authorization method — plus `WORKSPACE_DIRS` if you want `/new`.
 | `POLL_INTERVAL_MS` | `500` | tmux discovery polling interval |
 | `CWD_REFRESH_MS` | `10000` | how often to re-check a session's real cwd (costs a `ps` + `lsof`) |
 | `CLAUDE_OMNI_RC_NO_UPDATE_CHECK` | unset | set to disable the GitHub release check below |
+| `LOG_LEVEL` | `info` | `error`, `warn`, `info` or `debug` for the structured log |
+| `LOG_FILE` | `<STATE_DIR>/logs/daemon.jsonl` | where the structured log is written |
+| `LOG_MAX_BYTES` | `5000000` | rotate the structured log past this size |
+| `LOG_KEEP` | `3` | how many rotated log files to keep |
 
-> `~/.claude-omni-rc/logs/daemon.log` has no automatic rotation — that's left to
-> the OS (`newsyslog`) or to you.
+> `~/.claude-omni-rc/logs/daemon.jsonl` is the structured log, one JSON record
+> per line, rotated at `LOG_MAX_BYTES`. `daemon.log` and `daemon.err.log` remain
+> the raw process output from launchd and have no automatic rotation — that's
+> left to the OS (`newsyslog`) or to you.
 
 ## Update notifications
 
@@ -307,7 +318,7 @@ release. When one exists, it logs a one-line notice to `daemon.log` **and**
 sends it to your bound Telegram chat — at most once per version:
 
 ```
-⬆️ New version available: claude-omni-rc 0.3.0 (you have 0.2.0) — https://github.com/ontech7/claude-omni-rc/releases
+⬆️ New version available: claude-omni-rc 0.4.0 (you have 0.3.0) — https://github.com/ontech7/claude-omni-rc/releases
 ```
 
 Disable it with `CLAUDE_OMNI_RC_NO_UPDATE_CHECK=1` in `.env`.
@@ -326,6 +337,7 @@ Disable it with `CLAUDE_OMNI_RC_NO_UPDATE_CHECK=1` in `.env`.
 | The session streams nothing | Only the **active** session streams — select it with `/sessions`. If it has no transcript, use `/view`. Check `PROJECTS_DIR` matches where the CLI writes. |
 | Permission prompts hang in the terminal | The daemon is armed but has no chat bound. Send any message to the bot; the chat is then remembered across restarts. |
 | A terminal session shows a plan I can't approve from the phone | The plan approval is a full-screen terminal UI the bot can't drive. Approve it at the terminal, or start plan-heavy work with `/new` (headless) to review plans from Telegram. |
+| A message never arrived on Telegram | `/diag` from the phone, then `~/.claude-omni-rc/logs/daemon.jsonl`: every event carries an `eventId` from the transcript to the delivered message, and a dropped one is logged with its reason. |
 
 **Can I move a running session into tmux?** No — a running process can't be
 adopted by tmux. A session started outside tmux is still mirrored read-only

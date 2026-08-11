@@ -9,3 +9,6 @@ node_modules/
 logs/
 *.log
 __pycache__/
+
+# Local tool state (Serena MCP)
+.serena/

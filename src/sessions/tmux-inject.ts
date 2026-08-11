@@ -5,6 +5,13 @@ export interface ExecResult { code: number; stdout: string; stderr: string; }
 export type ExecFn = (args: string[], opts?: { input?: string }) => Promise<ExecResult>;
 export type ShExecFn = (cmd: string, args: string[], opts?: { input?: string }) => Promise<ExecResult>;
 
+// Passo di una sequenza di tasti per rispondere a un menu del CLI: un tasto
+// nominato (Down/Enter/… o un carattere) oppure un blocco di testo letterale
+// (digitato con send-keys -l, per il campo "Type something" della domanda).
+export type QuestionKey =
+  | { kind: 'key'; key: string }
+  | { kind: 'text'; text: string };
+
 // Esegue un comando di sistema (ps, lsof, …) con lo stesso contratto di ExecFn
 // (codice d'uscita + stdout/stderr + timeout). Serve a ispezionare i processi,
 // che il solo client tmux non può fare.
@@ -125,16 +132,13 @@ export class TmuxClient {
     return r.stdout.trim();
   }
 
-  // Cwd REALE del processo claude nel pane. Quando il CLI sposta la sessione in
-  // un git worktree (`cd .claude/worktrees/<nome>`), il cwd del PANE resta
-  // quello di partenza: `pane_current_path` non basta a risolvere il transcript,
-  // che finisce nella dir worktree-encoded di ~/.claude/projects. Il processo
-  // claude (figlio di `ollama launch claude`) invece ha il cwd vero.
-  //
   // Dal pane_pid (la radice del pane) scende nell'albero dei processi fino al
-  // primo il cui eseguibile è `claude` e ne legge il cwd con lsof. undefined se
-  // il processo non c'è o non è leggibile → il chiamante ripiega sul cwd del pane.
-  async claudeCwd(target: string, tree?: ProcessTree): Promise<string | undefined> {
+  // primo il cui eseguibile è `claude` e ne restituisce il pid. undefined se il
+  // processo non c'è o il pane non è leggibile.
+  //
+  // Lo snapshot può arrivare dal chiamante: il watcher ne prende UNO per poll e
+  // lo condivide fra le sessioni, invece di uno `ps` per sessione.
+  private async findClaudePid(target: string, tree?: ProcessTree): Promise<string | undefined> {
     try {
       const t = await this.resolveTarget(target);
       const pidRes = await this.exec(['display-message', '-p', '-t', t, '#{pane_pid}']);
@@ -142,8 +146,6 @@ export class TmuxClient {
       const root = pidRes.stdout.trim();
       if (!/^\d+$/.test(root)) return undefined;
 
-      // Lo snapshot può arrivare dal chiamante: il watcher ne prende UNO per
-      // poll e lo condivide fra le sessioni, invece di uno `ps` per sessione.
       const snapshot = tree ?? await this.processTree();
       if (!snapshot) return undefined;
       const { children, comms } = snapshot;
@@ -157,18 +159,51 @@ export class TmuxClient {
         if (seen.has(pid)) continue;
         seen.add(pid);
         const comm = comms.get(pid) ?? '';
-        if (comm.split('/').pop() === 'claude') {
-          const lsof = await this.sh('lsof', ['-a', '-p', pid, '-d', 'cwd', '-Fn']);
-          if (lsof.code !== 0) return undefined;
-          for (const line of lsof.stdout.split('\n')) {
-            const n = line.match(/^n(.*)$/);
-            if (n) return n[1];
-          }
-          return undefined;
-        }
+        if (comm.split('/').pop() === 'claude') return pid;
         queue.push(...(children.get(pid) ?? []));
       }
       return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  // Cwd REALE del processo claude nel pane. Quando il CLI sposta la sessione in
+  // un git worktree (`cd .claude/worktrees/<nome>`), il cwd del PANE resta
+  // quello di partenza: `pane_current_path` non basta a risolvere il transcript,
+  // che finisce nella dir worktree-encoded di ~/.claude/projects. Il processo
+  // claude (figlio di `ollama launch claude`) invece ha il cwd vero.
+  //
+  // undefined se il processo non c'è o non è leggibile → il chiamante ripiega
+  // sul cwd del pane.
+  async claudeCwd(target: string, tree?: ProcessTree): Promise<string | undefined> {
+    try {
+      const pid = await this.findClaudePid(target, tree);
+      if (!pid) return undefined;
+      const lsof = await this.sh('lsof', ['-a', '-p', pid, '-d', 'cwd', '-Fn']);
+      if (lsof.code !== 0) return undefined;
+      for (const line of lsof.stdout.split('\n')) {
+        const n = line.match(/^n(.*)$/);
+        if (n) return n[1];
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  // Modello del processo claude nel pane, letto dalla riga di comando
+  // (`claude --model <modello>`). undefined se il processo non c'è o non ha
+  // --model (es. `ollama launch claude` lo imposta via env) → il chiamante usa
+  // DEFAULT_MODEL.
+  async claudeModel(target: string, tree?: ProcessTree): Promise<string | undefined> {
+    try {
+      const pid = await this.findClaudePid(target, tree);
+      if (!pid) return undefined;
+      const ps = await this.sh('ps', ['-o', 'args=', '-p', pid]);
+      if (ps.code !== 0) return undefined;
+      const m = ps.stdout.match(/(?:^|\s)--model\s+(\S+)/);
+      return m ? m[1] : undefined;
     } catch {
       return undefined;
     }
@@ -194,5 +229,28 @@ export class TmuxClient {
     const t = await this.resolveTarget(target);
     const r = await this.exec(['send-keys', '-t', t, keys]);
     if (r.code !== 0) throw new Error(`tmux send-keys failed: ${r.stderr}`);
+  }
+
+  // Sequenza di tasti per rispondere a un menu interattivo del CLI (domande
+  // AskUserQuestion). I tasti vanno inviati UNO ALLA VOLTA con una pausa fra
+  // l'uno e l'altro: il menu Ink scarta i tasti che arrivano in blocco nella
+  // stessa chiamata send-keys (verificato sul CLI reale). I blocchi di testo
+  // vanno con -l (letterali, senza interpretazione shell né bracketed paste:
+  // il paste corrompe il menu — la sequenza ESC di chiusura vale come Esc).
+  async sendKeySeq(target: string, seq: QuestionKey[], opts: { delayMs?: number } = {}): Promise<void> {
+    const t = await this.resolveTarget(target);
+    // 500ms verificati sul CLI reale: a 250ms i tasti successivi al primo
+    // venivano scartati (il menu Ink non ha finito di rendere il cambio di
+    // stato quando arriva il tasto dopo), e il single-select rispondeva
+    // all'opzione di default invece di quella scelta.
+    const delayMs = opts.delayMs ?? 500;
+    for (const step of seq) {
+      const args = step.kind === 'key'
+        ? ['send-keys', '-t', t, step.key]
+        : ['send-keys', '-l', '-t', t, step.text];
+      const r = await this.exec(args);
+      if (r.code !== 0) throw new Error(`tmux send-keys failed: ${r.stderr}`);
+      if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
   }
 }

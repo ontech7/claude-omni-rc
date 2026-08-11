@@ -3,10 +3,27 @@ import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { Config } from './config.js';
 import type { ShExecFn } from './sessions/tmux-inject.js';
 
-// Stesso criterio di sdk-driver.ts per decidere il provider: ANTHROPIC_BASE_URL
-// esplicito -> quel provider (Anthropic o un proxy); assente -> Ollama.
-export function isOllamaProvider(config: Config, env: NodeJS.ProcessEnv = process.env): boolean {
-  return (env.ANTHROPIC_BASE_URL ?? config.ollamaBaseUrl) === config.ollamaBaseUrl;
+// Un modello Anthropic è un `claude-*` o uno degli alias corti che il CLI
+// accetta (opus/sonnet/haiku/fable) — stesso criterio di omni-rc.sh.
+export function isAnthropicModel(model: string): boolean {
+  return /^(claude-|opus$|sonnet$|haiku$|fable$)/.test(model);
+}
+
+export type Provider = 'ollama' | 'anthropic' | 'custom';
+
+// Stesso criterio di omni-rc.sh per decidere il provider di una sessione:
+//   1. ANTHROPIC_BASE_URL esplicito (≠ Ollama) → quel provider (proxy o
+//      Anthropic), vince per qualunque modello;
+//   2. modello Anthropic → Anthropic nativo (api.anthropic.com);
+//   3. altrimenti → Ollama.
+export function resolveProvider(config: Config, model: string, env: NodeJS.ProcessEnv = process.env): Provider {
+  const baseUrl = env.ANTHROPIC_BASE_URL ?? config.ollamaBaseUrl;
+  if (baseUrl !== config.ollamaBaseUrl) return 'custom';
+  return isAnthropicModel(model) ? 'anthropic' : 'ollama';
+}
+
+export function isOllamaProvider(config: Config, model: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  return resolveProvider(config, model, env) === 'ollama';
 }
 
 export interface OllamaUsageWindow {

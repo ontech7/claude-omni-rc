@@ -121,4 +121,10 @@ export class PermissionFlow {
       p.resolve({ behavior: 'deny', message: 'Session stopped' });
     }
   }
+
+  // Quanti pendenti ci sono adesso: è il numero che dice se una sessione è
+  // ferma ad aspettare qualcosa (vedi /diag).
+  pendingCount(): number {
+    return this.pending.size;
+  }
 }

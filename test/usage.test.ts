@@ -1,22 +1,63 @@
 import { describe, it, expect, vi } from 'vitest';
 import { loadConfig } from '../src/config.js';
-import { isOllamaProvider, fetchOllamaUsage, fetchAnthropicUsage } from '../src/usage.js';
+import { isOllamaProvider, resolveProvider, isAnthropicModel, fetchOllamaUsage, fetchAnthropicUsage } from '../src/usage.js';
 
 const queryMock = vi.fn();
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ query: (...args: unknown[]) => queryMock(...args) }));
 
-describe('isOllamaProvider', () => {
-  it('is true when ANTHROPIC_BASE_URL is unset (falls back to Ollama)', () => {
+describe('isAnthropicModel', () => {
+  it('matches claude-* models and the opus/sonnet/haiku/fable aliases', () => {
+    for (const m of ['claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5', 'claude-fable-5', 'opus', 'sonnet', 'haiku', 'fable']) {
+      expect(isAnthropicModel(m)).toBe(true);
+    }
+  });
+  it('does not match Ollama models', () => {
+    for (const m of ['deepseek-v4-flash:0731-cloud', 'llama3.1', 'qwen2.5']) {
+      expect(isAnthropicModel(m)).toBe(false);
+    }
+  });
+});
+
+describe('resolveProvider', () => {
+  it('is ollama for a non-Anthropic model with no explicit base URL', () => {
     const config = loadConfig({ OLLAMA_BASE_URL: 'http://127.0.0.1:11434' });
-    expect(isOllamaProvider(config, {})).toBe(true);
+    expect(resolveProvider(config, 'deepseek-v4-flash:0731-cloud', {})).toBe('ollama');
+  });
+  it('is anthropic for a claude-* model even with no explicit base URL', () => {
+    const config = loadConfig({ OLLAMA_BASE_URL: 'http://127.0.0.1:11434' });
+    expect(resolveProvider(config, 'claude-sonnet-5', {})).toBe('anthropic');
+  });
+  it('is custom when ANTHROPIC_BASE_URL points elsewhere, for any model', () => {
+    const config = loadConfig({ OLLAMA_BASE_URL: 'http://127.0.0.1:11434' });
+    expect(resolveProvider(config, 'deepseek-v4-flash:0731-cloud', { ANTHROPIC_BASE_URL: 'https://proxy.example.com' })).toBe('custom');
+    expect(resolveProvider(config, 'claude-sonnet-5', { ANTHROPIC_BASE_URL: 'https://proxy.example.com' })).toBe('custom');
+  });
+  it('is anthropic for a claude-* model even when ANTHROPIC_BASE_URL is the Ollama URL', () => {
+    const config = loadConfig({ OLLAMA_BASE_URL: 'http://127.0.0.1:11434' });
+    expect(resolveProvider(config, 'claude-sonnet-5', { ANTHROPIC_BASE_URL: 'http://127.0.0.1:11434' })).toBe('anthropic');
+  });
+});
+
+describe('isOllamaProvider', () => {
+  it('is true when ANTHROPIC_BASE_URL is unset and the model is not Anthropic', () => {
+    const config = loadConfig({ OLLAMA_BASE_URL: 'http://127.0.0.1:11434' });
+    expect(isOllamaProvider(config, 'deepseek-v4-flash:0731-cloud', {})).toBe(true);
   });
   it('is false when ANTHROPIC_BASE_URL points elsewhere', () => {
     const config = loadConfig({ OLLAMA_BASE_URL: 'http://127.0.0.1:11434' });
-    expect(isOllamaProvider(config, { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' })).toBe(false);
+    expect(isOllamaProvider(config, 'deepseek-v4-flash:0731-cloud', { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' })).toBe(false);
   });
   it('is true when ANTHROPIC_BASE_URL explicitly matches the Ollama URL', () => {
     const config = loadConfig({ OLLAMA_BASE_URL: 'http://127.0.0.1:11434' });
-    expect(isOllamaProvider(config, { ANTHROPIC_BASE_URL: 'http://127.0.0.1:11434' })).toBe(true);
+    expect(isOllamaProvider(config, 'deepseek-v4-flash:0731-cloud', { ANTHROPIC_BASE_URL: 'http://127.0.0.1:11434' })).toBe(true);
+  });
+  it('is false for an Anthropic model even with ANTHROPIC_BASE_URL unset', () => {
+    const config = loadConfig({ OLLAMA_BASE_URL: 'http://127.0.0.1:11434' });
+    expect(isOllamaProvider(config, 'claude-sonnet-5', {})).toBe(false);
+  });
+  it('is false for an Anthropic model even when ANTHROPIC_BASE_URL is the Ollama URL', () => {
+    const config = loadConfig({ OLLAMA_BASE_URL: 'http://127.0.0.1:11434' });
+    expect(isOllamaProvider(config, 'claude-sonnet-5', { ANTHROPIC_BASE_URL: 'http://127.0.0.1:11434' })).toBe(false);
   });
 });
 

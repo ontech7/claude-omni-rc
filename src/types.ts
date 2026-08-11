@@ -35,8 +35,11 @@ export interface PromptQuestion {
 
 // Risposta dell'utente a una domanda: una o più opzioni selezionate, oppure
 // testo libero (l'opzione "Other" che il CLI aggiunge sempre automaticamente).
+// `extraText` sulle opzioni copre il caso multi-select in cui l'utente ha
+// togglato delle opzioni E ha scritto un testo libero: il CLI li registra
+// entrambi (es. "A, custom text"), quindi vanno iniettati insieme.
 export type PromptAnswer =
-  | { kind: 'option'; labels: string[] }
+  | { kind: 'option'; labels: string[]; extraText?: string }
   | { kind: 'other'; text: string };
 
 // Dialogo bloccante che il CLI chiede di renderizzare (request_user_dialog).
@@ -51,8 +54,22 @@ export interface UserDialog {
 
 export type BusEvent =
   | { type: 'session.updated'; sessionId: string }
-  | { type: 'session.text'; sessionId: string; role: 'user' | 'assistant'; text: string }
-  | { type: 'session.prompt'; sessionId: string; questions: PromptQuestion[] }
+  | { type: 'session.text'; sessionId: string; role: 'user' | 'assistant'; text: string; eventId?: string }
+  | {
+      type: 'session.prompt';
+      sessionId: string;
+      questions: PromptQuestion[];
+      eventId?: string;
+      // Task 8: id della tool_use AskUserQuestion che ha generato la domanda —
+      // chiave di deduplica primaria fra la copia dell'hook e quella (più
+      // tardiva) del transcript, che portano lo stesso toolUseId.
+      toolUseId?: string;
+      // Da dove arriva questa copia: l'hook scatta prima che il CLI apra il
+      // menu (in tempo per Telegram), il transcript solo quando il turno si
+      // sblocca (l'utente ha già risposto al terminale). Serve al bot per il
+      // contesto del pane (solo 'hook') e alla diagnosi nel log.
+      source?: 'transcript' | 'hook';
+    }
   | {
       type: 'session.tool';
       sessionId: string;
@@ -62,8 +79,9 @@ export type BusEvent =
       input?: Record<string, unknown>;
       result?: unknown;
       isError?: boolean;
+      eventId?: string;
     }
   | { type: 'session.permission'; permission: PermissionRequest }
   | { type: 'session.dialog'; sessionId: string; dialog: UserDialog }
   | { type: 'session.result'; sessionId: string; result: string; isError: boolean }
-  | { type: 'session.error'; sessionId: string; message: string };
+  | { type: 'session.error'; sessionId: string; message: string; eventId?: string };

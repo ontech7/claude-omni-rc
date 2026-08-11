@@ -1,11 +1,14 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Bus } from '../bus.js';
+import { newEventId } from '../bus.js';
+import { log } from '../log.js';
 import type { Config } from '../config.js';
 import type { OllamaClient } from '../ollama.js';
 import type { PermissionFlow } from '../permissions.js';
 import type { DialogFlow } from '../dialogs.js';
 import type { SessionManager } from './manager.js';
 import { parseAskUserQuestions } from './transcript.js';
+import { resolveProvider } from '../usage.js';
 
 export interface SdkDriverDeps {
   bus: Bus;
@@ -47,15 +50,15 @@ export class SdkDriver {
       // query() attacchi il listener → va onorato qui (e dopo la fetch), o si perderebbe.
       if (ac.signal.aborted) throw new DOMException('aborted', 'AbortError');
       // L'SDK spawna `claude --model <modello>` con l'ambiente del daemon. Il
-      // driver è "omni": rispetta il provider configurato dall'utente via env
-      // (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY in .env).
-      // Solo quando il base URL è quello di Ollama replica `ollama launch claude`
-      // (token placeholder + mapping dei modelli default + context length reale);
-      // per ogni altro provider l'env passa intatto.
+      // driver è "omni": stesso criterio di omni-rc.sh (resolveProvider) —
+      // ANTHROPIC_BASE_URL esplicito (≠ Ollama) vince per ogni modello; un
+      // modello Anthropic (claude-*) va su Anthropic nativo; tutto il resto
+      // replica `ollama launch claude` (token placeholder + mapping dei modelli
+      // default + context length reale).
       const env = { ...process.env };
-      const baseUrl = env.ANTHROPIC_BASE_URL ?? config.ollamaBaseUrl;
-      env.ANTHROPIC_BASE_URL = baseUrl;
-      if (baseUrl === config.ollamaBaseUrl) {
+      const provider = resolveProvider(config, model, env);
+      if (provider === 'ollama') {
+        env.ANTHROPIC_BASE_URL = config.ollamaBaseUrl;
         if (!env.ANTHROPIC_AUTH_TOKEN && !env.ANTHROPIC_API_KEY) env.ANTHROPIC_AUTH_TOKEN = 'ollama';
         if (env.ANTHROPIC_API_KEY === undefined) env.ANTHROPIC_API_KEY = '';
         env.ANTHROPIC_DEFAULT_HAIKU_MODEL = model;
@@ -64,7 +67,12 @@ export class SdkDriver {
         const ctx = await this.deps.ollama.modelContext(model);
         if (ac.signal.aborted) throw new DOMException('aborted', 'AbortError');
         if (ctx !== undefined) env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(ctx);
+      } else if (provider === 'anthropic') {
+        // Anthropic nativo: base URL esplicito, credenziali (ANTHROPIC_AUTH_TOKEN
+        // / ANTHROPIC_API_KEY) già nell'env del daemon passano intatte.
+        env.ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
       }
+      // 'custom': l'env passa intatto (ANTHROPIC_BASE_URL già impostato).
       const stream = query({
         prompt,
         options: {
@@ -104,28 +112,50 @@ export class SdkDriver {
             .filter(b => b.type === 'text')
             .map(b => (b as { text: string }).text)
             .join('\n');
-          if (text.trim()) bus.emit({ type: 'session.text', sessionId, role: 'assistant', text });
+          if (text.trim()) {
+            const eventId = newEventId();
+            // stesso schema del watcher per 'text': role e chars, non solo l'id —
+            // altrimenti un filtro su questi campi salterebbe in silenzio gli eventi sdk.
+            log().info('event emitted', { eventId, sessionId, source: 'sdk', kind: 'text', role: 'assistant', chars: text.length });
+            bus.emit({ type: 'session.text', sessionId, role: 'assistant', text, eventId });
+          }
           for (const block of msg.message.content) {
             if (block.type === 'tool_use') {
               if (block.name === 'AskUserQuestion') {
                 // il menu a scelta multipla diventa una domanda ❓ con bottoni
                 // (stesso percorso delle terminali), non una bubble di tool col JSON.
                 const questions = parseAskUserQuestions(block.input);
-                if (questions.length) bus.emit({ type: 'session.prompt', sessionId, questions });
+                if (questions.length) {
+                  const eventId = newEventId();
+                  log().info('event emitted', { eventId, sessionId, source: 'sdk', kind: 'prompt', questions: questions.length });
+                  bus.emit({ type: 'session.prompt', sessionId, questions, eventId });
+                }
                 continue;
               }
-              bus.emit({
-                type: 'session.tool', sessionId, toolName: block.name, kind: 'tool_use',
-                toolUseId: block.id, input: block.input as Record<string, unknown>,
-              });
+              {
+                const eventId = newEventId();
+                // kind: 'tool' allinea il campo log al vocabolario del bot (GateKind),
+                // lo stesso usato dal transcript-watcher: toolUseId distingue comunque
+                // una tool_use da un tool_result senza bisogno di due valori diversi.
+                log().info('event emitted', { eventId, sessionId, source: 'sdk', kind: 'tool', toolName: block.name, toolUseId: block.id });
+                bus.emit({
+                  type: 'session.tool', sessionId, toolName: block.name, kind: 'tool_use',
+                  toolUseId: block.id, input: block.input as Record<string, unknown>, eventId,
+                });
+              }
             }
           }
         } else if (msg.type === 'user') {
           for (const block of msg.message.content) {
             if (typeof block !== 'string' && block.type === 'tool_result') {
+              const eventId = newEventId();
+              // stesso schema del watcher per 'tool_result': la chiave toolName c'è
+              // sempre, qui vuota perché l'SDK non lo riporta sul blocco tool_result
+              // (lo stesso motivo per cui l'evento emesso sotto ha toolName: '').
+              log().debug('event emitted', { eventId, sessionId, source: 'sdk', kind: 'tool', toolName: '', toolUseId: block.tool_use_id, isError: block.is_error });
               bus.emit({
                 type: 'session.tool', sessionId, toolName: '', kind: 'tool_result',
-                toolUseId: block.tool_use_id, result: block.content, isError: block.is_error,
+                toolUseId: block.tool_use_id, result: block.content, isError: block.is_error, eventId,
               });
             }
           }
@@ -135,7 +165,10 @@ export class SdkDriver {
             bus.emit({ type: 'session.result', sessionId, result: msg.result, isError: false });
             manager.setStatus(sessionId, 'idle');
           } else {
-            bus.emit({ type: 'session.error', sessionId, message: msg.errors.join('\n') });
+            const eventId = newEventId();
+            const message = msg.errors.join('\n');
+            log().warn('event emitted', { eventId, sessionId, source: 'sdk', kind: 'error', message });
+            bus.emit({ type: 'session.error', sessionId, message, eventId });
             manager.setStatus(sessionId, 'error');
           }
         }
@@ -143,11 +176,15 @@ export class SdkDriver {
       if (!finished) manager.setStatus(sessionId, 'idle');
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') {
-        bus.emit({ type: 'session.error', sessionId, message: 'Stopped by the user' });
+        const eventId = newEventId();
+        log().warn('event emitted', { eventId, sessionId, source: 'sdk', kind: 'error', message: 'Stopped by the user' });
+        bus.emit({ type: 'session.error', sessionId, message: 'Stopped by the user', eventId });
         manager.setStatus(sessionId, 'stopped');
       } else {
         const message = err instanceof Error ? err.message : String(err);
-        bus.emit({ type: 'session.error', sessionId, message });
+        const eventId = newEventId();
+        log().warn('event emitted', { eventId, sessionId, source: 'sdk', kind: 'error', message });
+        bus.emit({ type: 'session.error', sessionId, message, eventId });
         manager.setStatus(sessionId, 'error');
       }
     } finally {

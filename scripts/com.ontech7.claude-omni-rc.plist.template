@@ -16,7 +16,10 @@
   <key>StandardErrorPath</key><string>__STATE__/logs/daemon.err.log</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <!-- __USER_BIN__ = $HOME/.local/bin (uv/pipx): ollama-usage e claude ci
+         vivono e il PATH di launchd non li include. Il daemon li aggiunge
+         comunque a runtime (src/path.ts) — qui è per l'env esplicito. -->
+    <key>PATH</key><string>__USER_BIN__:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
 </dict>
 </plist>

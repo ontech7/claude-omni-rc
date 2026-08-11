@@ -5,7 +5,7 @@ import type { TmuxClient, ProcessTree } from './tmux-inject.js';
 export interface WatcherDeps {
   config: Config;
   manager: SessionManager;
-  tmux: Pick<TmuxClient, 'listSessions' | 'serverRunning' | 'paneCwd' | 'paneCommand' | 'claudeCwd'>
+  tmux: Pick<TmuxClient, 'listSessions' | 'serverRunning' | 'paneCwd' | 'paneCommand' | 'claudeCwd' | 'claudeModel'>
     & Partial<Pick<TmuxClient, 'processTree'>>;
 }
 
@@ -86,8 +86,13 @@ export class TmuxWatcher {
         // il cwd del pane è il fallback se claude non è ancora rintracciabile.
         projectDir = (await this.deps.tmux.claudeCwd(target, tree)) ?? ((await this.deps.tmux.paneCwd(target)) || projectDir);
       } catch { /* tmux in mezzo a un restart: fallback al project dir di default */ }
+      // Modello del processo claude (`claude --model <modello>`): serve a /usage
+      // per decidere il provider della sessione attiva. Best-effort: undefined se
+      // non leggibile → il chiamante usa DEFAULT_MODEL.
+      let model: string | undefined;
+      try { model = await this.deps.tmux.claudeModel(target, tree); } catch { /* best-effort */ }
       this.cwdCheckedAt.set(target, Date.now());
-      this.deps.manager.registerTerminal({ title: name, projectDir, tmuxTarget: target });
+      this.deps.manager.registerTerminal({ title: name, projectDir, tmuxTarget: target, model });
       this.deps.manager.persist();
     }
     // refresh: il cwd del PROCESSO claude può cambiare (il CLI sposta la sessione

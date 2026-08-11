@@ -1,12 +1,50 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - 2026-08-11
 
+- **Structured log and `/diag`.** The daemon writes one JSON record per event to
+  `~/.claude-omni-rc/logs/daemon.jsonl` (levels, size-based rotation). Every
+  event bound for Telegram now carries an id from the transcript line to the
+  delivered message, and an event that is *not* delivered is logged with the
+  reason instead of vanishing. `/diag` reports daemon state, sessions, pending
+  interactions and recent errors from the phone.
+- **Delivery gate with a recorded reason.** Every event bound for Telegram goes
+  through an explicit gate; a dropped event is logged with *why* (not the active
+  session, injected echo, …) instead of silently vanishing. The eventId-to-outcome
+  gap is closed for text-in-tool-bubble and question delivery, and the
+  not-active-session gate runs before the injected-echo filter so a session
+  switch can't leak events across sessions.
+- **Multiple-choice questions arrive in time and answers drive the CLI menu.**
+  `AskUserQuestion` is now emitted from the `PermissionRequest` hook — which
+  fires *before* the CLI opens the menu — instead of the transcript, which only
+  writes after the turn advances (i.e. after you already answered at the
+  terminal). Answers are sent as a key sequence that drives the CLI's
+  interactive menu one key at a time: pasting the option numbers corrupted the
+  menu on CLI 2.1.227 and left the chat blocked. The hook and transcript copies
+  are deduplicated (one-shot, age-bounded).
+- **Transcript binding is pinned and non-destructive.** The transcript candidate
+  is pinned at first sight, a rebinding never destroys the read state of the
+  file it leaves behind, and a subagent transcript in the same project dir can't
+  steal the watcher's binding — a session's stream can't be hijacked by a
+  sibling process.
 - **`/usage`**: 5h/weekly usage window for whichever provider is configured.
   Anthropic is read natively via the Agent SDK's experimental `/usage` control
   API; any other provider (Ollama, a custom proxy) shells out to
   [`ollama-usage`](https://github.com/ontech7/ollama-usage), which must be
   installed and authenticated on the daemon's machine.
+- **`/usage` provider detection is model-aware.** The provider is decided from
+  the active session's model (or `DEFAULT_MODEL`), matching `omni-rc`/headless
+  sessions: an explicit `ANTHROPIC_BASE_URL` (≠ Ollama) wins for every model; a
+  `claude-*` model (or the `opus`/`sonnet`/`haiku`/`fable` aliases) means
+  Anthropic; anything else is Ollama. Headless sessions with a `claude-*` model
+  now route to Anthropic natively instead of Ollama.
+- **The daemon finds `ollama-usage` (and `claude`) under launchd.** The launchd
+  PATH didn't include `~/.local/bin`/`~/bin` (where uv/pipx install tools), so
+  `/usage` reported "not installed" even when it was. The daemon now prepends
+  those dirs to its PATH at startup, and the launchd plist template includes
+  `~/.local/bin` explicitly. Terminal sessions also record their model (parsed
+  from the `claude --model` command line) so `/usage` reflects the active
+  session's provider.
 - **Update check**: the daemon checks GitHub once a day for a newer release
   and, at most once per version, logs and sends a Telegram notice to the bound
   chat. Disable with `CLAUDE_OMNI_RC_NO_UPDATE_CHECK=1`.

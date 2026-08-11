@@ -3,11 +3,17 @@ import { basename } from 'node:path';
 import type { Config } from './config.js';
 import type { SessionManager } from './sessions/manager.js';
 import type { PermissionFlow } from './permissions.js';
+import { newEventId, type Bus } from './bus.js';
+import { parseAskUserQuestions } from './sessions/transcript.js';
+import { log } from './log.js';
 
 export interface ApiDeps {
   manager: SessionManager;
   permissionFlow: PermissionFlow;
   config: Config;
+  // Task 8: il ramo AskUserQuestion emette direttamente sul bus (non passa
+  // dal PermissionFlow, che è per i permessi veri) — serve il bus qui.
+  bus: Bus;
 }
 
 // API locale su loopback: la usa l'hook SessionStart (POST /api/attach), lo
@@ -37,13 +43,30 @@ export function startApi(port: number, deps: ApiDeps): ApiHandle {
         // vedrebbe i bottoni. Il prompt nativo nel terminale è la risposta
         // giusta — non un'attesa di 120s che finisce in deny.
         if (!deps.permissionFlow.canNotify()) { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ask'); return; }
-        let input: { toolName?: string; input?: unknown; sessionId?: string };
+        let input: { toolName?: string; input?: unknown; sessionId?: string; toolUseId?: string };
         try { input = JSON.parse(body); } catch { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ask'); return; }
         const toolName = input.toolName ?? 'tool';
         // AskUserQuestion non è una richiesta di permesso: il CLI mostra il menu
         // nel pane e la risposta arriva via tmux (bottoni della domanda). Auto-allow,
         // niente JSON + Approve/Reject in chat.
+        //
+        // Task 8: questo hook scatta PRIMA che il CLI apra il menu — è la sola
+        // fonte che arriva in tempo per Telegram. Il transcript scrive la
+        // stessa tool_use solo quando il turno si sblocca (l'utente ha già
+        // risposto al terminale): usarlo come sorgente riprodurrebbe il bug
+        // che questo ramo risolve. Qui si emette sul bus e si risponde
+        // 'allow' SUBITO dopo, senza alcun await fra i due — l'hook tiene il
+        // CLI in attesa della risposta HTTP, quindi qualunque attesa qui
+        // (tmux, Telegram, …) si tradurrebbe in un CLI bloccato.
         if (toolName === 'AskUserQuestion') {
+          const sid = resolveSessionId(deps.manager, input.sessionId);
+          const questions = parseAskUserQuestions(input.input);
+          if (questions.length) {
+            const eventId = newEventId();
+            const toolUseId = input.toolUseId || undefined;
+            log().info('event emitted', { eventId, sessionId: sid, source: 'hook', kind: 'prompt', questions: questions.length, toolUseId });
+            deps.bus.emit({ type: 'session.prompt', sessionId: sid, questions, eventId, toolUseId, source: 'hook' });
+          }
           res.writeHead(200, { 'content-type': 'text/plain' });
           res.end('allow');
           return;

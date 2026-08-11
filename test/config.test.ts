@@ -43,3 +43,26 @@ describe('loadConfig', () => {
     expect(loadConfig({ MAX_HEADLESS_SESSIONS: 'nope' }).maxHeadlessSessions).toBe(2);
   });
 });
+
+describe('loadConfig — logging', () => {
+  it('defaults to info level and a jsonl file under the state dir', () => {
+    const c = loadConfig({});
+    expect(c.logLevel).toBe('info');
+    expect(c.logFile).toBe(`${process.env.HOME}/.claude-omni-rc/logs/daemon.jsonl`);
+    expect(c.logMaxBytes).toBe(5_000_000);
+    expect(c.logKeep).toBe(3);
+  });
+  it('follows STATE_DIR', () => {
+    expect(loadConfig({ STATE_DIR: '/tmp/orc' }).logFile).toBe('/tmp/orc/logs/daemon.jsonl');
+  });
+  it('parses overrides', () => {
+    const c = loadConfig({ LOG_LEVEL: 'debug', LOG_FILE: '/tmp/x.jsonl', LOG_MAX_BYTES: '1000', LOG_KEEP: '5' });
+    expect(c.logLevel).toBe('debug');
+    expect(c.logFile).toBe('/tmp/x.jsonl');
+    expect(c.logMaxBytes).toBe(1000);
+    expect(c.logKeep).toBe(5);
+  });
+  it('ignores a bogus level and stays on info', () => {
+    expect(loadConfig({ LOG_LEVEL: 'chatty' }).logLevel).toBe('info');
+  });
+});

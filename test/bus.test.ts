@@ -1,5 +1,15 @@
 import { describe, it, expect, vi } from 'vitest';
-import { Bus } from '../src/bus.js';
+import { Bus, newEventId } from '../src/bus.js';
+
+describe('newEventId', () => {
+  it('returns a short hex id', () => {
+    expect(newEventId()).toMatch(/^[0-9a-f]{8}$/);
+  });
+  it('does not repeat across calls', () => {
+    const ids = new Set(Array.from({ length: 200 }, () => newEventId()));
+    expect(ids.size).toBe(200);
+  });
+});
 
 describe('Bus', () => {
   it('delivers matching events and supports unsubscribe', () => {

@@ -49,7 +49,7 @@ export class SessionManager {
     return s;
   }
 
-  registerTerminal(input: { title: string; projectDir: string; tmuxTarget?: string }): Session {
+  registerTerminal(input: { title: string; projectDir: string; tmuxTarget?: string; model?: string }): Session {
     // dedupe: per target tmux se presente, altrimenti per project dir
     const existing = input.tmuxTarget
       ? this.findByTmuxTarget(input.tmuxTarget)
@@ -57,6 +57,7 @@ export class SessionManager {
     if (existing) return existing;
     const s = this.makeSession('terminal', input.title, input.projectDir);
     if (input.tmuxTarget) s.tmuxTarget = input.tmuxTarget;
+    if (input.model) s.model = input.model;
     this.state.sessions.push(s);
     this.emitUpdated(s.id);
     return s;

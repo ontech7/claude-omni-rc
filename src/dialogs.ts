@@ -111,4 +111,10 @@ export class DialogFlow {
       p.resolve({ behavior: 'cancelled' });
     }
   }
+
+  // Quanti pendenti ci sono adesso: è il numero che dice se una sessione è
+  // ferma ad aspettare qualcosa (vedi /diag).
+  pendingCount(): number {
+    return this.pending.size;
+  }
 }

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { resolveHeadlessProjectDir, isPrivateChat, splitHtmlMessage, parseCommand, parseNewFlags, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToInjection, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt } from '../bot/telegram.js';
-import type { ToolBurstSink } from '../bot/telegram.js';
+import { resolveHeadlessProjectDir, isPrivateChat, splitHtmlMessage, parseCommand, parseNewFlags, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToKeys, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, formatPaneContext, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
+import type { ToolBurstSink, PromptKeyEntry } from '../bot/telegram.js';
 
 describe('formatPct / formatResetAt', () => {
   it('formats a rounded percentage, or an em-dash when absent', () => {
@@ -125,13 +125,122 @@ describe('question flow helpers', () => {
   it('answerSummary renders option labels and free text', () => {
     expect(answerSummary({ kind: 'option', labels: ['A', 'C'] })).toBe('A, C');
     expect(answerSummary({ kind: 'other', text: 'custom' })).toBe('custom');
+    // opzioni togglate + testo libero insieme (multi-select con Other).
+    expect(answerSummary({ kind: 'option', labels: ['A'], extraText: 'custom' })).toBe('A, custom');
+    expect(answerSummary({ kind: 'option', labels: [], extraText: 'custom' })).toBe('custom');
   });
 
-  it('answerToInjection maps labels to 1-based numbers, comma-separated for multi', () => {
-    expect(answerToInjection(q, { kind: 'option', labels: ['B'] })).toBe('2');
-    expect(answerToInjection(q, { kind: 'option', labels: ['A', 'C'] })).toBe('1, 3');
-    expect(answerToInjection(q, { kind: 'other', text: 'custom' })).toBe('custom');
-    expect(answerToInjection(q, { kind: 'option', labels: ['unknown'] })).toBe('');
+  it('answerToKeys: single-select navigates Down to the option and presses Enter', () => {
+    const key = (k: string) => ({ kind: 'key' as const, key: k });
+    // A è la prima opzione (riga 1): nessun Down, Enter subito.
+    expect(answerToKeys(q, { kind: 'option', labels: ['A'] })).toEqual([key('Enter')]);
+    // B è la seconda (riga 2): un Down, poi Enter.
+    expect(answerToKeys(q, { kind: 'option', labels: ['B'] })).toEqual([key('Down'), key('Enter')]);
+    // C è la terza (riga 3): due Down, poi Enter.
+    expect(answerToKeys(q, { kind: 'option', labels: ['C'] })).toEqual([key('Down'), key('Down'), key('Enter')]);
+  });
+
+  it('answerToKeys: multiSelect toggles by number, then Submit + confirmation', () => {
+    const key = (k: string) => ({ kind: 'key' as const, key: k });
+    const mq = { question: 'Pick', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] };
+    // N=3: toggle di B e C coi tasti 2 e 3, poi Down×(N+1)=4 fino a Submit,
+    // Enter (schermata di conferma) e Enter (invia).
+    expect(answerToKeys(mq, { kind: 'option', labels: ['B', 'C'] })).toEqual([
+      key('2'), key('3'),
+      key('Down'), key('Down'), key('Down'), key('Down'),
+      key('Enter'), key('Enter'),
+    ]);
+    // Una sola opzione: un solo toggle, stesso percorso Submit.
+    expect(answerToKeys(mq, { kind: 'option', labels: ['A'] })).toEqual([
+      key('1'),
+      key('Down'), key('Down'), key('Down'), key('Down'),
+      key('Enter'), key('Enter'),
+    ]);
+  });
+
+  it('answerToKeys: other free text goes to "Type something" and confirms', () => {
+    // single-select: Down×N (riga "Type something."), testo, Enter (invia subito).
+    expect(answerToKeys(q, { kind: 'other', text: 'custom' })).toEqual([
+      { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Down' },
+      { kind: 'text', text: 'custom' },
+      { kind: 'key', key: 'Enter' },
+    ]);
+    // multi-select: dopo il testo, Down (→Submit), Enter (conferma), Enter (invia).
+    const mq = { question: 'Pick', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] };
+    expect(answerToKeys(mq, { kind: 'other', text: 'x' })).toEqual([
+      { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Down' },
+      { kind: 'text', text: 'x' },
+      { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Enter' }, { kind: 'key', key: 'Enter' },
+    ]);
+  });
+
+  it('answerToKeys: unknown labels produce no keys (nothing to inject)', () => {
+    expect(answerToKeys(q, { kind: 'option', labels: ['unknown'] })).toEqual([]);
+  });
+
+  it('answerToKeys: multiSelect with toggled options AND free text toggles the options, then types into "Type something"', () => {
+    const key = (k: string) => ({ kind: 'key' as const, key: k });
+    const mq = { question: 'Pick', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] };
+    // N=3: toggle di A (tasto 1), Down×3 fino a "Type something", testo,
+    // Down (→Submit), Enter, Enter (review). Ultima domanda di un set di 1.
+    expect(answerToKeys(mq, { kind: 'option', labels: ['A'], extraText: 'custom' })).toEqual([
+      key('1'),
+      key('Down'), key('Down'), key('Down'),
+      { kind: 'text', text: 'custom' },
+      key('Down'), key('Enter'), key('Enter'),
+    ]);
+    // Non-ultima di un set di 3: un solo Enter finale (su Next).
+    expect(answerToKeys(mq, { kind: 'option', labels: ['A'], extraText: 'custom' }, { isLast: false, setSize: 3 })).toEqual([
+      key('1'),
+      key('Down'), key('Down'), key('Down'),
+      { kind: 'text', text: 'custom' },
+      key('Down'), key('Enter'),
+    ]);
+  });
+
+  it('answerToKeys: multiSelect in a NON-last position uses a single Enter on Next (no review yet)', () => {
+    const key = (k: string) => ({ kind: 'key' as const, key: k });
+    const mq = { question: 'Pick', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] };
+    // set di 3 domande, questa è la prima: isLast=false → un solo Enter finale.
+    expect(answerToKeys(mq, { kind: 'option', labels: ['B'] }, { isLast: false, setSize: 3 })).toEqual([
+      key('2'),
+      key('Down'), key('Down'), key('Down'), key('Down'),
+      key('Enter'),
+    ]);
+    // last in un set di 3 → Submit + Enter (review) + Enter (conferma).
+    expect(answerToKeys(mq, { kind: 'option', labels: ['B'] }, { isLast: true, setSize: 3 })).toEqual([
+      key('2'),
+      key('Down'), key('Down'), key('Down'), key('Down'),
+      key('Enter'), key('Enter'),
+    ]);
+  });
+
+  it('answerToKeys: single-select as the last question of a multi-question set adds the review Enter', () => {
+    const key = (k: string) => ({ kind: 'key' as const, key: k });
+    // ultima domanda di un set di 2 → select + Enter (review) + Enter (conferma).
+    expect(answerToKeys(q, { kind: 'option', labels: ['B'] }, { isLast: true, setSize: 2 })).toEqual([
+      key('Down'), key('Enter'), key('Enter'),
+    ]);
+    // domanda intermedia di un set di 3 → select + Enter, avanza soltanto.
+    expect(answerToKeys(q, { kind: 'option', labels: ['B'] }, { isLast: false, setSize: 3 })).toEqual([
+      key('Down'), key('Enter'),
+    ]);
+  });
+
+  it('answerToKeys: other free text honors the set position too', () => {
+    // other su multiSelect non-ultima: Down×N, testo, Down (→Next), Enter.
+    const mq = { question: 'Pick', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] };
+    expect(answerToKeys(mq, { kind: 'other', text: 'x' }, { isLast: false, setSize: 3 })).toEqual([
+      { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Down' },
+      { kind: 'text', text: 'x' },
+      { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Enter' },
+    ]);
+    // other su single-select ultima di un set di 2: Down×N, testo, Enter, Enter (review).
+    expect(answerToKeys(q, { kind: 'other', text: 'custom' }, { isLast: true, setSize: 2 })).toEqual([
+      { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Down' }, { kind: 'key', key: 'Down' },
+      { kind: 'text', text: 'custom' },
+      { kind: 'key', key: 'Enter' }, { kind: 'key', key: 'Enter' },
+    ]);
   });
 
   it('answersToMessage builds one line per question with the answer summary', () => {
@@ -575,6 +684,148 @@ describe('narrationPlan', () => {
   });
 });
 
+describe('gateSessionEvent', () => {
+  const base = { kind: 'text' as const, armed: true, sessionId: 's1', activeSessionId: 's1' };
+
+  it('delivers a text event for the selected session', () => {
+    expect(gateSessionEvent(base)).toEqual({ deliver: true });
+  });
+
+  it('drops everything while disarmed, whatever the kind', () => {
+    for (const kind of ['text', 'tool', 'error', 'result', 'prompt', 'permission', 'dialog'] as const) {
+      expect(gateSessionEvent({ ...base, kind, armed: false })).toEqual({ deliver: false, reason: 'not-armed' });
+    }
+  });
+
+  it('drops stream events belonging to a session that is not selected', () => {
+    expect(gateSessionEvent({ ...base, sessionId: 's2' }))
+      .toEqual({ deliver: false, reason: 'not-active-session' });
+  });
+
+  it('never drops a blocking interaction for being unselected — it would wedge that session', () => {
+    for (const kind of ['prompt', 'permission', 'dialog'] as const) {
+      expect(gateSessionEvent({ ...base, kind, sessionId: 's2' })).toEqual({ deliver: true });
+    }
+  });
+
+  it('drops the echo of text the bot itself injected', () => {
+    expect(gateSessionEvent({ ...base, isInjectedEcho: true }))
+      .toEqual({ deliver: false, reason: 'injected-echo' });
+  });
+
+  it('reports the first applicable reason: disarmed wins over everything', () => {
+    expect(gateSessionEvent({ ...base, armed: false, sessionId: 's2', isInjectedEcho: true }))
+      .toEqual({ deliver: false, reason: 'not-armed' });
+  });
+
+  it('reports not-active-session over injected-echo — the echo reason must only ever describe the selected session', () => {
+    expect(gateSessionEvent({ ...base, sessionId: 's2', isInjectedEcho: true }))
+      .toEqual({ deliver: false, reason: 'not-active-session' });
+  });
+});
+
+describe('promptDedupeKey', () => {
+  const q = [{ question: 'Deploy now?', options: [{ label: 'Yes' }, { label: 'No' }] }];
+
+  // La chiave è SEMPRE la firma del contenuto: l'hook di 2.1.227 non porta il
+  // tool_use_id nel payload, quindi la firma è l'unica chiave condivisa fra la
+  // copia dell'hook e quella del transcript della STESSA domanda. Se la chiave
+  // dipendesse dal toolUseId, le due copie non colliderebbero mai e la domanda
+  // arriverebbe due volte (bug "è arrivata doppia").
+  it('keys on the content signature, ignoring any toolUseId — the hook and transcript copies of the same question must collide', () => {
+    expect(promptDedupeKey('s1', q)).toBe(promptDedupeKey('s1', q));
+    expect(promptDedupeKey('s1', q)).toBe(promptDedupeKey('s1', [{ question: 'Deploy now?', options: [{ label: 'Yes' }, { label: 'No' }] }]));
+    expect(promptDedupeKey('s1', q)).not.toBe(promptDedupeKey('s2', q)); // sessione diversa → chiave diversa
+    expect(promptDedupeKey('s1', q)).not.toBe(promptDedupeKey('s1', [{ question: 'different', options: [] }])); // contenuto diverso → chiave diversa
+  });
+});
+
+describe('registerPromptKey', () => {
+  const entry = (key: string, at: number): PromptKeyEntry => ({ key, at });
+
+  it('registers a new key as not-duplicate and adds it to the seen list', () => {
+    const { duplicate, seen } = registerPromptKey([], 'id:toolu_1', { now: 1000 });
+    expect(duplicate).toBe(false);
+    expect(seen).toEqual([entry('id:toolu_1', 1000)]);
+  });
+
+  it('reports an id: key already in the list as a permanent duplicate — a toolUseId is unique per tool call, so it is left registered exactly as before this fix (no one-shot, no age expiry)', () => {
+    const { duplicate, seen } = registerPromptKey([entry('id:toolu_1', 1000)], 'id:toolu_1', { now: 2000 });
+    expect(duplicate).toBe(true);
+    expect(seen).toEqual([entry('id:toolu_1', 1000)]); // non consumata, timestamp intatto
+  });
+
+  it('evicts the oldest key once the cap is exceeded (FIFO)', () => {
+    const { seen } = registerPromptKey([entry('a', 1), entry('b', 2)], 'c', { cap: 2, now: 3 });
+    expect(seen).toEqual([entry('b', 2), entry('c', 3)]);
+  });
+
+  // Fix round 1 (Important) — reproduction dell'issue segnalata dalla review:
+  // senza toolUseId, la chiave di fallback è una firma di testo+opzioni. Una
+  // seconda domanda REALMENTE nuova ma con lo stesso testo e le stesse
+  // opzioni (es. "Continue? Yes/No" ripetuto nella stessa sessione) deve
+  // essere mostrata, non scartata come falso duplicato della prima. Prima del
+  // fix (commit c75bb05) questo falliva: la chiave restava registrata per
+  // sempre dopo il primo scarto e la seconda domanda genuina spariva — la
+  // stessa sparizione muta che questo task esiste per eliminare, reintrodotta
+  // nel percorso degradato.
+  it('sig: keys are one-shot — a matching hit consumes the key, so a genuinely later identical question is shown, not dropped as a false duplicate', () => {
+    let seen: PromptKeyEntry[] = [];
+    const hookArrival = registerPromptKey(seen, 'sig:s1:Continue?|Yes,No', { now: 1000 });
+    expect(hookArrival.duplicate).toBe(false); // prima domanda, dall'hook
+    seen = hookArrival.seen;
+    const transcriptArrival = registerPromptKey(seen, 'sig:s1:Continue?|Yes,No', { now: 1500 });
+    expect(transcriptArrival.duplicate).toBe(true); // copia dal transcript, scartata
+    seen = transcriptArrival.seen;
+    expect(seen).toEqual([]); // la chiave è stata consumata, non solo "trovata"
+    const secondQuestion = registerPromptKey(seen, 'sig:s1:Continue?|Yes,No', { now: 60_000 });
+    expect(secondQuestion.duplicate).toBe(false); // domanda nuova, stessa firma — deve arrivare
+  });
+
+  // Se il transcript non scrive mai la sua copia (sessione finita, cancellata
+  // o /stop mentre la domanda era in sospeso) la chiave 'sig:' non deve
+  // restare viva per sempre: scade dopo PROMPT_DEDUPE_MAX_AGE_MS, così la
+  // prossima domanda identica non trova più nulla da "consumare" e passa. Il
+  // bound è volutamente largo (30 minuti): AskUserQuestion non ha un timeout
+  // proprio e una risposta a mano al terminale può richiedere molti minuti.
+  it('a sig: key with no matching duplicate expires after PROMPT_DEDUPE_MAX_AGE_MS, instead of blocking the next identical question forever', () => {
+    const seen = [entry('sig:s1:Continue?|Yes,No', 0)];
+    const stillAlive = registerPromptKey(seen, 'sig:s1:Continue?|Yes,No', { now: PROMPT_DEDUPE_MAX_AGE_MS - 1 });
+    expect(stillAlive.duplicate).toBe(true); // entro il bound, ancora in attesa della sua copia
+    const expired = registerPromptKey(seen, 'sig:s1:Continue?|Yes,No', { now: PROMPT_DEDUPE_MAX_AGE_MS + 1 });
+    expect(expired.duplicate).toBe(false); // oltre il bound, la chiave scaduta non blocca più nulla
+  });
+
+  it('does not apply the age bound to id: keys — a toolUseId never expires by design', () => {
+    const seen = [entry('id:toolu_1', 0)];
+    const { duplicate } = registerPromptKey(seen, 'id:toolu_1', { now: PROMPT_DEDUPE_MAX_AGE_MS * 10 });
+    expect(duplicate).toBe(true);
+  });
+});
+
+describe('formatPaneContext', () => {
+  it('strips ANSI, drops empty lines, and wraps the last N non-empty lines in a fixed-width block', () => {
+    const pane = '\x1b[32m$ npm test\x1b[0m\n\n  passing (12)\n\n';
+    const out = formatPaneContext(pane, 20);
+    expect(out).toContain('<pre>');
+    expect(out).toContain('$ npm test');
+    expect(out).toContain('passing (12)');
+    expect(out).not.toContain('\x1b');
+  });
+
+  it('keeps only the last maxLines non-empty lines', () => {
+    const pane = Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n');
+    const out = formatPaneContext(pane, 5);
+    expect(out).toContain('line 29');
+    expect(out).not.toContain('line 24');
+  });
+
+  it('returns an empty string when there is nothing to show — the caller treats this as "no context", not an empty block', () => {
+    expect(formatPaneContext('\n\n   \n')).toBe('');
+    expect(formatPaneContext('')).toBe('');
+  });
+});
+
 describe('ToolBurstAggregator with throttled sink', () => {
   it('5 consecutive pushes → 1 send + 4 edits (real throttler pacing)', async () => {
     vi.useFakeTimers();
@@ -674,5 +925,66 @@ describe('resolveHeadlessProjectDir', () => {
     const r = resolveHeadlessProjectDir([]);
     expect(r.dir).toBeUndefined();
     expect(r.error).toContain('WORKSPACE_DIRS');
+  });
+});
+
+describe('diagReport', () => {
+  const snapshot = {
+    version: '0.2.0',
+    armed: true,
+    chatBound: true,
+    activeSessionId: 'aaaaaaaa-1111',
+    sessions: [
+      { id: 'aaaaaaaa-1111', kind: 'terminal' as const, status: 'idle' as const, title: 'my-proj', transcript: 'abc.jsonl', hasTmux: true },
+      { id: 'bbbbbbbb-2222', kind: 'headless' as const, status: 'running' as const, title: 'task', hasTmux: false },
+    ],
+    pending: { permissions: 1, dialogs: 0, questionFlows: 2 },
+    recentErrors: ['{"level":"error","msg":"telegram send failed"}'],
+  };
+
+  it('reports armed state, version and the selected session', () => {
+    const out = diagReport(snapshot);
+    expect(out).toContain('0.2.0');
+    expect(out).toContain('armed');
+    expect(out).toContain('aaaaaaaa'); // id abbreviato della sessione selezionata
+  });
+
+  it('lists every session with kind, status and whether it can receive input', () => {
+    const out = diagReport(snapshot);
+    expect(out).toContain('my-proj');
+    expect(out).toContain('terminal');
+    expect(out).toContain('headless');
+    expect(out).toContain('running');
+  });
+
+  it('reports the pending interactions, which are what wedges a session', () => {
+    const out = diagReport(snapshot);
+    expect(out).toMatch(/permissions.*1/);
+    expect(out).toMatch(/questions.*2/);
+  });
+
+  it('includes the recent errors and escapes them for HTML', () => {
+    const out = diagReport({ ...snapshot, recentErrors: ['<script>&'] });
+    expect(out).toContain('&lt;script&gt;&amp;');
+    expect(out).not.toContain('<script>');
+  });
+
+  it('says so plainly when nothing is tracked', () => {
+    const out = diagReport({ ...snapshot, sessions: [], recentErrors: [], pending: { permissions: 0, dialogs: 0, questionFlows: 0 } });
+    expect(out).toContain('no sessions');
+    expect(out).toContain('no recent errors');
+  });
+
+  // M3: un record JSON con stack trace espansa può superare largamente 300
+  // caratteri — venti di questi sfondano il limite di un messaggio Telegram e
+  // spaccano /diag in dieci-più chunk per un solo comando.
+  it('truncates a long recent-error line with a visible marker instead of rendering it verbatim', () => {
+    const longLine = JSON.stringify({ level: 'error', msg: 'boom', stack: 'x'.repeat(500) });
+    const out = diagReport({ ...snapshot, recentErrors: [longLine] });
+    expect(out).not.toContain(longLine);
+    expect(out).toContain('(truncated)');
+    // il ring stesso (recentErrors passato in input) non è quello che si tronca:
+    // solo la resa — la stringa originale resta quella lunga in input, sopra.
+    expect(longLine.length).toBeGreaterThan(300);
   });
 });
