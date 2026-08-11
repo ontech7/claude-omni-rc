@@ -8,6 +8,25 @@
   delivered message, and an event that is *not* delivered is logged with the
   reason instead of vanishing. `/diag` reports daemon state, sessions, pending
   interactions and recent errors from the phone.
+- **Delivery gate with a recorded reason.** Every event bound for Telegram goes
+  through an explicit gate; a dropped event is logged with *why* (not the active
+  session, injected echo, …) instead of silently vanishing. The eventId-to-outcome
+  gap is closed for text-in-tool-bubble and question delivery, and the
+  not-active-session gate runs before the injected-echo filter so a session
+  switch can't leak events across sessions.
+- **Multiple-choice questions arrive in time and answers drive the CLI menu.**
+  `AskUserQuestion` is now emitted from the `PermissionRequest` hook — which
+  fires *before* the CLI opens the menu — instead of the transcript, which only
+  writes after the turn advances (i.e. after you already answered at the
+  terminal). Answers are sent as a key sequence that drives the CLI's
+  interactive menu one key at a time: pasting the option numbers corrupted the
+  menu on CLI 2.1.227 and left the chat blocked. The hook and transcript copies
+  are deduplicated (one-shot, age-bounded).
+- **Transcript binding is pinned and non-destructive.** The transcript candidate
+  is pinned at first sight, a rebinding never destroys the read state of the
+  file it leaves behind, and a subagent transcript in the same project dir can't
+  steal the watcher's binding — a session's stream can't be hijacked by a
+  sibling process.
 - **`/usage`**: 5h/weekly usage window for whichever provider is configured.
   Anthropic is read natively via the Agent SDK's experimental `/usage` control
   API; any other provider (Ollama, a custom proxy) shells out to

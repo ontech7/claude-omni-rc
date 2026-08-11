@@ -47,7 +47,7 @@ npm install
 | allow via a code instead | set `PAIRING_CODE` in `.env`; they send `/start <code>` once |
 | arm / disarm remote control | from Telegram: `/rc on` / `/rc off` (or `ARMED_ON_START=true` in `.env`) |
 | create a headless session | from Telegram: `/new <prompt>` (automode by default; `/new --standard <prompt>` for approve/reject prompts; `/new --model <name> <prompt>` to pick the model) |
-| use a provider other than Ollama for headless sessions | set `ANTHROPIC_BASE_URL` (+ `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`) in `.env`; unset → Ollama (`OLLAMA_BASE_URL`) |
+| use a provider other than Ollama for headless sessions | set `ANTHROPIC_BASE_URL` (+ `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`) in `.env`; a `claude-*` model (or `opus`/`sonnet`/`haiku`/`fable`) means Anthropic even with `ANTHROPIC_BASE_URL` unset; anything else → Ollama (`OLLAMA_BASE_URL`) |
 | continue an ongoing session from the phone | make sure it runs inside tmux — start it with `omni-rc <name>` (or `tmux new -s claude:<project>`); it auto-appears in `/sessions` and streams as a chat |
 | start a session ready for remote control | `omni-rc <name>` (shell function added by `./install.sh`); options in `omni-rc --help` |
 | pick the provider for an `omni-rc` session | no `-m` → Ollama (`DEFAULT_MODEL` from `.env`); `-m claude-*`/`opus`/`sonnet`/`haiku`/`fable` → Anthropic; `ANTHROPIC_BASE_URL` in `.env` overrides both |
@@ -86,8 +86,11 @@ npm install
 - `/status` — active session status.
 - `/history [id]` — show the last messages of a session.
 - `/delete [id]` — delete a session (with an inline confirm).
-- `/usage` — 5h/weekly usage window for the configured provider (Anthropic
-  natively; any other provider via `ollama-usage`, which must be installed).
+- `/usage` — 5h/weekly usage window for the provider of the active session (or
+  `DEFAULT_MODEL`): Anthropic natively; any other provider via `ollama-usage`,
+  which must be installed and authenticated on the daemon's machine.
+- `/diag` — daemon state, sessions, pending interactions and recent errors
+  (from the structured log at `~/.claude-omni-rc/logs/daemon.jsonl`).
 - `/help` — list commands.
 
 Plain messages go to the active session: headless sessions receive them as a
@@ -108,8 +111,10 @@ Terminal sessions must run inside tmux (`claude:<project>`) to receive text.
   `~/.claude-omni-rc/inbox/` (attachments), `~/.claude-omni-rc/logs/` (daemon.log).
   Override with `STATE_DIR`.
 - The daemon talks to the Telegram Bot API and, for headless sessions, to the
-  provider configured in `.env` — Ollama by default (`OLLAMA_BASE_URL`), or
-  whatever `ANTHROPIC_BASE_URL` points to (a proxy or Anthropic itself).
+  provider decided by the model (same rule as `omni-rc`): an explicit
+  `ANTHROPIC_BASE_URL` (≠ Ollama) wins for every model; a `claude-*` model (or
+  the `opus`/`sonnet`/`haiku`/`fable` aliases) means Anthropic natively;
+  anything else is Ollama (`OLLAMA_BASE_URL`).
 
 ## Verify
 
