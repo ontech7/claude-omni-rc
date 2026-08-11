@@ -228,8 +228,9 @@ describe('SettingsStore', () => {
     writeFileSync(path, '{ not json');
     const store = new SettingsStore(path);
     expect(store.load()).toEqual({});
-    expect(readFileSync(path, 'utf8')).not.toContain('not json'); // l'originale è stato spostato
-    expect(readdirSync(dir).some(f => f.startsWith('settings.json.corrupt-'))).toBe(true);
+    const backups = readdirSync(dir).filter(f => f.startsWith('settings.json.corrupt-'));
+    expect(backups).toHaveLength(1);
+    expect(readFileSync(join(dir, backups[0]), 'utf8')).toContain('not json'); // il contenuto originale è preservato nel backup
   });
 });
 ```
