@@ -10,9 +10,9 @@ import type { SessionManager } from './manager.js';
 import { parseAskUserQuestions } from './transcript.js';
 import { resolveProvider } from '../usage.js';
 
-// Tool di sola lettura che il CLI nativo autorizza senza prompt: la headless deve
-// comportarsi come una sessione tmux, dove il modello non viene bloccato per
-// leggere. Ogni tool che cambia stato resta sui bottoni di approvazione.
+// Read-only tools the native CLI authorizes without a prompt: the headless
+// session must behave like a tmux session, where the model is never blocked for
+// reading. Every state-changing tool stays on the approval buttons.
 const READ_ONLY_TOOLS = new Set(['Read', 'ReadFile', 'Grep', 'Glob', 'WebFetch', 'WebSearch']);
 
 export interface SdkDriverDeps {
@@ -100,7 +100,7 @@ export class SdkDriver {
             // modo dichiarato (es. stato salvato da una versione precedente)
             // passa sempre dai bottoni.
             if (session.permissionMode === 'auto') return Promise.resolve({ behavior: 'allow' });
-            // parità col CLI nativo (tmux): i tool read-only non fanno scattare il prompt
+            // parity with the native CLI (tmux): read-only tools never trigger the prompt
             if (READ_ONLY_TOOLS.has(toolName)) return Promise.resolve({ behavior: 'allow' });
             return permissionFlow.request(sessionId, toolName, input as Record<string, unknown>, opts.signal);
           },

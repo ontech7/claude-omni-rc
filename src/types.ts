@@ -73,6 +73,10 @@ export type BusEvent =
       // cannot tell a subagent's activity apart from the main session's, and
       // the two mix into a single linear chat.
       parentToolUseId?: string;
+      // True when `text` is only the tail of a message the CLI rewrote in place
+      // (transcript deltas): the bot merges it into the previous bubble without
+      // inserting a newline, so streamed tables keep their row run intact.
+      delta?: boolean;
     }
   | {
       type: 'session.prompt';

@@ -1104,6 +1104,22 @@ describe('text → question ordering', () => {
     expect(edited).toMatch(/1\s+\|\s+2/);
   });
 
+  it('merges a delta event without a double newline, keeping the streamed table converted', async () => {
+    const { bus, manager, api } = makeBot();
+    const s = manager.createHeadless({ title: 't', projectDir: '/tmp/x' });
+    manager.setActive(s.id);
+    // parser-style deltas: the extension event carries its own boundary newline
+    // and the delta flag, so the merge must NOT add another one — a blank line
+    // between rows would break the table run and leave literal pipes.
+    bus.emit({ type: 'session.text', sessionId: s.id, role: 'assistant', text: '| A | B |\n|---|---|', eventId: 'e1' });
+    bus.emit({ type: 'session.text', sessionId: s.id, role: 'assistant', text: '\n| 1 | 2 |', eventId: 'e2', delta: true });
+    await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(api.editMessageText).toHaveBeenCalledTimes(1));
+    const edited = api.editMessageText.mock.calls[0][2] as string;
+    expect(edited).toContain('<pre>'); // converted on the accumulated markdown
+    expect(edited).toMatch(/1\s+\|\s+2/);
+  });
+
   it('shows an AskUserQuestion only after the preceding text is delivered', async () => {
     const { bus, manager, api } = makeBot();
     const s = manager.createHeadless({ title: 't', projectDir: '/tmp/x' });

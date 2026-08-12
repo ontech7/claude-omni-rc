@@ -681,10 +681,10 @@ export function relativeTime(iso: string): string {
   return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
-// Una sessione su due righe: la prima dice titolo/stato/attività, la seconda il
-// target (per le terminali il tmux, per le headless il modello). Su uno schermo
-// stretto una riga per sessione andava a capo e mescolava i fatti; la sessione
-// attiva è marcata con ● pieno e titolo in grassetto (▸ era ambiguo).
+// One session per two lines: the first says title/status/activity, the second
+// the target (tmux for terminal sessions, the model for headless ones). On a
+// narrow screen a single line per session wrapped and mixed the facts; the
+// active session is marked with a filled ● and a bold title (▸ was ambiguous).
 export function sessionListText(sessions: Session[], activeId?: string): string {
   if (!sessions.length) return 'No sessions.';
   return sessions
@@ -913,23 +913,24 @@ export interface BotDeps {
   bot?: Bot; // iniettabile nei test; default: il Bot grammy reale
 }
 
-// Garanzia d'ordine testo→domanda: gli invii di testo per sessione sono
-// serializzati su una catena, e un prompt attende la catena — più un'attesa di
-// quiete per i prompt dall'hook, dove il testo è già nel transcript ma può non
-// essere ancora arrivato al bus (poll). Ora e sleep iniettabili per i test,
-// stesso pattern di EditThrottler/ToolBurstAggregator.
+// Text→question ordering guarantee: text sends are serialized on a per-session
+// chain, and a prompt waits for the chain — plus a quiet-wait for hook prompts,
+// where the text is already in the transcript but may not have reached the bus
+// yet (poll). Injectable now/sleep for tests, same pattern as
+// EditThrottler/ToolBurstAggregator.
 export class TextOrderGate {
   private chain = new Map<string, Promise<void>>();
   private lastTextAt = new Map<string, number>();
   constructor(
     private now: () => number = Date.now,
     private sleep: (ms: number) => Promise<void> = ms => new Promise<void>(r => setTimeout(r, ms)),
+    private onError?: (err: unknown) => void,
   ) {}
 
   record(sessionId: string, send: () => Promise<void>): Promise<void> {
     this.lastTextAt.set(sessionId, this.now());
     const prev = this.chain.get(sessionId) ?? Promise.resolve();
-    const next = prev.then(send).catch(() => {});
+    const next = prev.then(send).catch(err => { this.onError?.(err); });
     this.chain.set(sessionId, next);
     return next;
   }
@@ -953,7 +954,7 @@ export class TelegramBot {
   private throttler = new EditThrottler(1000);
   private chatId?: number;
   private lastMsg = new Map<string, { messageId: number; raw: string; at: number; role: 'user' | 'assistant' }>();
-  private textOrder = new TextOrderGate();
+  private textOrder = new TextOrderGate(undefined, undefined, err => log().error('text forward failed', { err }));
   private toolBursts = new Map<string, ToolBurstAggregator>();
   // One card per subagent, keyed by the toolUseId of the Task tool_use — the
   // same key the subagent's events carry in parentToolUseId.
@@ -1120,17 +1121,21 @@ export class TelegramBot {
     return duplicate;
   }
 
-  // Converte sul testo ACCUMULATO, non pezzo per pezzo: una tabella (o qualunque
-  // blocco markdown) spezzata tra più eventi viene riconosciuta quando è completa.
-  // Il buffer tiene il markdown grezzo della bolla corrente; quando l'HTML
-  // convertito supera SEND_MAX_CHARS si apre un messaggio nuovo con solo il testo
-  // nuovo, e il buffer riparte da lì.
-  private async forwardText(sessionId: string, raw: string, role: 'user' | 'assistant', eventId?: string): Promise<void> {
+  // Converts on the ACCUMULATED text, not piece by piece: a table (or any
+  // markdown block) split across events is recognized once it is complete. The
+  // buffer holds the current bubble's raw markdown; when the converted HTML
+  // exceeds SEND_MAX_CHARS a new message opens with only the new text and the
+  // buffer restarts from there.
+  private async forwardText(sessionId: string, raw: string, role: 'user' | 'assistant', eventId?: string, delta?: boolean): Promise<void> {
     const chatId = this.chatId;
     if (!chatId) { log().warn('send skipped', { sessionId, kind: 'text', reason: 'no-chat-bound' }); return; }
     const last = this.lastMsg.get(sessionId);
     const now = Date.now();
-    const merged = last && last.role === role ? `${last.raw}\n${raw}` : raw;
+    // A delta is the tail of a message the CLI rewrote in place: it already
+    // carries its own boundary newline, so it merges without adding one — a
+    // `\n` join would double the newline and break the row run of a streamed
+    // table. Whole messages keep the `\n` join.
+    const merged = last && last.role === role ? (delta ? `${last.raw}${raw}` : `${last.raw}\n${raw}`) : raw;
     const html = mdToHtml(merged);
     if (last && last.role === role && now - last.at < 10_000 && html.length <= SEND_MAX_CHARS) {
       const ok = await this.throttler.throttled(() =>
@@ -1142,7 +1147,6 @@ export class TelegramBot {
       }
     }
     const freshHtml = mdToHtml(raw);
-    const parts = splitHtmlMessage(freshHtml);
     const messageId = await this.sendChunked(chatId, freshHtml, {}, { eventId, sessionId });
     if (messageId !== undefined) {
       this.lastMsg.set(sessionId, { messageId, raw, at: now, role });
@@ -2432,10 +2436,10 @@ export class TelegramBot {
       void burst.collapse();
       burst.close();
       log().info('event delivering', { eventId: e.eventId, sessionId: e.sessionId, kind: 'text', role: e.role });
-      // sia le headless che i transcript delle terminali arrivano come markdown grezzo:
-      // forwardText accumula e converte (vedi forwardText). La catena del gate
-      // serializza gli invii e permette ai prompt di attendere il testo che li precede.
-      this.textOrder.record(e.sessionId, () => this.forwardText(e.sessionId, e.text, e.role, e.eventId));
+      // Both headless and terminal transcripts arrive as raw markdown:
+      // forwardText accumulates and converts (see forwardText). The gate chain
+      // serializes the sends and lets prompts wait for the text that precedes them.
+      this.textOrder.record(e.sessionId, () => this.forwardText(e.sessionId, e.text, e.role, e.eventId, e.delta));
     });
     bus.on('session.prompt', async ({ sessionId, questions, eventId, toolUseId, source }) => {
       if (!this.passes('prompt', sessionId, eventId).deliver) return;
@@ -2473,12 +2477,15 @@ export class TelegramBot {
       // oppure 'event queued' con il motivo.
       // Fix 2: flusso domande multiple — accoda il set e mostra una domanda alla
       // volta (single-select, multi-select con toggle+Done, "Other" a testo libero).
-      // Il testo che precede la domanda deve arrivare PRIMA in chat. Una domanda
-      // dall'hook può precedere sul bus il testo (già nel transcript ma non ancora
-      // pollato): si attende la quiete. Una domanda dal transcript/headless ha già
-      // il testo emesso nello stesso drain: basta attendere che sia stato inviato.
+      // The text preceding the question must arrive FIRST in chat. A hook
+      // question can beat its text on the bus (already in the transcript but not
+      // yet polled): wait for quiet. A transcript/headless question has its text
+      // emitted in the same drain: just wait for it to be sent. The quiet
+      // threshold is derived from the poll interval so it cannot be shorter than
+      // one poll tick (a shorter wait would break immediately and let the
+      // question precede the final text chunk).
       if (sessionId === this.deps.manager.getActive()) {
-        if (source === 'hook') await this.textOrder.waitForPrecedingText(sessionId);
+        if (source === 'hook') await this.textOrder.waitForPrecedingText(sessionId, Math.max(300, this.deps.config.pollIntervalMs + 100));
         else await this.textOrder.flush(sessionId);
       }
       this.track(this.onSessionPrompt(sessionId, questions, eventId, source), 'prompt flow');

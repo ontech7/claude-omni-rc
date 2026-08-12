@@ -304,8 +304,8 @@ export class TranscriptWatcher {
       return;
     }
     if (ev.type === 'text') {
-      log().info('event emitted', { eventId, sessionId: s.id, source: 'transcript', kind: 'text', role: ev.role, chars: ev.text.length });
-      bus.emit({ type: 'session.text', sessionId: s.id, role: ev.role, text: ev.text, eventId });
+      log().info('event emitted', { eventId, sessionId: s.id, source: 'transcript', kind: 'text', role: ev.role, chars: ev.text.length, delta: ev.delta });
+      bus.emit({ type: 'session.text', sessionId: s.id, role: ev.role, text: ev.text, eventId, delta: ev.delta });
       return;
     }
     manager.setStatus(s.id, 'running');

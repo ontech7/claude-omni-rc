@@ -186,7 +186,7 @@ describe('SdkDriver', () => {
     queryMock.mockImplementationOnce(async function* () { yield resultMsg(std.id, 'ok'); });
     await sdk.runTurn(std.id, 'x');
     const opts = queryMock.mock.calls[0][0].options;
-    for (const tool of ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch']) {
+    for (const tool of ['Read', 'ReadFile', 'Grep', 'Glob', 'WebFetch', 'WebSearch']) {
       await expect(opts.canUseTool(tool, { path: '/tmp/x' }, {})).resolves.toEqual({ behavior: 'allow' });
     }
     expect(perms).toHaveLength(0);

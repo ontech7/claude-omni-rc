@@ -77,17 +77,19 @@ describe('TranscriptParser', () => {
   });
   it('emits only the delta when the CLI rewrites a message with more text', () => {
     const p = new TranscriptParser();
+    // first sight: whole message, no delta flag
     expect(p.consumeLine(textLine('m9', 'hello', null))).toEqual([{ type: 'text', role: 'assistant', text: 'hello' }]);
-    expect(p.consumeLine(textLine('m9', 'hello world', null))).toEqual([{ type: 'text', role: 'assistant', text: ' world' }]);
-    expect(p.consumeLine(textLine('m9', 'hello world!', null))).toEqual([{ type: 'text', role: 'assistant', text: '!' }]);
+    // strict extensions: only the new tail, flagged as a delta
+    expect(p.consumeLine(textLine('m9', 'hello world', null))).toEqual([{ type: 'text', role: 'assistant', text: ' world', delta: true }]);
+    expect(p.consumeLine(textLine('m9', 'hello world!', null))).toEqual([{ type: 'text', role: 'assistant', text: '!', delta: true }]);
   });
   it('ignores a rewrite that is not an extension of the emitted text', () => {
     const p = new TranscriptParser();
     p.consumeLine(textLine('m9', 'first', null));
     expect(p.consumeLine(textLine('m9', 'other', null))).toEqual([]);
     expect(p.consumeLine(textLine('m9', 'other text', null))).toEqual([]);
-    // un'estensione vera riparte dall'ultimo testo visto
-    expect(p.consumeLine(textLine('m9', 'first second', null))).toEqual([{ type: 'text', role: 'assistant', text: ' second' }]);
+    // a true extension restarts from the last seen text
+    expect(p.consumeLine(textLine('m9', 'first second', null))).toEqual([{ type: 'text', role: 'assistant', text: ' second', delta: true }]);
   });
   it('does not re-emit an equal repeat after the message finishes', () => {
     const p = new TranscriptParser();

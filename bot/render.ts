@@ -11,7 +11,7 @@ export function htmlEscape(s: string): string {
 
 // Riga tabellare (input già trimmato): lo stile a pipe '| A |' con o senza
 // indentazione, oppure lo stile nudo 'A | B' (almeno una pipe). Lo stile nudo
-// viene accettato solo se il run ha una riga separatrice — vedi renderTables.
+// viene accettato solo se il run ha una riga separatrice — vedi renderTableBlocks.
 function isTableRow(line: string): boolean {
   return /^\|.*\|\s*$/.test(line) || /^[^|]*\|.*$/.test(line);
 }
