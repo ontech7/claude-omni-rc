@@ -462,6 +462,12 @@ describe('EditThrottler', () => {
 });
 
 describe('ToolBurstAggregator', () => {
+  // La bolla è SEMPRE nella forma raggruppata (header col conteggio + blocco
+  // espandibile), anche per una singola tool call — vedi bubbleText.
+  const grouped = (lines: string[]): string => {
+    const n = lines.length;
+    return `▸ <b>${n} ${n === 1 ? 'step' : 'steps'}</b>\n<blockquote expandable>${lines.join('\n\n')}</blockquote>`;
+  };
   function makeAgg(maxLen = 3800) {
     const edits: { id: number; text: string }[] = [];
     const sends: string[] = [];
@@ -478,11 +484,11 @@ describe('ToolBurstAggregator', () => {
     await agg.push('t1');
     await agg.push('t2');
     await agg.push('t3');
-    expect(sends).toEqual(['t1']);
+    expect(sends).toEqual([grouped(['t1'])]); // la prima parte già raggruppata
     expect(sink.send).toHaveBeenCalledTimes(1);
     expect(edits).toEqual([
-      { id: 1, text: 't1\n\nt2' }, // riga vuota tra una tool call e l'altra
-      { id: 1, text: 't1\n\nt2\n\nt3' },
+      { id: 1, text: grouped(['t1', 't2']) }, // riga vuota tra una tool call e l'altra
+      { id: 1, text: grouped(['t1', 't2', 't3']) },
     ]);
   });
   it('close() closes the burst: the next push starts a new bubble', async () => {
@@ -494,27 +500,27 @@ describe('ToolBurstAggregator', () => {
     expect(sink.edit).not.toHaveBeenCalled();
   });
   it('starts a new bubble when appending would exceed maxLen', async () => {
-    const { agg, sink, edits, sends } = makeAgg(6);
+    const { agg, sink, edits, sends } = makeAgg(60); // grouped(['t1','t2']) = 60 ≤ 60
     await agg.push('t1'); // send
-    await agg.push('t2'); // 't1\n\nt2' = 6 ≤ 6 → edit
-    await agg.push('t3'); // 't1\n\nt2\n\nt3' = 10 > 6 → send
-    expect(sends).toEqual(['t1', 't3']);
-    expect(edits).toEqual([{ id: 1, text: 't1\n\nt2' }]);
+    await agg.push('t2'); // grouped(['t1','t2']) = 60 ≤ 60 → edit
+    await agg.push('t3'); // grouped(['t1','t2','t3']) = 64 > 60 → send
+    expect(sends).toEqual([grouped(['t1']), grouped(['t3'])]);
+    expect(edits).toEqual([{ id: 1, text: grouped(['t1', 't2']) }]);
   });
   it('falls back to a new bubble when the edit fails', async () => {
     const { agg, sink, sends } = makeAgg();
     (sink.edit as any).mockImplementation(async () => false);
     await agg.push('t1');
     await agg.push('t2');
-    expect(sends).toEqual(['t1', 't2']);
+    expect(sends).toEqual([grouped(['t1']), grouped(['t2'])]);
   });
   it('serializes concurrent pushes: back-to-back calls produce one bubble', async () => {
     const { agg, sink, edits, sends } = makeAgg();
     await Promise.all([agg.push('t1'), agg.push('t2'), agg.push('t3')]);
-    expect(sends).toEqual(['t1']);
+    expect(sends).toEqual([grouped(['t1'])]);
     expect(edits).toEqual([
-      { id: 1, text: 't1\n\nt2' },
-      { id: 1, text: 't1\n\nt2\n\nt3' },
+      { id: 1, text: grouped(['t1', 't2']) },
+      { id: 1, text: grouped(['t1', 't2', 't3']) },
     ]);
   });
   it('after an edit-failure fallback, the next push edits the new bubble', async () => {
@@ -524,8 +530,8 @@ describe('ToolBurstAggregator', () => {
     await agg.push('t2'); // edit fallisce → send id=2
     (sink.edit as any).mockImplementation(async (id: number, text: string) => { edits.push({ id, text }); return true; });
     await agg.push('t3'); // deve editare la bubble 2, non ri-sendare
-    expect(sends).toEqual(['t1', 't2']);
-    expect(edits).toEqual([{ id: 2, text: 't2\n\nt3' }]);
+    expect(sends).toEqual([grouped(['t1']), grouped(['t2'])]);
+    expect(edits).toEqual([{ id: 2, text: grouped(['t2', 't3']) }]);
   });
   it('when send fails (undefined), the next push starts a fresh bubble', async () => {
     const { agg, sink, sends } = makeAgg();
@@ -542,7 +548,7 @@ describe('ToolBurstAggregator', () => {
       await vi.advanceTimersByTimeAsync(30_000); // il modello ragiona tra una tool e l'altra
       await agg.push('t2'); // stessa raffica: edit, non una bubble nuova
       expect(sink.send).toHaveBeenCalledTimes(1);
-      expect(edits).toEqual([{ id: 1, text: 't1\n\nt2' }]);
+      expect(edits).toEqual([{ id: 1, text: grouped(['t1', 't2']) }]);
     } finally { vi.useRealTimers(); }
   });
   it('close() during a pending send does not reopen the burst', async () => {
@@ -558,7 +564,7 @@ describe('ToolBurstAggregator', () => {
     const p2 = agg.push('t2');
     await Promise.all([p1, p2]);
     // t1 è stato inviato ma la bubble non si riapre; t2 apre una bubble nuova.
-    expect(sends).toEqual(['t1', 't2']);
+    expect(sends).toEqual([grouped(['t1']), grouped(['t2'])]);
     expect(sink.edit).not.toHaveBeenCalled();
   });
   it('marks as failed the line of the corresponding tool', async () => {
@@ -592,7 +598,18 @@ describe('ToolBurstAggregator', () => {
     await agg.markFailed('tu-1', 'boom');
     expect(edited).toBe(false); // reopening would break chronological order
   });
-  it('collapses the bubble into an expandable blockquote with the count', async () => {
+  it('starts every bubble in the grouped form, even a single tool call', async () => {
+    const sends: string[] = [];
+    const agg = new ToolBurstAggregator({
+      edit: async () => true,
+      send: async (t) => { sends.push(t); return 1; },
+    });
+    await agg.push('📖 <b>Read</b>', 'a');
+    expect(sends[0]).toContain('<blockquote expandable>');
+    expect(sends[0]).toContain('1 step'); // singolare
+    expect(sends[0]).toContain('📖 <b>Read</b>');
+  });
+  it('collapse() is a no-op: the bubble is already grouped at every push', async () => {
     const edits: string[] = [];
     const agg = new ToolBurstAggregator({
       edit: async (_id, t) => { edits.push(t); return true; },
@@ -600,21 +617,9 @@ describe('ToolBurstAggregator', () => {
     });
     await agg.push('📖 <b>Read</b>', 'a');
     await agg.push('⚡ <b>Bash</b>', 'b');
+    const before = edits.length;
     await agg.collapse();
-    const last = edits[edits.length - 1];
-    expect(last).toContain('<blockquote expandable>');
-    expect(last).toContain('2 steps');
-    expect(last).toContain('📖 <b>Read</b>');
-  });
-  it('does not collapse a bubble with a single line', async () => {
-    const edits: string[] = [];
-    const agg = new ToolBurstAggregator({
-      edit: async (_id, t) => { edits.push(t); return true; },
-      send: async () => 1,
-    });
-    await agg.push('📖 <b>Read</b>', 'a');
-    await agg.collapse();
-    expect(edits.some(e => e.includes('<blockquote'))).toBe(false);
+    expect(edits.length).toBe(before); // nessun edit aggiuntivo alla chiusura
   });
 });
 

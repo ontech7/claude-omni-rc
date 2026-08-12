@@ -816,6 +816,14 @@ export class ToolBurstAggregator {
   // that happened to be slow.
   constructor(private sink: ToolBurstSink, private maxLen = 3800) {}
 
+  // La bolla è SEMPRE nella forma raggruppata, dalla prima tool call: header col
+  // conteggio + blocco espandibile. Una singola call parte già raggruppata, così
+  // 1 e 2+ hanno lo stesso aspetto (coerenza) e le successive si aggiungono dentro.
+  private bubbleText(lines: string[]): string {
+    const n = lines.length;
+    return `▸ <b>${n} ${n === 1 ? 'step' : 'steps'}</b>\n<blockquote expandable>${lines.join('\n\n')}</blockquote>`;
+  }
+
   // Serializza le push: il bus emette in modo sincrono e due tool_use nello stesso
   // tick leggerebbero open/lastWasTool prima di ogni await — la catena rende le
   // mutazioni atomiche rispetto alle push concorrenti. La generazione viene
@@ -833,19 +841,20 @@ export class ToolBurstAggregator {
     if (this.lastWasTool && open) {
       // riga vuota tra una tool call e l'altra: la bubble non diventa un muro
       // di testo, ogni tool call resta riconoscibile come voce separata.
-      const next = [...this.lines, line].join('\n\n');
+      const nextLines = [...this.lines, line];
+      const next = this.bubbleText(nextLines);
       if (next.length <= this.maxLen && await this.sink.edit(open.messageId, next)) {
         if (gen !== this.generation) return; // chiusa nel frattempo: non toccare
-        this.lines.push(line);
+        this.lines = nextLines;
         this.lineIds.push(toolUseId);
         open.text = next;
         return;
       }
     }
-    const id = await this.sink.send(line);
+    const id = await this.sink.send(this.bubbleText([line]));
     if (gen !== this.generation) return; // chiusa nel frattempo: non riaprire
     if (id !== undefined) {
-      this.open = { messageId: id, text: line };
+      this.open = { messageId: id, text: this.bubbleText([line]) };
       this.lines = [line];
       this.lineIds = [toolUseId];
       this.lastWasTool = true;
@@ -867,20 +876,16 @@ export class ToolBurstAggregator {
     if (this.lines[i].startsWith('❌ ')) return; // already marked
     const short = reason.split('\n').find(l => l.trim())?.slice(0, 100) ?? '';
     this.lines[i] = `❌ ${this.lines[i]}${short ? `\n<i>${htmlEscape(short)}</i>` : ''}`;
-    const next = this.lines.join('\n\n');
+    const next = this.bubbleText(this.lines);
     if (next.length <= this.maxLen && await this.sink.edit(open.messageId, next)) {
       open.text = next;
     }
   }
 
-  // At the end of a turn the burst becomes a collapsible block: it stays
-  // consultable but stops taking up the screen in history. With a single line
-  // the blockquote would cost an edit for no gain.
+  // La bolla è già raggruppata a ogni push (vedi bubbleText): alla chiusura non
+  // c'è più nulla da compattare. Il metodo resta per i call-site di chiusura.
   async collapse(): Promise<void> {
-    const open = this.open;
-    if (!open || this.lines.length < 2) return;
-    const body = `▸ <b>${this.lines.length} steps</b>\n<blockquote expandable>${this.lines.join('\n\n')}</blockquote>`;
-    if (body.length <= this.maxLen) await this.sink.edit(open.messageId, body);
+    return;
   }
 
   close(): void {
