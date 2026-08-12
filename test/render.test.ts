@@ -281,6 +281,41 @@ describe('mdToHtml — added constructs', () => {
     expect(out).toContain('Bash');
   });
 
+  it('converts an indented table', () => {
+    const out = mdToHtml('  | A | B |\n  |---|---|\n  | 1 | 2 |');
+    expect(out).toContain('<pre>');
+    expect(out).toMatch(/A\s+\|\s+B/);
+    expect(out).toContain('1 | 2');
+  });
+  it('converts a table without outer pipes when a separator row is present', () => {
+    const out = mdToHtml('A | B\n--- | ---\n1 | 2');
+    expect(out).toContain('<pre>');
+    expect(out).toMatch(/A\s+\|\s+B/);
+  });
+  it('converts a table inside a fence and consumes the fence markers', () => {
+    const out = mdToHtml('```\n| A | B |\n|---|---|\n| 1 | 2 |\n```');
+    expect(out).toContain('<pre>');
+    expect(out).toMatch(/A\s+\|\s+B/);
+    expect(out).not.toContain('<code>');       // no leftover inline-code protection
+  });
+  it('leaves a non-table fence literal', () => {
+    const out = mdToHtml('```\njust | some\npipes | here\n```');
+    expect(out).toContain('just | some');      // no separator row → stays literal
+  });
+  it('truncates a long cell with an ellipsis, never mid-word', () => {
+    // The cell must exceed CELL_MAX (48) for truncation to fire at all, and the
+    // 'exce'-bearing word must sit past the cut so the intact word cannot smuggle
+    // the fragment back in — 'exce' was the old mid-word cut at CELL_MAX=24.
+    const out = mdToHtml('| Col | This long column value goes well beyond the forty-eight char cap exceeds |\n|---|---|\n| x | y |');
+    expect(out).toContain('…');
+    expect(out).not.toContain('exce');
+  });
+  it('renders bold and code inside table cells', () => {
+    const out = mdToHtml('| a | b |\n|---|---|\n| **bold** | `code` |');
+    expect(out).toContain('<b>bold</b>');
+    expect(out).toContain('<code>code</code>');
+  });
+
   it('separates headings with a blank line', () => {
     expect(mdToHtml('testo\n## Titolo')).toContain('\n\n<b>Titolo</b>');
   });
