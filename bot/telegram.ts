@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { join, basename } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { Bot, Context, InlineKeyboard } from 'grammy';
 import type { Bus } from '../src/bus.js';
 import type { Config } from '../src/config.js';
@@ -19,10 +19,10 @@ import { EFFORT_LEVELS } from '../src/types.js';
 import { SETTINGS_KEYS, parseSettingsValue, type SettingsKey, type UserSettings } from '../src/settings.js';
 import type { RecentMessage } from '../src/sessions/transcript.js';
 import { readRecentMessages, resolveSessionTranscript } from '../src/sessions/transcript.js';
-import { isOllamaProvider, fetchOllamaUsage, fetchAnthropicUsage } from '../src/usage.js';
+import { isOllamaProvider, isAnthropicModel, fetchOllamaUsage, fetchAnthropicUsage } from '../src/usage.js';
 import { log } from '../src/log.js';
 import { CURRENT_VERSION } from '../src/update.js';
-import { htmlEscape, mdToHtml, balanceHtml, splitHtmlMessage, truncateAtWord, SEND_MAX_CHARS, describeTool, renderToolLine, renderAgentCard } from './render.js';
+import { htmlEscape, mdToHtml, balanceHtml, splitHtmlMessage, truncateAtWord, SEND_MAX_CHARS, describeTool, renderToolLine, renderAgentCard, lastContextTokens, renderContext, anthropicContextWindow } from './render.js';
 import type { AgentCard } from './render.js';
 
 // ---------- pure helpers ----------
@@ -982,6 +982,7 @@ export class TelegramBot {
       { command: 'history', description: 'Show the last messages of a session' },
       { command: 'delete', description: 'Delete a session' },
       { command: 'usage', description: 'Check provider usage (5h / weekly)' },
+      { command: 'context', description: 'Show the active session context used vs max' },
       { command: 'diag', description: 'Daemon diagnostics' },
       { command: 'settings', description: 'View / change user settings' },
       { command: 'help', description: 'Show all commands' },
@@ -1238,7 +1239,7 @@ export class TelegramBot {
     const bot = this.bot;
     bot.command('start', ctx => this.safe(ctx, 'start', () => this.onStart(ctx)));
     bot.command('help', ctx => this.safe(ctx, 'help', async () => {
-      if (this.authorize(ctx)) await this.send(ctx, 'Commands: /rc [on|off|status] (no arg toggles) · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /usage · /diag · /settings · /help');
+      if (this.authorize(ctx)) await this.send(ctx, 'Commands: /rc [on|off|status] (no arg toggles) · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /usage · /context · /diag · /settings · /help');
     }));
     bot.command('rc', ctx => this.safe(ctx, 'rc', () => this.onRc(ctx)));
     bot.command('sessions', ctx => this.safe(ctx, 'sessions', () => this.onSessions(ctx)));
@@ -1250,6 +1251,7 @@ export class TelegramBot {
     bot.command('history', ctx => this.safe(ctx, 'history', () => this.onHistory(ctx)));
     bot.command('delete', ctx => this.safe(ctx, 'delete', () => this.onDelete(ctx)));
     bot.command('usage', ctx => this.safe(ctx, 'usage', () => this.onUsage(ctx)));
+    bot.command('context', ctx => this.safe(ctx, 'context', () => this.onContext(ctx)));
     bot.command('settings', ctx => this.safe(ctx, 'settings', () => this.onSettings(ctx)));
     bot.command('diag', ctx => this.safe(ctx, 'diag', async () => {
       if (!this.authorize(ctx)) return;
@@ -1478,6 +1480,28 @@ export class TelegramBot {
     } else {
       await this.sendAnthropicUsage(ctx);
     }
+  }
+
+  // Context of the active session: the tokens the CLI actually sent in the last
+  // turn (from the transcript usage) vs the model's context window. Reading the
+  // transcript makes this work for headless and terminal sessions alike.
+  private async onContext(ctx: Context): Promise<void> {
+    if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
+    const active = this.deps.manager.getActive();
+    const session = active ? this.deps.manager.get(active) : this.deps.manager.list()[0];
+    if (!session) { await this.send(ctx, 'No session yet. Create one with /new or /attach.'); return; }
+    const file = resolveSessionTranscript(this.deps.config.projectsDir, session.projectDir, session.claudeSessionId, Date.parse(session.createdAt), session.transcriptFile);
+    let used: number | undefined;
+    if (file) {
+      try { used = lastContextTokens(readFileSync(file, 'utf8').split('\n')); } catch { /* transcript unreadable: report no data */ }
+    }
+    let max: number | undefined;
+    if (session.model) {
+      max = isAnthropicModel(session.model)
+        ? anthropicContextWindow(session.model)
+        : await this.deps.ollama.modelContext(session.model);
+    }
+    await this.send(ctx, renderContext(used, max, session.model));
   }
 
   private async sendOllamaUsage(ctx: Context): Promise<void> {
@@ -2225,9 +2249,15 @@ export class TelegramBot {
         }
       }
     }
-    // I comandi del bot sono già gestiti da grammy (bot.command). Quelli che
-    // arrivano qui (slash command di Claude: /clear, /compact, /exit,
-    // /frontend-release, …) vengono inoltrati alla sessione attiva, slash incluso.
+    // I comandi del bot sono già gestiti da grammy (bot.command); uno slash
+    // command che arriva qui non è nostro. Inoltrarlo alla sessione può
+    // impallarla (es. /context è una UI interattiva del CLI che aspetta input
+    // e blocca il turno): meglio un errore esplicito che pasticciare il prompt
+    // della sessione.
+    if (parseCommand(text).kind === 'unknown') {
+      await this.send(ctx, 'Unknown command. Send /help to list the available commands.');
+      return;
+    }
     await this.routeMessageToSession(ctx, text);
   }
 

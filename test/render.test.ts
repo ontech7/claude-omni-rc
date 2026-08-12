@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mdToHtml, balanceHtml, splitHtmlMessage, truncateAtWord, htmlEscape, shortenPath, describeTool, renderToolLine, renderAgentCard, formatDuration } from '../bot/render.js';
+import { mdToHtml, balanceHtml, splitHtmlMessage, truncateAtWord, htmlEscape, shortenPath, describeTool, renderToolLine, renderAgentCard, formatDuration, formatTokens, anthropicContextWindow, lastContextTokens, renderContext } from '../bot/render.js';
 
 describe('mdToHtml v2 / balanceHtml', () => {
   it('renders bold, italic and nested ***both***', () => {
@@ -347,4 +347,69 @@ describe('formatDuration', () => {
   it('uses seconds below a minute', () => expect(formatDuration(42_000)).toBe('42s'));
   it('uses minutes and seconds above a minute', () => expect(formatDuration(100_000)).toBe('1m 40s'));
   it('zero is 0s', () => expect(formatDuration(0)).toBe('0s'));
+});
+
+describe('formatTokens', () => {
+  it('formats compact token counts', () => {
+    expect(formatTokens(0)).toBe('0');
+    expect(formatTokens(999)).toBe('999');
+    expect(formatTokens(1_000)).toBe('1k');
+    expect(formatTokens(12_450)).toBe('12.4k');
+    expect(formatTokens(1_500_000)).toBe('1.5M');
+    expect(formatTokens(2_000_000)).toBe('2M');
+  });
+});
+
+describe('anthropicContextWindow', () => {
+  it('knows the current model family', () => {
+    expect(anthropicContextWindow('claude-sonnet-5')).toBe(200_000);
+    expect(anthropicContextWindow('fable')).toBe(1_000_000);
+  });
+
+  it('strips the dated suffix', () => {
+    expect(anthropicContextWindow('claude-haiku-4-5-20251001')).toBe(200_000);
+  });
+
+  it('returns undefined for unknown models', () => {
+    expect(anthropicContextWindow('deepseek-v4-flash:cloud')).toBeUndefined();
+  });
+});
+
+describe('lastContextTokens', () => {
+  const usageLine = (input: number, cacheRead: number, cacheCreation: number) =>
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', usage: { input_tokens: input, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheCreation, output_tokens: 10 } } });
+
+  it('sums input + cache read/creation of the last assistant usage', () => {
+    const lines = [usageLine(100, 0, 0), usageLine(2, 20_000, 5_000)];
+    expect(lastContextTokens(lines)).toBe(25_002);
+  });
+
+  it('returns undefined when no usage exists', () => {
+    expect(lastContextTokens([JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [] } })])).toBeUndefined();
+  });
+
+  it('skips malformed trailing lines and still finds usage', () => {
+    // a tail caught mid-write leaves a partial last line: it must not mask the previous one
+    const lines = [usageLine(10, 0, 0), '{"type": "assistant", "mess', ''];
+    expect(lastContextTokens(lines)).toBe(10);
+  });
+});
+
+describe('renderContext', () => {
+  it('shows used / max with a percentage', () => {
+    expect(renderContext(12_450, 200_000, 'claude-sonnet-5')).toBe('🧠 <b>Context</b> · <code>claude-sonnet-5</code>\n12.4k / 200k tokens (6%)');
+  });
+
+  it('escapes the model name', () => {
+    expect(renderContext(1, 2, 'a<b')).toContain('a&lt;b');
+    expect(renderContext(1, 2, 'a<b')).not.toContain('a<b');
+  });
+
+  it('shows used only when max is unknown', () => {
+    expect(renderContext(12_450, undefined)).toBe('🧠 <b>Context</b>\n12.4k tokens used');
+  });
+
+  it('says no data when there is none', () => {
+    expect(renderContext(undefined, undefined)).toContain('No context data yet.');
+  });
 });

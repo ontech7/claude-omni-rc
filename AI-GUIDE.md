@@ -64,6 +64,7 @@ npm install
 | check what sessions exist | from Telegram: `/sessions` or `/status` |
 | check / change your settings from the phone | from Telegram: `/settings` (list), `/settings <key> <value>` (set), `/settings reset <key>` — saved to `settings.json`, applies at the next restart |
 | check provider usage (5h / weekly) | from Telegram: `/usage` — Anthropic reads it via the Agent SDK directly; any other provider (Ollama, a custom proxy) shells out to `ollama-usage`, which must be installed and authenticated on the daemon's machine |
+| see how much context the active session has used | from Telegram: `/context` — tokens used vs max (from the transcript's last usage and the model's context window) |
 | run it without launchd | `npm run dev` in the repo (foreground) |
 | uninstall claude-omni-rc | `./install.sh --uninstall` (asks about the Ollama model, then removes launchd, the hooks, and on confirmation the state dir; `.env` is kept) |
 
@@ -91,6 +92,9 @@ npm install
 - `/usage` — 5h/weekly usage window for the provider of the active session (or
   `DEFAULT_MODEL`): Anthropic natively; any other provider via `ollama-usage`,
   which must be installed and authenticated on the daemon's machine.
+- `/context` — the active session's context window used vs max (tokens): the
+  used figure comes from the last assistant turn's usage in the session
+  transcript, the max from the Ollama model context or a known Anthropic window.
 - `/diag` — daemon state, sessions, pending interactions and recent errors;
   per session it shows the model, the reasoning effort and the git branch when
   available (from the structured log at `~/.claude-omni-rc/logs/daemon.jsonl`).
@@ -102,8 +106,9 @@ npm install
 
 Plain messages go to the active session: headless sessions receive them as a
 new turn, terminal sessions as pasted input + Enter (so the human can answer
-interactive prompts). Slash commands the bot doesn't own (`/clear`, `/compact`,
-`/exit`, custom commands, …) are forwarded verbatim to the active session.
+interactive prompts). Slash commands the bot doesn't own are **not** forwarded:
+they get an "Unknown command" reply (some CLI commands like `/context` are
+interactive UIs that would leave the session stuck waiting for input).
 Selecting a session in `/sessions` also shows its last messages.
 Terminal sessions must run inside tmux (`claude:<project>`) to receive text.
 

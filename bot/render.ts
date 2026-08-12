@@ -377,3 +377,58 @@ export function renderAgentCard(card: AgentCard): string {
   if (card.expanded && card.lines.length) out += `\n<blockquote expandable>${card.lines.join('\n\n')}</blockquote>`;
   return out;
 }
+
+// Compact token counts for the context line: 999, 12.4k, 1.5M.
+export function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, '')}k`;
+  return String(n);
+}
+
+// Known Anthropic context windows (tokens). Unknown models return undefined and
+// the context line shows "used" without a max rather than inventing one.
+const ANTHROPIC_CONTEXT = new Map<string, number>([
+  ['claude-fable-5', 1_000_000],
+  ['claude-opus-5', 200_000],
+  ['claude-sonnet-5', 200_000],
+  ['claude-haiku-4-5', 200_000],
+  ['claude-opus-4-1', 200_000],
+  ['claude-sonnet-4-5', 200_000],
+  ['claude-3-5-haiku', 200_000],
+  ['claude-3-5-sonnet', 200_000],
+  ['claude-3-7-sonnet', 200_000],
+  ['opus', 200_000],
+  ['sonnet', 200_000],
+  ['haiku', 200_000],
+  ['fable', 1_000_000],
+]);
+export function anthropicContextWindow(model: string): number | undefined {
+  // 'claude-haiku-4-5-20251001' → 'claude-haiku-4-5'
+  return ANTHROPIC_CONTEXT.get(model.replace(/-\d{8}$/, ''));
+}
+
+// The final assistant turn's usage is the whole prompt sent (every turn resends
+// the conversation), so it is the context used. Cache read/created ranges are
+// part of the prompt and count against the window. Scans from the end: a line
+// caught mid-write parses as garbage and is skipped, the previous one wins.
+export function lastContextTokens(lines: string[]): number | undefined {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const e = JSON.parse(lines[i]);
+      const u = e?.message?.usage;
+      if (u && typeof u.input_tokens === 'number') {
+        return u.input_tokens + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+      }
+    } catch {
+      // incomplete line (tail caught mid-write) or non-JSON: skip and look earlier
+    }
+  }
+  return undefined;
+}
+
+export function renderContext(used: number | undefined, max: number | undefined, model?: string): string {
+  const head = `🧠 <b>Context</b>${model ? ` · <code>${htmlEscape(model)}</code>` : ''}`;
+  if (used === undefined) return `${head}\nNo context data yet.`;
+  if (max === undefined) return `${head}\n${formatTokens(used)} tokens used`;
+  return `${head}\n${formatTokens(used)} / ${formatTokens(max)} tokens (${Math.round((used / max) * 100)}%)`;
+}

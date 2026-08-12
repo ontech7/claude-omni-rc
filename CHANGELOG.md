@@ -23,6 +23,15 @@
 - **Behavior change:** the Ollama-based tool-call summarizer is removed. The
   CLI already writes a human `description` on Bash calls, so summarizing cost a
   local model call (with a 5s timeout per call) for a worse result.
+- **`/context` command.** Shows the active session's context window used vs
+  max: the used figure comes from the last assistant turn's token usage in the
+  session transcript, the max from the Ollama model context (or a known
+  Anthropic window). Works for headless and terminal sessions alike.
+- **Behavior change: unknown slash commands are no longer forwarded.** A
+  `/something` the bot doesn't own used to be pasted verbatim into the active
+  session; now it gets an "Unknown command" reply. Forwarding could leave a
+  session stuck — Claude Code's own `/context`, for instance, is an interactive
+  UI that blocks a turn while waiting for input.
 
 ## [0.4.0] - 2026-08-11
 

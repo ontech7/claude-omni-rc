@@ -131,14 +131,18 @@ reattached.
 | `/history [id]` | last messages of a session |
 | `/delete [id]` | delete a session (headless: stops it; terminal: untracks only) |
 | `/usage` | 5h / weekly usage for the configured provider |
+| `/context` | the active session's context used vs max (tokens) |
 | `/settings [key [value]]` · `/settings reset <key>` | view / change user settings; saved to `settings.json`, applies at the next daemon restart |
 | `/diag` | daemon state, sessions, pending interactions, recent errors; per session: model · effort · git branch |
 | `/help` | list the commands |
 
 Plain text goes to the active session — a new turn for headless sessions, typed
-input (pasted + Enter) for terminal ones. Slash commands the bot doesn't own
-(`/clear`, `/compact`, `/exit`, …) are forwarded verbatim, so Claude Code's own
-commands work from the phone.
+input (pasted + Enter) for terminal ones. **Slash commands the bot doesn't own
+are not forwarded**: they get an "Unknown command" reply instead. Forwarding
+them used to paste CLI-only commands into the session, and some (like
+Claude Code's `/context`) are interactive UIs that can leave a session stuck —
+use the bot's own `/context` from the phone and keep the CLI's commands in the
+terminal.
 
 ### How sessions get attached
 
