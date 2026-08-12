@@ -595,16 +595,6 @@ export function stopReply(o: {
     : 'This terminal session has no tmux pane to interrupt.';
 }
 
-// Testo breve del modello mentre una bubble tool è aperta → si fonde nella
-// bubble (niente messaggio extra); testo lungo (una risposta vera) o nessuna
-// bubble aperta → messaggio separato. Soglia: la narrazione tra le tool call è
-// di 1-2 frasi, le risposte vere sono più lunghe.
-export const NARRATION_MAX = 150;
-export function narrationPlan(role: 'user' | 'assistant', text: string, burstOpen: boolean): 'merge' | 'separate' {
-  if (role === 'assistant' && burstOpen && text.length < NARRATION_MAX) return 'merge';
-  return 'separate';
-}
-
 // Perché un evento non è stato consegnato. Ogni `return` silenzioso dei gestori
 // del bus corrisponde a uno di questi motivi: senza un nome, uno scarto è
 // indistinguibile da una perdita.
@@ -797,7 +787,7 @@ export interface ToolBurstSink {
 }
 
 export class ToolBurstAggregator {
-  private open?: { messageId: number; text: string; at: number };
+  private open?: { messageId: number; text: string };
   private lastWasTool = false;
   private chain: Promise<void> = Promise.resolve();
   // Contatore di generazione: `close()` lo incrementa. Una pushNow in volo
@@ -809,13 +799,12 @@ export class ToolBurstAggregator {
   private lineIds: (string | undefined)[] = [];
   private lines: string[] = [];
 
-  // The burst window must comfortably cover a working stretch: the model can
-  // pause many seconds between tool calls (reasoning, waiting for a tool to
-  // run), and splitting the burst there was why slow runs showed one bubble
-  // per tool. The bubble is already bounded by the event closers — separate
-  // text, prompt, permission, dialog, result, error — so this time check is
-  // only a secondary guard against a bubble lingering across unrelated work.
-  constructor(private sink: ToolBurstSink, private maxLen = 3800, private windowMs = 60_000) {}
+  // The burst is bounded by events, not by time: every push here is a tool
+  // line (text never enters the bubble), so consecutive tool calls stay
+  // grouped until close() — called on any text, prompt, permission, dialog,
+  // result or error — opens a fresh bubble. A time window only split bursts
+  // that happened to be slow.
+  constructor(private sink: ToolBurstSink, private maxLen = 3800) {}
 
   // Serializza le push: il bus emette in modo sincrono e due tool_use nello stesso
   // tick leggerebbero open/lastWasTool prima di ogni await — la catena rende le
@@ -829,16 +818,9 @@ export class ToolBurstAggregator {
     return this.chain;
   }
 
-  // La bubble è aperta e fresca (dentro la finestra): la narrazione breve del
-  // modello può fondersi dentro, invece di chiudere la raffica.
-  isOpen(): boolean {
-    return !!this.open && Date.now() - this.open.at < this.windowMs;
-  }
-
   private async pushNow(line: string, toolUseId: string | undefined, gen: number): Promise<void> {
     const open = this.open;
-    const fresh = open && Date.now() - open.at < this.windowMs;
-    if (this.lastWasTool && fresh) {
+    if (this.lastWasTool && open) {
       // riga vuota tra una tool call e l'altra: la bubble non diventa un muro
       // di testo, ogni tool call resta riconoscibile come voce separata.
       const next = [...this.lines, line].join('\n\n');
@@ -847,14 +829,13 @@ export class ToolBurstAggregator {
         this.lines.push(line);
         this.lineIds.push(toolUseId);
         open.text = next;
-        open.at = Date.now();
         return;
       }
     }
     const id = await this.sink.send(line);
     if (gen !== this.generation) return; // chiusa nel frattempo: non riaprire
     if (id !== undefined) {
-      this.open = { messageId: id, text: line, at: Date.now() };
+      this.open = { messageId: id, text: line };
       this.lines = [line];
       this.lineIds = [toolUseId];
       this.lastWasTool = true;
@@ -2403,14 +2384,9 @@ export class TelegramBot {
       if (e.parentToolUseId && this.agentCards.has(e.parentToolUseId)) return;
       if (e.role === 'assistant') this.typing.stop(); // il testo è già l'indicatore
       const burst = this.toolBurst(e.sessionId);
-      if (narrationPlan(e.role, e.text, burst.isOpen()) === 'merge') {
-        // narrazione breve del modello mentre la bubble tool è aperta: si fonde
-        // dentro (niente messaggio extra) — il grouping non si rompe più a ogni
-        // "Ora leggo X…" tra una tool call e l'altra.
-        log().info('event merged into tool bubble', { eventId: e.eventId, sessionId: e.sessionId, kind: 'text' });
-        void burst.push(mdToHtml(e.text));
-        return;
-      }
+      // Any text — the user's or the model's — ends the tool burst: the model's
+      // narration is its own message, and the next tool call opens a fresh
+      // bubble (see ToolBurstAggregator).
       void burst.collapse();
       burst.close();
       log().info('event delivering', { eventId: e.eventId, sessionId: e.sessionId, kind: 'text', role: e.role });

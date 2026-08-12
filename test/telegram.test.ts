@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { resolveHeadlessProjectDir, isPrivateChat, parseCommand, parseNewFlags, parseSettingsCommand, formatSettingsReport, formatSettingsKey, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, stopReply, TypingIndicator, narrationPlan, answerSummary, answerToKeys, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, formatPaneContext, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
+import { resolveHeadlessProjectDir, isPrivateChat, parseCommand, parseNewFlags, parseSettingsCommand, formatSettingsReport, formatSettingsKey, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, stopReply, TypingIndicator, answerSummary, answerToKeys, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, formatPaneContext, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
 import type { ToolBurstSink, PromptKeyEntry } from '../bot/telegram.js';
 import { truncateAtWord, mdToHtml, splitHtmlMessage } from '../bot/render.js';
 import { loadConfig } from '../src/config.js';
@@ -498,18 +498,7 @@ describe('ToolBurstAggregator', () => {
     await agg.push('t2'); // send ok → bubble nuova
     expect(sends).toEqual(['ok']);
   });
-  it('a stale burst (past the time window) opens a new bubble', async () => {
-    vi.useFakeTimers();
-    try {
-      const { agg, sink, sends } = makeAgg();
-      await agg.push('t1'); // send
-      await vi.advanceTimersByTimeAsync(61_000); // oltre la finestra di 60s
-      await agg.push('t2'); // deve aprire una bubble nuova, non editare t1
-      expect(sends).toEqual(['t1', 't2']);
-      expect(sink.edit).not.toHaveBeenCalled();
-    } finally { vi.useRealTimers(); }
-  });
-  it('groups tool calls that come several seconds apart (slow burst)', async () => {
+  it('groups tool calls regardless of the gap between them (slow burst)', async () => {
     vi.useFakeTimers();
     try {
       const { agg, sink, edits } = makeAgg();
@@ -728,17 +717,6 @@ describe('TypingIndicator', () => {
   });
 });
 
-describe('narrationPlan', () => {
-  it('merges short assistant narration into an open burst', () => {
-    expect(narrationPlan('assistant', 'Ora leggo X', true)).toBe('merge');
-    expect(narrationPlan('assistant', 'x'.repeat(149), true)).toBe('merge');
-  });
-  it('keeps long text, user text, and closed bursts separate', () => {
-    expect(narrationPlan('assistant', 'x'.repeat(150), true)).toBe('separate');
-    expect(narrationPlan('assistant', 'Ora leggo X', false)).toBe('separate');
-    expect(narrationPlan('user', 'Ora leggo X', true)).toBe('separate');
-  });
-});
 
 describe('gateSessionEvent', () => {
   const base = { kind: 'text' as const, armed: true, sessionId: 's1', activeSessionId: 's1' };
