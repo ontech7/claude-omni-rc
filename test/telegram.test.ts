@@ -32,7 +32,7 @@ function makeBot() {
     ollama: {} as any, settingsStore: {} as any,
     bot: fakeBot,
   });
-  return { bot, bus, manager, api };
+  return { bot, bus, manager, api, permissionFlow, fakeBot };
 }
 
 describe('formatPct / formatResetAt', () => {
@@ -1112,5 +1112,107 @@ describe('text → question ordering', () => {
     const [textMsg, questionMsg] = api.sendMessage.mock.calls.map(c => c[1] as string);
     expect(textMsg).toContain('Before the question.');
     expect(questionMsg).toContain('Pick one');
+  });
+});
+
+// ---------- approvazione del piano (ExitPlanMode) end-to-end ----------
+
+// Il flusso completo: canUseTool → permissionFlow.request → bus → bot mostra il
+// piano coi bottoni → callback Approve/Reject/Edit → la promise che l'SDK
+// attende si risolve. I test esistenti coprono i pezzi (sdk-driver, parsing,
+// rendering) ma non questo collante: un bug qui lascia la sessione ferma sul
+// piano senza modo di procedere — il sintomo riportato dall'utente.
+describe('plan approval end-to-end (ExitPlanMode via canUseTool)', () => {
+  // Cattura l'handler grammy registrato per un evento: è il percorso reale
+  // (bot.on → safe → onCallback/onMessage), non un accesso a metodi privati.
+  function handlerFor(fakeBot: { on: ReturnType<typeof vi.fn> }, event: string): (ctx: any) => Promise<unknown> {
+    const calls = fakeBot.on.mock.calls as [string, (ctx: any) => Promise<unknown>][];
+    const hit = calls.find(([e]) => e === event);
+    if (!hit) throw new Error(`handler for ${event} not registered`);
+    return hit[1];
+  }
+
+  function makeCtx(overrides: Record<string, unknown> = {}) {
+    return {
+      chat: { type: 'private', id: 12345 },
+      from: { id: 123 },
+      callbackQuery: { data: '', message: { text: 'original', message_id: 1 } },
+      answerCallbackQuery: vi.fn(async () => ({})),
+      editMessageText: vi.fn(async () => ({ ok: true })),
+      ...overrides,
+    };
+  }
+
+  it('approves a plan from the buttons and the SDK continues with updatedInput', async () => {
+    const { bus, manager, api, permissionFlow, fakeBot } = makeBot();
+    manager.addAuthorizedUser(123);
+    const s = manager.createHeadless({ title: 't', projectDir: '/tmp/x' });
+    manager.setActive(s.id);
+    let permId = '';
+    bus.on('session.permission', ({ permission }) => { permId = permission.id; });
+    // canUseTool('ExitPlanMode', {plan}) → permissionFlow.request: la promise è
+    // ciò che l'SDK attende per continuare il turno dopo la decisione.
+    const pending = permissionFlow.request(s.id, 'ExitPlanMode', { plan: 'step 1\nstep 2' });
+    try {
+      await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
+      const [chatId, text] = api.sendMessage.mock.calls[0];
+      const opts = api.sendMessage.mock.calls[0][2] as { reply_markup?: unknown };
+      expect(chatId).toBe(12345);
+      expect(text).toContain('Plan approval');
+      expect(text).toContain('step 1');
+      expect(opts.reply_markup).toBeTruthy(); // bottoni Approve/Reject/Edit
+      const handler = handlerFor(fakeBot, 'callback_query:data');
+      const ctx = makeCtx({ callbackQuery: { data: `perm:approve:${permId}`, message: { text: 'original', message_id: 1 } } });
+      await handler(ctx);
+      // l'approvazione conferma il piano originale come updatedInput
+      await expect(pending).resolves.toEqual({ behavior: 'allow', updatedInput: { plan: 'step 1\nstep 2' } });
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: '✓ Approved' });
+    } finally {
+      permissionFlow.cancelAllForSession(s.id); // svuota il timer di arm() se un assert fallisce
+    }
+  });
+
+  it('rejects a plan from the buttons and the SDK continues with a deny', async () => {
+    const { bus, manager, api, permissionFlow, fakeBot } = makeBot();
+    manager.addAuthorizedUser(123);
+    const s = manager.createHeadless({ title: 't', projectDir: '/tmp/x' });
+    manager.setActive(s.id);
+    let permId = '';
+    bus.on('session.permission', ({ permission }) => { permId = permission.id; });
+    const pending = permissionFlow.request(s.id, 'ExitPlanMode', { plan: 'step 1' });
+    try {
+      await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
+      const handler = handlerFor(fakeBot, 'callback_query:data');
+      const ctx = makeCtx({ callbackQuery: { data: `perm:deny:${permId}`, message: { text: 'original', message_id: 1 } } });
+      await handler(ctx);
+      await expect(pending).resolves.toEqual({ behavior: 'deny', message: 'Plan rejected from Telegram' });
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: '✗ Rejected' });
+    } finally {
+      permissionFlow.cancelAllForSession(s.id);
+    }
+  });
+
+  it('edits a plan from the buttons and the SDK continues with the edited plan', async () => {
+    const { bus, manager, api, permissionFlow, fakeBot } = makeBot();
+    manager.addAuthorizedUser(123);
+    const s = manager.createHeadless({ title: 't', projectDir: '/tmp/x' });
+    manager.setActive(s.id);
+    let permId = '';
+    bus.on('session.permission', ({ permission }) => { permId = permission.id; });
+    const pending = permissionFlow.request(s.id, 'ExitPlanMode', { plan: 'original plan' });
+    try {
+      await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
+      const cbHandler = handlerFor(fakeBot, 'callback_query:data');
+      const editCtx = makeCtx({ callbackQuery: { data: `perm:edit:${permId}`, message: { text: 'original', message_id: 1 } } });
+      await cbHandler(editCtx);
+      expect(editCtx.answerCallbackQuery).toHaveBeenCalledWith({ text: 'Type the new plan' });
+      // il prossimo testo dell'utente è il nuovo piano (onMessage)
+      const msgHandler = handlerFor(fakeBot, 'message:text');
+      const msgCtx = { chat: { type: 'private', id: 12345 }, from: { id: 123 }, message: { text: 'revised plan' } };
+      await msgHandler(msgCtx);
+      await expect(pending).resolves.toEqual({ behavior: 'allow', updatedInput: { plan: 'revised plan' } });
+    } finally {
+      permissionFlow.cancelAllForSession(s.id);
+    }
   });
 });
