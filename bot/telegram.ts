@@ -809,7 +809,13 @@ export class ToolBurstAggregator {
   private lineIds: (string | undefined)[] = [];
   private lines: string[] = [];
 
-  constructor(private sink: ToolBurstSink, private maxLen = 3800, private windowMs = 5000) {}
+  // The burst window must comfortably cover a working stretch: the model can
+  // pause many seconds between tool calls (reasoning, waiting for a tool to
+  // run), and splitting the burst there was why slow runs showed one bubble
+  // per tool. The bubble is already bounded by the event closers — separate
+  // text, prompt, permission, dialog, result, error — so this time check is
+  // only a secondary guard against a bubble lingering across unrelated work.
+  constructor(private sink: ToolBurstSink, private maxLen = 3800, private windowMs = 60_000) {}
 
   // Serializza le push: il bus emette in modo sincrono e due tool_use nello stesso
   // tick leggerebbero open/lastWasTool prima di ogni await — la catena rende le

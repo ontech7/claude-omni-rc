@@ -503,10 +503,21 @@ describe('ToolBurstAggregator', () => {
     try {
       const { agg, sink, sends } = makeAgg();
       await agg.push('t1'); // send
-      await vi.advanceTimersByTimeAsync(6000); // oltre la finestra di 5s
+      await vi.advanceTimersByTimeAsync(61_000); // oltre la finestra di 60s
       await agg.push('t2'); // deve aprire una bubble nuova, non editare t1
       expect(sends).toEqual(['t1', 't2']);
       expect(sink.edit).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+  it('groups tool calls that come several seconds apart (slow burst)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { agg, sink, edits } = makeAgg();
+      await agg.push('t1'); // send
+      await vi.advanceTimersByTimeAsync(30_000); // il modello ragiona tra una tool e l'altra
+      await agg.push('t2'); // stessa raffica: edit, non una bubble nuova
+      expect(sink.send).toHaveBeenCalledTimes(1);
+      expect(edits).toEqual([{ id: 1, text: 't1\n\nt2' }]);
     } finally { vi.useRealTimers(); }
   });
   it('close() during a pending send does not reopen the burst', async () => {

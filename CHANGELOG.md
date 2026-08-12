@@ -32,6 +32,10 @@
   session; now it gets an "Unknown command" reply. Forwarding could leave a
   session stuck — Claude Code's own `/context`, for instance, is an interactive
   UI that blocks a turn while waiting for input.
+- **Fix: tool calls stay grouped for the whole working stretch.** The burst
+  window was 5 seconds, so a slow run — a model pausing between edits — showed
+  one bubble per tool call. It is now 60s; the bubble is still bounded by the
+  events that end a burst (separate text, prompt, permission, result, error).
 
 ## [0.4.0] - 2026-08-11
 
