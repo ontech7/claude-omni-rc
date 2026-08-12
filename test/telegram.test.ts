@@ -374,10 +374,15 @@ describe('permissionMessage / sessionListText', () => {
       { id: 'bbb', kind: 'terminal', title: 't2', projectDir: '/y', tmuxTarget: 'claude:my-branch', status: 'running', lastActivity: new Date().toISOString(), createdAt: '' },
     ] as any;
     const txt = sessionListText(sessions, 'bbb');
-    expect(txt).toContain('▸');
+    expect(txt).toContain('●');                // active session: filled dot
+    expect(txt).toContain('<b>t2</b>');        // active session title in bold
+    expect(txt).toContain('○');                // inactive: hollow dot
+    expect(txt).not.toContain('▸');
     expect(txt).toContain('running');
-    expect(txt).toContain('claude:my-branch'); // per le terminali il target tmux
-    expect(txt).toContain('deepseek-v4-flash:cloud'); // per le headless il modello
+    expect(txt).toContain('claude:my-branch'); // terminal → tmux target on its own line
+    expect(txt).toContain('🖥');               // terminal icon
+    expect(txt).toContain('deepseek-v4-flash:cloud'); // headless → model
+    expect(txt).toContain('🧠');               // headless icon
     expect(txt).toContain('just now');
   });
   it('formats relative time', () => {
@@ -948,6 +953,15 @@ describe('diagReport', () => {
     expect(out).toContain('terminal');
     expect(out).toContain('headless');
     expect(out).toContain('running');
+  });
+
+  it('marks the active session and puts the detail on its own line', () => {
+    const out = diagReport(snapshot);
+    expect(out).toMatch(/● <b>my-proj<\/b>/);      // active session: filled dot + bold title
+    expect(out).toMatch(/○/);                      // inactive: hollow dot
+    expect(out).toContain('🖥');
+    expect(out).toContain('🧠');
+    expect(out).toMatch(/\n {2}🖥 terminal · tmux/); // second line indented
   });
 
   it('reports the pending interactions, which are what wedges a session', () => {

@@ -681,21 +681,26 @@ export function relativeTime(iso: string): string {
   return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
-// Una riga per sessione, con le info che servono a riconoscerla: per le
-// terminali il target tmux, per le headless il modello, più l'ultima attività
-// relativa (la sessione "in uso" è quella con "just now").
+// Una sessione su due righe: la prima dice titolo/stato/attività, la seconda il
+// target (per le terminali il tmux, per le headless il modello). Su uno schermo
+// stretto una riga per sessione andava a capo e mescolava i fatti; la sessione
+// attiva è marcata con ● pieno e titolo in grassetto (▸ era ambiguo).
 export function sessionListText(sessions: Session[], activeId?: string): string {
   if (!sessions.length) return 'No sessions.';
   return sessions
     .map(s => {
-      const marker = s.id === activeId ? '▸' : ' ';
+      const active = s.id === activeId;
+      const marker = active ? '●' : '○';
       const title = htmlEscape(s.title) || htmlEscape(s.id.slice(0, 8));
+      const status = htmlEscape(s.status);
+      const kindIcon = s.kind === 'terminal' ? '🖥' : '🧠';
       const detail = s.kind === 'terminal'
-        ? (s.tmuxTarget ? `<code>${htmlEscape(s.tmuxTarget)}</code>` : 'no tmux')
-        : `<code>${htmlEscape(s.model ?? 'model')}</code>`;
-      return `${marker} <b>${title}</b> · ${s.kind} · ${detail} — ${s.status} · ${relativeTime(s.lastActivity)}`;
+        ? (s.tmuxTarget ? htmlEscape(s.tmuxTarget) : 'no tmux')
+        : htmlEscape(s.model ?? 'model');
+      const line1 = `${marker} ${active ? `<b>${title}</b>` : title} · ${status} · ${relativeTime(s.lastActivity)}`;
+      return `${line1}\n  ${kindIcon} ${detail}`;
     })
-    .join('\n');
+    .join('\n\n');
 }
 
 // Fotografia dello stato del daemon, resa per Telegram. Serve nella situazione
@@ -732,10 +737,15 @@ export function diagReport(s: DiagSnapshot): string {
 
   const sessions = s.sessions.length
     ? s.sessions.map(x => {
-        const bits = [x.kind, x.status, x.hasTmux ? 'tmux' : 'no-tmux', x.transcript ? 'transcript' : 'no-transcript'];
+        const active = x.id === s.activeSessionId;
+        const marker = active ? '●' : '○';
+        const title = htmlEscape(x.title) || htmlEscape(x.id.slice(0, 8));
+        const kindIcon = x.kind === 'terminal' ? '🖥' : '🧠';
+        const bits = [x.kind, x.hasTmux ? 'tmux' : 'no-tmux', x.transcript ? 'transcript' : 'no-transcript'];
         const modelEffortBranch = [x.model ?? '—', x.effort ?? '—', x.branch ?? '—'].map(htmlEscape).join(' · ');
-        return `• <code>${htmlEscape(x.id.slice(0, 8))}</code> ${htmlEscape(x.title)} — ${htmlEscape(bits.join(' · '))} — ${modelEffortBranch}`;
-      }).join('\n')
+        const line1 = `${marker} ${active ? `<b>${title}</b>` : title} · ${htmlEscape(x.status)}`;
+        return `${line1}\n  ${kindIcon} ${htmlEscape(bits.join(' · '))} · ${modelEffortBranch}`;
+      }).join('\n\n')
     : 'no sessions tracked';
 
   const pending = `permissions ${s.pending.permissions} · dialogs ${s.pending.dialogs} · questions ${s.pending.questionFlows}`;
