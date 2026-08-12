@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.6.0] - 2026-08-12
+
+- **Readable session lists.** `/sessions` and `/diag` show each session on two
+  lines — title, status and activity on the first, the tmux target or model on
+  the second — with a filled `●` marking the active session, so nothing wraps
+  into a jumble on a narrow screen.
+- **Tables that render.** Markdown tables (indented, without outer pipes, or
+  inside code fences) become fixed-width blocks; long cells truncate with an
+  ellipsis instead of mid-word, and bold/code inside cells render.
+- **Complete, ordered replies.** Streamed replies are no longer truncated when
+  the CLI rewrites a message, and a table split across streamed chunks renders
+  as one table. Questions (`AskUserQuestion`) now arrive after the text that
+  precedes them, like the native CLI; the tmux pane snapshot above questions
+  is gone.
+- **Headless parity.** Read-only tools (`Read`, `Grep`, `Glob`, `WebFetch`,
+  `WebSearch`) are allowed without asking in headless sessions, matching the
+  native CLI; state-changing tools still need Telegram approval. Headless
+  limitations are documented in AI-GUIDE.
+- **Grouped tool calls.** Every tool-call bubble starts in the grouped form
+  (`▸ N steps` + expandable block) even for a single call, and later calls are
+  added inside it.
+
 ## [0.5.0] - 2026-08-12
 
 - **Readable tool calls.** Tool calls are described in words instead of raw
