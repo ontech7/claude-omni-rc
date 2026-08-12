@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { join, basename } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { Bot, Context, InlineKeyboard } from 'grammy';
 import type { Bus } from '../src/bus.js';
 import type { Config } from '../src/config.js';
@@ -19,9 +19,11 @@ import { EFFORT_LEVELS } from '../src/types.js';
 import { SETTINGS_KEYS, parseSettingsValue, type SettingsKey, type UserSettings } from '../src/settings.js';
 import type { RecentMessage } from '../src/sessions/transcript.js';
 import { readRecentMessages, resolveSessionTranscript } from '../src/sessions/transcript.js';
-import { isOllamaProvider, fetchOllamaUsage, fetchAnthropicUsage } from '../src/usage.js';
+import { isOllamaProvider, isAnthropicModel, fetchOllamaUsage, fetchAnthropicUsage } from '../src/usage.js';
 import { log } from '../src/log.js';
 import { CURRENT_VERSION } from '../src/update.js';
+import { htmlEscape, mdToHtml, balanceHtml, splitHtmlMessage, truncateAtWord, SEND_MAX_CHARS, describeTool, renderToolLine, renderAgentCard, lastContextTokens, renderContext, anthropicContextWindow } from './render.js';
+import type { AgentCard } from './render.js';
 
 // ---------- pure helpers ----------
 
@@ -156,7 +158,7 @@ export function resolveHeadlessProjectDir(workspaceDirs: string[]): { dir?: stri
 
 export interface CallbackData {
   action: 'approve' | 'deny' | 'select' | 'answer' | 'done' | 'other' | 'cancel' | 'del' | 'del-yes' | 'del-no'
-    | 'perm-edit' | 'dlg-retry' | 'dlg-skip';
+    | 'perm-edit' | 'dlg-retry' | 'dlg-skip' | 'agent-toggle';
   id: string;
   index?: number;        // per 'answer': indice opzione
   questionIndex?: number; // per 'answer'/'done'/'other': indice domanda
@@ -174,6 +176,7 @@ export function parseCallbackData(data: string): CallbackData {
     if (ns === 'dlg' && (action === 'retry' || action === 'skip') && id) {
       return { action: `dlg-${action}` as CallbackData['action'], id };
     }
+    if (ns === 'agent' && action === 'toggle' && id) return { action: 'agent-toggle', id };
   }
   if (parts.length === 4) {
     const [ns, action, token, q] = parts;
@@ -188,13 +191,6 @@ export function parseCallbackData(data: string): CallbackData {
     }
   }
   throw new Error(`bad callback data: ${data}`);
-}
-
-// parse_mode 'HTML' rigetta markup malformato (es. '<b' sbilanciato) e il send è
-// dentro .catch(()=>{}) → il messaggio sparirebbe in silenzio. Escapare ogni frammento
-// dinamico prima di interpolarlo nei template HTML.
-export function htmlEscape(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 export function formatPct(value: number | null | undefined): string {
@@ -216,139 +212,6 @@ export function stripAnsi(s: string): string {
     .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')
     .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
     .replace(/\r/g, '');
-}
-
-// Rende il markdown del modello in HTML per Telegram, correggendo il markup:
-// blocchi di codice protetti (niente formattazione dentro <pre>/<code>), nesting
-// grassetto/corsivo gestito, e passata finale di bilanciamento → l'output è
-// sempre HTML valido accettato da Telegram (mai un messaggio scartato).
-export function mdToHtml(text: string): string {
-  const blocks: string[] = [];
-  // Separatore per i placeholder del codice: un NUL non compare mai nel testo
-  // del modello, quindi il ripristino non può corrompere il contenuto.
-  const P = String.fromCharCode(0);
-  const protect = (c: string, kind: 'pre' | 'code'): string => {
-    const idx = blocks.length;
-    blocks.push(kind === 'pre' ? `<pre>${c}</pre>` : `<code>${c}</code>`);
-    return `${P}${idx}${P}`;
-  };
-  let out = htmlEscape(text);
-  out = out.replace(/```([\s\S]*?)```/g, (_m, c) => protect(c, 'pre'));
-  out = out.replace(/`([^`\n]+)`/g, (_m, c) => protect(c, 'code'));
-  out = out
-    .replace(/\*\*\*([^*]+)\*\*\*/g, '<b><i>$1</i></b>')
-    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
-    .replace(/\*([^*]+)\*/g, '<i>$1</i>');
-  out = out.replace(/^#{1,6}\s+([^<]+)$/gm, '<b>$1</b>');
-  out = out.replace(/^[-*]\s+(.+)$/gm, '• $1');
-  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>');
-  out = out.replace(new RegExp(`${P}([0-9]+)${P}`, 'g'), (_m, i) => blocks[Number(i)]);
-  return balanceHtml(out);
-}
-
-// Chiude i tag ancora aperti a fine stringa (LIFO) e scarta le chiusure orfane:
-// il risultato è sempre HTML bilanciato. Garanzia che Telegram non rigetti mai
-// un messaggio per markup malformato.
-export function balanceHtml(html: string): string {
-  const stack: string[] = [];
-  let out = '';
-  let last = 0;
-  const re = /<\/?(b|i|code|pre|a)(?:\s[^>]*)?>/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html)) !== null) {
-    out += html.slice(last, m.index);
-    const full = m[0];
-    const tag = m[1];
-    if (full.startsWith('</')) {
-      const idx = stack.lastIndexOf(tag);
-      if (idx !== -1) {
-        for (let i = stack.length - 1; i > idx; i--) out += `</${stack[i]}>`;
-        out += `</${tag}>`;
-        stack.length = idx;
-      }
-      // chiusura orfana: scartata
-    } else {
-      out += full;
-      stack.push(tag);
-    }
-    last = m.index + full.length;
-  }
-  out += html.slice(last);
-  for (let i = stack.length - 1; i >= 0; i--) out += `</${stack[i]}>`;
-  return out;
-}
-
-// Telegram rifiuta un messaggio oltre 4096 caratteri: il send è dentro un
-// .catch() → una risposta lunga del modello sparirebbe in silenzio. Il testo
-// viene quindi spezzato in più messaggi, preferendo un confine di riga e
-// riaprendo in ogni pezzo i tag rimasti aperti (così ogni chunk è HTML valido
-// e la formattazione non si perde a metà blocco di codice).
-// Il limite duro è 4096: si sta sotto con margine, perché i tag riaperti a
-// inizio chunk e l'escaping HTML aggiungono caratteri.
-export const SEND_MAX_CHARS = 3800;
-const HTML_TAG = /<\/?(b|i|code|pre|a)(?:\s[^>]*)?>/g;
-
-export function splitHtmlMessage(html: string, max = SEND_MAX_CHARS): string[] {
-  if (html.length <= max) return [html];
-
-  // tokenizza in tag e testo: un tag non va mai spezzato a metà
-  const tokens: { tag?: string; text?: string }[] = [];
-  let last = 0;
-  let m: RegExpExecArray | null;
-  HTML_TAG.lastIndex = 0;
-  while ((m = HTML_TAG.exec(html)) !== null) {
-    if (m.index > last) tokens.push({ text: html.slice(last, m.index) });
-    tokens.push({ tag: m[0] });
-    last = m.index + m[0].length;
-  }
-  if (last < html.length) tokens.push({ text: html.slice(last) });
-
-  const chunks: string[] = [];
-  const stack: { name: string; open: string }[] = [];
-  const openers = (): string => stack.map(t => t.open).join('');
-  const closers = (): string => stack.map(t => `</${t.name}>`).reverse().join('');
-  let cur = '';
-  const flush = (): void => {
-    const reopened = openers();
-    if (cur !== reopened) chunks.push(cur + closers());
-    cur = reopened;
-  };
-
-  for (const t of tokens) {
-    if (t.tag !== undefined) {
-      const name = /^<\/?([a-z]+)/.exec(t.tag)![1];
-      if (cur.length + t.tag.length + closers().length > max) flush();
-      cur += t.tag;
-      if (t.tag.startsWith('</')) {
-        const i = stack.map(s => s.name).lastIndexOf(name);
-        if (i !== -1) stack.splice(i, 1);
-      } else {
-        stack.push({ name, open: t.tag });
-      }
-      continue;
-    }
-    let text = t.text ?? '';
-    while (text) {
-      let budget = max - cur.length - closers().length;
-      if (budget <= 0) {
-        // il chunk corrente è pieno: chiudilo. Se anche così non c'è spazio
-        // (max troppo piccolo per i soli tag) si avanza di 1 char per non
-        // restare in loop.
-        if (cur !== openers()) { flush(); continue; }
-        budget = 1;
-      }
-      if (text.length <= budget) { cur += text; break; }
-      const slice = text.slice(0, budget);
-      let cut = slice.lastIndexOf('\n');
-      if (cut < budget * 0.5) cut = slice.lastIndexOf(' ');
-      if (cut < budget * 0.5) cut = budget; // nessun confine utile: taglio netto
-      cur += text.slice(0, cut);
-      text = text.slice(cut).replace(/^[ \n]/, '');
-      flush();
-    }
-  }
-  flush();
-  return chunks;
 }
 
 // Il controllo remoto vive SOLO in chat privata: in un gruppo il daemon
@@ -713,16 +576,6 @@ export function renderHistory(messages: RecentMessage[], title: string, maxChars
   return balanceHtml(`${header}\n\n${body.reverse().join('\n\n')}`);
 }
 
-// Tronca preferendo un confine di parola (se cade oltre metà del budget): mai
-// tagli a metà stringa, con un marcatore esplicito di troncamento.
-export function truncateAtWord(s: string, max: number): string {
-  if (s.length <= max) return s;
-  const cut = s.slice(0, max);
-  const sp = cut.lastIndexOf(' ');
-  const end = sp > max * 0.5 ? sp : max;
-  return s.slice(0, end).trimEnd() + '… (truncated)';
-}
-
 // Risposta di /stop basata sull'esito reale (spec §3.3): mai un generico
 // "Stop requested" quando non c'è nulla da fermare.
 export function stopReply(o: {
@@ -740,58 +593,6 @@ export function stopReply(o: {
   return o.target
     ? `🛑 Ctrl+C sent to <code>${htmlEscape(o.target)}</code> — generation interrupted.`
     : 'This terminal session has no tmux pane to interrupt.';
-}
-
-// Riassunto leggibile di una tool call (niente JSON grezzo): l'ingranaggio ⚙️
-// identifica la riga come tool call, seguito dal campo chiave dell'input
-// (fallback al nome + primo valore). È il fallback quando la summary via LLM
-// non è disponibile (Ollama lento/giù).
-export function summarizeTool(toolName: string, input: Record<string, unknown>): string {
-  const s = (v: unknown): string => (typeof v === 'string' ? v : '');
-  const first = (): string => {
-    for (const v of Object.values(input)) {
-      if (typeof v === 'string' && v.trim()) return v;
-    }
-    return '';
-  };
-  const pick = (...keys: string[]): string => {
-    for (const k of keys) {
-      const v = s(input[k]);
-      if (v.trim()) return v;
-    }
-    return first();
-  };
-  const trunc = (v: string, max = 80): string => (v.length > max ? `${v.slice(0, max).trimEnd()}…` : v);
-
-  const name = toolName.toLowerCase();
-  if (name === 'bash') return `⚙️ ${trunc(pick('command'))}`;
-  // Read/Write/Edit senza verbo sono indistinguibili (stesso path, stesso
-  // formato) — il verbo è quello che dà contesto quando il fallback scatta.
-  if (name === 'read' || name === 'readfile') return `⚙️ Read ${trunc(pick('file_path', 'path'))}`;
-  if (name === 'write' || name === 'writefile') return `⚙️ Write ${trunc(pick('file_path', 'path'))}`;
-  if (name === 'edit' || name === 'multiedit') return `⚙️ Edit ${trunc(pick('file_path', 'path'))}`;
-  if (name === 'notebookedit') return `⚙️ Edit ${trunc(pick('notebook_path', 'path'))}`;
-  if (name === 'glob' || name === 'grep') return `⚙️ ${trunc(pick('pattern', 'query'))}`;
-  if (name === 'webfetch') return `⚙️ ${trunc(pick('url'))}`;
-  if (name === 'websearch') return `⚙️ ${trunc(pick('query'))}`;
-  if (name === 'taskcreate' || name === 'taskupdate') return `⚙️ ${trunc(pick('subject'))}`;
-  if (name === 'task') {
-    const desc = s(input['description']);
-    return desc.trim() ? `⚙️ Agent: ${trunc(desc)}` : '⚙️ Agent';
-  }
-  if (name === 'todowrite' || name === 'todoread') return '⚙️ Updates the task list';
-  const v = first();
-  return v ? `⚙️ ${toolName} — ${trunc(v)}` : `⚙️ ${toolName}`;
-}
-
-// Testo breve del modello mentre una bubble tool è aperta → si fonde nella
-// bubble (niente messaggio extra); testo lungo (una risposta vera) o nessuna
-// bubble aperta → messaggio separato. Soglia: la narrazione tra le tool call è
-// di 1-2 frasi, le risposte vere sono più lunghe.
-export const NARRATION_MAX = 150;
-export function narrationPlan(role: 'user' | 'assistant', text: string, burstOpen: boolean): 'merge' | 'separate' {
-  if (role === 'assistant' && burstOpen && text.length < NARRATION_MAX) return 'merge';
-  return 'separate';
 }
 
 // Perché un evento non è stato consegnato. Ogni `return` silenzioso dei gestori
@@ -986,15 +787,24 @@ export interface ToolBurstSink {
 }
 
 export class ToolBurstAggregator {
-  private open?: { messageId: number; text: string; at: number };
+  private open?: { messageId: number; text: string };
   private lastWasTool = false;
   private chain: Promise<void> = Promise.resolve();
   // Contatore di generazione: `close()` lo incrementa. Una pushNow in volo
   // (await sul sink) cattura la generazione all'inizio e la ri-verifica dopo
   // l'await: se close() è scattato nel frattempo, non riapre la bubble chiusa.
   private generation = 0;
+  // toolUseId → indice della riga dentro la bolla aperta: serve a riscrivere
+  // in place la riga giusta quando arriva il suo tool_result fallito.
+  private lineIds: (string | undefined)[] = [];
+  private lines: string[] = [];
 
-  constructor(private sink: ToolBurstSink, private maxLen = 3800, private windowMs = 5000) {}
+  // The burst is bounded by events, not by time: every push here is a tool
+  // line (text never enters the bubble), so consecutive tool calls stay
+  // grouped until close() — called on any text, prompt, permission, dialog,
+  // result or error — opens a fresh bubble. A time window only split bursts
+  // that happened to be slow.
+  constructor(private sink: ToolBurstSink, private maxLen = 3800) {}
 
   // Serializza le push: il bus emette in modo sincrono e due tool_use nello stesso
   // tick leggerebbero open/lastWasTool prima di ogni await — la catena rende le
@@ -1002,36 +812,32 @@ export class ToolBurstAggregator {
   // catturata QUI (non in pushNow): se close() scatta tra push() e l'avvio di
   // pushNow(), la push sa di appartenere alla generazione precedente e non
   // riapre la bubble chiusa.
-  push(line: string): Promise<void> {
+  push(line: string, toolUseId?: string): Promise<void> {
     const gen = this.generation;
-    this.chain = this.chain.then(() => this.pushNow(line, gen)).catch(() => { /* la catena sopravvive a un errore inatteso del sink */ });
+    this.chain = this.chain.then(() => this.pushNow(line, toolUseId, gen)).catch(() => { /* la catena sopravvive a un errore inatteso del sink */ });
     return this.chain;
   }
 
-  // La bubble è aperta e fresca (dentro la finestra): la narrazione breve del
-  // modello può fondersi dentro, invece di chiudere la raffica.
-  isOpen(): boolean {
-    return !!this.open && Date.now() - this.open.at < this.windowMs;
-  }
-
-  private async pushNow(line: string, gen: number): Promise<void> {
+  private async pushNow(line: string, toolUseId: string | undefined, gen: number): Promise<void> {
     const open = this.open;
-    const fresh = open && Date.now() - open.at < this.windowMs;
-    if (this.lastWasTool && fresh) {
+    if (this.lastWasTool && open) {
       // riga vuota tra una tool call e l'altra: la bubble non diventa un muro
       // di testo, ogni tool call resta riconoscibile come voce separata.
-      const next = `${open.text}\n\n${line}`;
+      const next = [...this.lines, line].join('\n\n');
       if (next.length <= this.maxLen && await this.sink.edit(open.messageId, next)) {
         if (gen !== this.generation) return; // chiusa nel frattempo: non toccare
+        this.lines.push(line);
+        this.lineIds.push(toolUseId);
         open.text = next;
-        open.at = Date.now();
         return;
       }
     }
     const id = await this.sink.send(line);
     if (gen !== this.generation) return; // chiusa nel frattempo: non riaprire
     if (id !== undefined) {
-      this.open = { messageId: id, text: line, at: Date.now() };
+      this.open = { messageId: id, text: line };
+      this.lines = [line];
+      this.lineIds = [toolUseId];
       this.lastWasTool = true;
     } else {
       // send fallita (es. chatId assente): senza bubble aperta la prossima push
@@ -1040,55 +846,39 @@ export class ToolBurstAggregator {
     }
   }
 
+  // Only failures are signalled: the EditThrottler allows 1 op/s per chat, and
+  // marking every success would double the calls for information that the
+  // absence of ❌ already conveys.
+  async markFailed(toolUseId: string, reason: string): Promise<void> {
+    const open = this.open;
+    if (!open) return;                       // bubble closed: do not reopen
+    const i = this.lineIds.indexOf(toolUseId);
+    if (i === -1) return;
+    if (this.lines[i].startsWith('❌ ')) return; // already marked
+    const short = reason.split('\n').find(l => l.trim())?.slice(0, 100) ?? '';
+    this.lines[i] = `❌ ${this.lines[i]}${short ? `\n<i>${htmlEscape(short)}</i>` : ''}`;
+    const next = this.lines.join('\n\n');
+    if (next.length <= this.maxLen && await this.sink.edit(open.messageId, next)) {
+      open.text = next;
+    }
+  }
+
+  // At the end of a turn the burst becomes a collapsible block: it stays
+  // consultable but stops taking up the screen in history. With a single line
+  // the blockquote would cost an edit for no gain.
+  async collapse(): Promise<void> {
+    const open = this.open;
+    if (!open || this.lines.length < 2) return;
+    const body = `▸ <b>${this.lines.length} steps</b>\n<blockquote expandable>${this.lines.join('\n\n')}</blockquote>`;
+    if (body.length <= this.maxLen) await this.sink.edit(open.messageId, body);
+  }
+
   close(): void {
     this.generation++;
     this.open = undefined;
     this.lastWasTool = false;
-  }
-}
-
-// Coda delle summary via LLM per le tool call di una sessione: le chiamate
-// partono in parallelo ma le righe vanno pushatte in ORDINE (la bubble non deve
-// mostrare le tool in ordine sbagliato). `add()` assegna un indice e restituisce
-// il callback da chiamare quando la summary è pronta; `reset()` a fine turno
-// scarta le summary pendenti (gen) e svuota il buffer.
-//
-// Due contatori distinti: `last` assegna gli indici (0, 1, 2…), `next` è il
-// prossimo indice da fluscare. Senza questa separazione `next` avanzava in
-// `add()` e `flush()` cercava `buffer.has(next)` — sempre l'indice successivo a
-// quello appena bufferizzato — e la coda non fluscava MAI (le tool call non
-// arrivavano su Telegram).
-export class SummarizeQueue {
-  private next = 0; // prossimo indice da fluscare
-  private last = 0; // prossimo indice da assegnare
-  private buffer = new Map<number, string>();
-  private gen = 0;
-
-  constructor(private onLine: (line: string) => void) {}
-
-  add(): (line: string) => void {
-    const index = this.last++;
-    const gen = this.gen;
-    return (line: string) => {
-      if (this.gen !== gen || !line) return; // turno finito: scarta
-      this.buffer.set(index, line);
-      this.flush();
-    };
-  }
-
-  reset(): void {
-    this.gen++;
-    this.buffer.clear();
-    this.next = this.last; // gli indici stantii non bloccano i nuovi
-  }
-
-  private flush(): void {
-    while (this.buffer.has(this.next)) {
-      const line = this.buffer.get(this.next)!;
-      this.buffer.delete(this.next);
-      this.next++;
-      this.onLine(line);
-    }
+    this.lines = [];
+    this.lineIds = [];
   }
 }
 
@@ -1117,10 +907,13 @@ export class TelegramBot {
   private throttler = new EditThrottler(1000);
   private chatId?: number;
   private lastMsg = new Map<string, { messageId: number; text: string; at: number; role: 'user' | 'assistant' }>();
-  // Ultimo testo utente per sessione: hint di lingua per le summary via LLM
-  // (il messaggio utente non finisce in lastMsg — l'echo del transcript è filtrato).
-  private lastUserText = new Map<string, string>();
   private toolBursts = new Map<string, ToolBurstAggregator>();
+  // One card per subagent, keyed by the toolUseId of the Task tool_use — the
+  // same key the subagent's events carry in parentToolUseId.
+  private agentCards = new Map<string, { messageId?: number; taskId: string; card: AgentCard; lastText?: string }>();
+  // Events of a subagent that arrive before the task_started that creates its
+  // card: buffered here so no tool line is lost when the card appears.
+  private orphanAgentLines = new Map<string, string[]>();
   // Fix 1: testi iniettati dal bot per sessione (per sopprimere l'echo del transcript).
   private recentInjected = new Map<string, { text: string; at: number }[]>();
   // Fix 2: flusso delle domande a scelta multipla per sessione (macchina a
@@ -1139,15 +932,6 @@ export class TelegramBot {
   // finché l'utente non seleziona quella sessione (sess:select in onCallback).
   private pendingPermissions = new Map<string, PermissionRequest[]>();
   private pendingDialogs = new Map<string, UserDialog[]>();
-  // Summary via LLM per le tool call: una coda per sessione che bufferizza i
-  // risultati (le chiamate partono in parallelo) e li pusha in ordine. `reset()`
-  // a fine turno (result/errore/domanda/permesso/testo lungo) scarta le summary
-  // pendenti: non aprono bubble dopo la fine.
-  private summarizeQueues = new Map<string, SummarizeQueue>();
-  // Cache delle summary (tool + input → riga): le tool ripetute (stesso file,
-  // stesso comando) non rifanno la chiamata a Ollama. Cap semplice: oltre 200
-  // si svuota (una cache, non un archivio).
-  private summaryCache = new Map<string, string>();
   // Indicatore "sta scrivendo…" per la sessione attiva (chat action, non un messaggio).
   private typing = new TypingIndicator(() => {
     if (!this.chatId) return Promise.resolve();
@@ -1185,6 +969,8 @@ export class TelegramBot {
       { command: 'history', description: 'Show the last messages of a session' },
       { command: 'delete', description: 'Delete a session' },
       { command: 'usage', description: 'Check provider usage (5h / weekly)' },
+      { command: 'context', description: 'Show the active session context used vs max' },
+      { command: 'compact', description: 'Compact the active session history' },
       { command: 'diag', description: 'Daemon diagnostics' },
       { command: 'settings', description: 'View / change user settings' },
       { command: 'help', description: 'Show all commands' },
@@ -1198,8 +984,13 @@ export class TelegramBot {
   // Ogni risposta passa dallo splitter: oltre 4096 caratteri Telegram rigetta il
   // messaggio e il .catch lo farebbe sparire in silenzio.
   private async send(ctx: Context, text: string): Promise<unknown> {
+    const parts = splitHtmlMessage(text);
+    // With a single part the marker would be pure noise.
+    const label = (i: number): string => (parts.length > 1 ? `\n<i>(${i + 1}/${parts.length})</i>` : '');
     let last: unknown;
-    for (const part of splitHtmlMessage(text)) last = await ctx.reply(part, { parse_mode: 'HTML' });
+    for (let i = 0; i < parts.length; i++) {
+      last = await ctx.reply(parts[i] + label(i), { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
+    }
     return last;
   }
 
@@ -1213,10 +1004,14 @@ export class TelegramBot {
   // invece di inventarli.
   private async sendChunked(chatId: number, text: string, extra: Record<string, unknown> = {}, correlation: SendCorrelation = {}): Promise<number | undefined> {
     const parts = splitHtmlMessage(text);
+    // The marker is appended AFTER the split: prepending it to the text would
+    // shift the character count on which splitHtmlMessage decides the cuts.
+    // A single part needs no marker.
+    const label = (i: number): string => (parts.length > 1 ? `\n<i>(${i + 1}/${parts.length})</i>` : '');
     let lastId: number | undefined;
     for (let i = 0; i < parts.length; i++) {
-      const opts = { parse_mode: 'HTML' as const, ...(i === parts.length - 1 ? extra : {}) };
-      const msg = await this.bot.api.sendMessage(chatId, parts[i], opts).catch(err => { log().error('telegram send failed', { ...correlation, chatId, part: i, of: parts.length, err }); return undefined; });
+      const opts = { parse_mode: 'HTML' as const, link_preview_options: { is_disabled: true }, ...(i === parts.length - 1 ? extra : {}) };
+      const msg = await this.bot.api.sendMessage(chatId, parts[i] + label(i), opts).catch(err => { log().error('telegram send failed', { ...correlation, chatId, part: i, of: parts.length, err }); return undefined; });
       if (msg) lastId = msg.message_id;
     }
     return lastId;
@@ -1324,7 +1119,7 @@ export class TelegramBot {
           const chatId = this.chatId;
           if (!chatId) { log().warn('send skipped', { sessionId, kind: 'tool', reason: 'no-chat-bound' }); return false; }
           const ok = await this.throttler.throttled(() =>
-            this.bot.api.editMessageText(chatId, messageId, text, { parse_mode: 'HTML' })
+            this.bot.api.editMessageText(chatId, messageId, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } })
               .then(() => true)
               // C1: il sink non ha l'eventId (non è instradato dentro push(), fuori
               // scope per questa fase) — sessionId + kind bastano a legare questo
@@ -1343,7 +1138,12 @@ export class TelegramBot {
           // tool bubble'. Il valore di ritorno resta undefined: nessun cambio di
           // comportamento, solo il record in più.
           const msg = await this.throttler.throttled(() =>
-            this.bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' })
+            // A Read must not buzz the phone: tool notifications stay silent.
+            this.bot.api.sendMessage(chatId, text, {
+              parse_mode: 'HTML',
+              disable_notification: true,
+              link_preview_options: { is_disabled: true },
+            })
               .catch(err => { log().error('tool bubble send failed', { sessionId, kind: 'tool', err }); return undefined; }));
           return msg?.message_id;
         },
@@ -1353,43 +1153,49 @@ export class TelegramBot {
     return agg;
   }
 
-  // Summary via LLM di una tool call, con l'ingranaggio ⚙️ che la identifica
-  // come tool call. Fallback a `summarizeTool` se Ollama non risponde (timeout
-  // 5s) o restituisce vuoto.
-  private async llmSummarize(model: string, toolName: string, input: Record<string, unknown>, languageHint?: string): Promise<string> {
-    const key = `${toolName}:${JSON.stringify(input).slice(0, 200)}`;
-    const hit = this.summaryCache.get(key);
-    if (hit) return hit;
-    let line: string;
-    try {
-      const llm = await this.deps.ollama.summarize(model, toolName, input, languageHint);
-      line = `⚙️ ${llm}`;
-    } catch {
-      line = summarizeTool(toolName, input);
-    }
-    if (this.summaryCache.size >= 200) this.summaryCache.clear();
-    this.summaryCache.set(key, line);
-    return line;
+  private agentKeyboard(key: string, expanded: boolean): InlineKeyboard {
+    return new InlineKeyboard().text(expanded ? '🙈 Hide' : '👁 Details', `agent:toggle:${key}`);
   }
 
-  // Lancia la summary per una tool call: chiamate in parallelo, risultati
-  // bufferizzati per indice e pushati in ordine (la bubble non deve mostrare le
-  // tool in ordine sbagliato). Se il turno è finito nel frattempo (gen cambiato),
-  // la summary viene scartata.
-  private summarizeToolLine(sessionId: string, model: string, toolName: string, input: Record<string, unknown>, languageHint?: string): void {
-    let q = this.summarizeQueues.get(sessionId);
-    if (!q) {
-      q = new SummarizeQueue(line => this.toolBurst(sessionId).push(htmlEscape(line)));
-      this.summarizeQueues.set(sessionId, q);
+  // task_progress can arrive very often: the EditThrottler allows 1 op/s per
+  // chat, so a card redrawn identically would steal the model text's turn. The
+  // edit only fires if the rendered text actually changed.
+  private async refreshAgentCard(key: string): Promise<void> {
+    const entry = this.agentCards.get(key);
+    const chatId = this.chatId;
+    if (!entry) return;
+    if (!chatId) { log().warn('send skipped', { kind: 'agent', reason: 'no-chat-bound' }); return; }
+    const text = renderAgentCard(entry.card);
+    if (text === entry.lastText) return;
+    const opts = {
+      parse_mode: 'HTML' as const,
+      link_preview_options: { is_disabled: true },
+      reply_markup: this.agentKeyboard(key, entry.card.expanded),
+    };
+    if (entry.messageId === undefined) {
+      const msg = await this.throttler.throttled(() =>
+        this.bot.api.sendMessage(chatId, text, { ...opts, disable_notification: true })
+          .catch(err => { log().error('agent card send failed', { kind: 'agent', err }); return undefined; }));
+      if (msg?.message_id !== undefined) { entry.messageId = msg.message_id; entry.lastText = text; }
+      return;
     }
-    void this.llmSummarize(model, toolName, input, languageHint).then(q.add());
+    const ok = await this.throttler.throttled(() =>
+      this.bot.api.editMessageText(chatId, entry.messageId!, text, opts)
+        .then(() => true)
+        .catch(err => { log().error('agent card edit failed', { kind: 'agent', err }); return false; }));
+    if (ok) entry.lastText = text;
   }
 
-  // Fine turno (o testo lungo): le summary pendenti di questa sessione vengono
-  // scartate — non devono aprire bubble dopo la risposta/errore.
-  private resetSummarize(sessionId: string): void {
-    this.summarizeQueues.get(sessionId)?.reset();
+  // A task_updated that never arrives would leave the card in "⏳" forever: at
+  // end of turn every card still running is interrupted.
+  private closeAgentCards(): void {
+    for (const [key, entry] of this.agentCards) {
+      if (entry.card.status === 'running') { entry.card.status = 'killed'; void this.refreshAgentCard(key); }
+    }
+    this.agentCards.clear();
+    this.orphanAgentLines.clear();
   }
+
 
   private isAuthorized(ctx: Context): boolean {
     if (!isPrivateChat(ctx.chat)) return false;
@@ -1421,7 +1227,7 @@ export class TelegramBot {
     const bot = this.bot;
     bot.command('start', ctx => this.safe(ctx, 'start', () => this.onStart(ctx)));
     bot.command('help', ctx => this.safe(ctx, 'help', async () => {
-      if (this.authorize(ctx)) await this.send(ctx, 'Commands: /rc [on|off|status] (no arg toggles) · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /usage · /diag · /settings · /help');
+      if (this.authorize(ctx)) await this.send(ctx, 'Commands: /rc [on|off|status] (no arg toggles) · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /usage · /context · /compact · /diag · /settings · /help');
     }));
     bot.command('rc', ctx => this.safe(ctx, 'rc', () => this.onRc(ctx)));
     bot.command('sessions', ctx => this.safe(ctx, 'sessions', () => this.onSessions(ctx)));
@@ -1433,6 +1239,8 @@ export class TelegramBot {
     bot.command('history', ctx => this.safe(ctx, 'history', () => this.onHistory(ctx)));
     bot.command('delete', ctx => this.safe(ctx, 'delete', () => this.onDelete(ctx)));
     bot.command('usage', ctx => this.safe(ctx, 'usage', () => this.onUsage(ctx)));
+    bot.command('context', ctx => this.safe(ctx, 'context', () => this.onContext(ctx)));
+    bot.command('compact', ctx => this.safe(ctx, 'compact', () => this.onCompact(ctx)));
     bot.command('settings', ctx => this.safe(ctx, 'settings', () => this.onSettings(ctx)));
     bot.command('diag', ctx => this.safe(ctx, 'diag', async () => {
       if (!this.authorize(ctx)) return;
@@ -1660,6 +1468,58 @@ export class TelegramBot {
       await this.sendOllamaUsage(ctx);
     } else {
       await this.sendAnthropicUsage(ctx);
+    }
+  }
+
+  // Context of the active session: the tokens the CLI actually sent in the last
+  // turn (from the transcript usage) vs the model's context window. Reading the
+  // transcript makes this work for headless and terminal sessions alike.
+  private async onContext(ctx: Context): Promise<void> {
+    if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
+    const active = this.deps.manager.getActive();
+    const session = active ? this.deps.manager.get(active) : this.deps.manager.list()[0];
+    if (!session) { await this.send(ctx, 'No session yet. Create one with /new or /attach.'); return; }
+    const file = resolveSessionTranscript(this.deps.config.projectsDir, session.projectDir, session.claudeSessionId, Date.parse(session.createdAt), session.transcriptFile);
+    let used: number | undefined;
+    if (file) {
+      try { used = lastContextTokens(readFileSync(file, 'utf8').split('\n')); } catch { /* transcript unreadable: report no data */ }
+    }
+    let max: number | undefined;
+    if (session.model) {
+      max = isAnthropicModel(session.model)
+        ? anthropicContextWindow(session.model)
+        : await this.deps.ollama.modelContext(session.model);
+    }
+    await this.send(ctx, renderContext(used, max, session.model));
+  }
+
+  // /compact runs the CLI's compaction on the active session: the CLI treats a
+  // leading-slash prompt as a command, so headless sessions get it through
+  // runTurn and terminal ones by pasting into the tmux pane (recording it so
+  // the echoed line is not re-sent to Telegram).
+  private async onCompact(ctx: Context): Promise<void> {
+    if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
+    const active = this.deps.manager.getActive();
+    const s = active ? this.deps.manager.get(active) : undefined;
+    if (!s) { await this.send(ctx, 'No active session.'); return; }
+    const id8 = s.id.slice(0, 8);
+    if (s.kind === 'headless') {
+      if (this.deps.sdk.isBusy(s.id)) {
+        await this.send(ctx, '⏳ Session busy: wait for it to go idle before compacting.');
+        return;
+      }
+      this.track(this.deps.sdk.runTurn(s.id, '/compact'), 'runTurn compact');
+      await this.send(ctx, `🧹 Compacting session <code>${htmlEscape(id8)}</code>…`);
+    } else if (s.tmuxTarget) {
+      try {
+        await this.deps.tmux.injectText(s.tmuxTarget, '/compact');
+        this.recordInjected(s.id, '/compact');
+        await this.send(ctx, `🧹 Compacting session <code>${htmlEscape(id8)}</code>…`);
+      } catch (e) {
+        await this.send(ctx, `❌ ${htmlEscape(e instanceof Error ? e.message : String(e))}`);
+      }
+    } else {
+      await this.send(ctx, 'This session is not running in tmux, so /compact can’t be sent.');
     }
   }
 
@@ -2324,6 +2184,12 @@ export class TelegramBot {
           await this.dlgSkip(ctx, parsed);
           break;
         }
+        case 'agent-toggle': {
+          const entry = this.agentCards.get(parsed.id);
+          if (entry) { entry.card.expanded = !entry.card.expanded; await this.refreshAgentCard(parsed.id); }
+          await ctx.answerCallbackQuery();
+          return;
+        }
       }
     } catch {
       await ctx.answerCallbackQuery({ text: 'Invalid data' });
@@ -2373,10 +2239,8 @@ export class TelegramBot {
     // restringe; `?? ''` è sicuro perché il filtro message:text scatta solo su testi.
     const text = ctx.message.text ?? '';
     if (!this.deps.manager.isArmed()) { await this.send(ctx, '🔒 Remote control is off. Send /rc on.'); return; }
-    // hint di lingua per le summary via LLM: l'ultimo testo utente della sessione.
     const active = this.deps.manager.getActive();
     const session = active ? this.deps.manager.get(active) : this.deps.manager.list()[0];
-    if (session) this.lastUserText.set(session.id, text);
     // "Edit plan" in attesa: il testo dell'utente è il nuovo piano.
     if (session && this.pendingPlanEdits.has(session.id)) {
       await this.answerPlanEdit(session.id, text);
@@ -2404,9 +2268,15 @@ export class TelegramBot {
         }
       }
     }
-    // I comandi del bot sono già gestiti da grammy (bot.command). Quelli che
-    // arrivano qui (slash command di Claude: /clear, /compact, /exit,
-    // /frontend-release, …) vengono inoltrati alla sessione attiva, slash incluso.
+    // I comandi del bot sono già gestiti da grammy (bot.command); uno slash
+    // command che arriva qui non è nostro. Inoltrarlo alla sessione può
+    // impallarla (es. /context è una UI interattiva del CLI che aspetta input
+    // e blocca il turno): meglio un errore esplicito che pasticciare il prompt
+    // della sessione.
+    if (parseCommand(text).kind === 'unknown') {
+      await this.send(ctx, 'Unknown command. Send /help to list the available commands.');
+      return;
+    }
     await this.routeMessageToSession(ctx, text);
   }
 
@@ -2497,25 +2367,28 @@ export class TelegramBot {
       if (!gate.deliver) {
         // Fix 1: l'echo di un testo iniettato dal bot non viene reinoltrato, e
         // solo in quel caso (motivo == 'injected-echo', non un qualunque
-        // scarto) la bolla tool va chiusa e le summary pendenti scartate — per
-        // un evento scartato per altro motivo (disarmato, sessione non
-        // selezionata) questa sessione potrebbe non essere quella in cui
-        // l'iniezione sta effettivamente avvenendo.
-        if (gate.reason === 'injected-echo') { this.toolBurst(e.sessionId).close(); this.resetSummarize(e.sessionId); }
+        // scarto) la bolla tool va chiusa — per un evento scartato per altro
+        // motivo (disarmato, sessione non selezionata) questa sessione
+        // potrebbe non essere quella in cui l'iniezione sta effettivamente
+        // avvenendo.
+        if (gate.reason === 'injected-echo') {
+          void this.toolBurst(e.sessionId).collapse();
+          this.toolBurst(e.sessionId).close();
+        }
         return;
       }
+      // Text of a subagent: if its card exists, it stays there. If it does NOT
+      // exist (missing tool_use_id, or task_started never arrived) the event
+      // flows to the main stream instead of vanishing: losing the ordering is
+      // better than losing visibility.
+      if (e.parentToolUseId && this.agentCards.has(e.parentToolUseId)) return;
       if (e.role === 'assistant') this.typing.stop(); // il testo è già l'indicatore
       const burst = this.toolBurst(e.sessionId);
-      if (narrationPlan(e.role, e.text, burst.isOpen()) === 'merge') {
-        // narrazione breve del modello mentre la bubble tool è aperta: si fonde
-        // dentro (niente messaggio extra) — il grouping non si rompe più a ogni
-        // "Ora leggo X…" tra una tool call e l'altra.
-        log().info('event merged into tool bubble', { eventId: e.eventId, sessionId: e.sessionId, kind: 'text' });
-        void burst.push(mdToHtml(e.text));
-        return;
-      }
+      // Any text — the user's or the model's — ends the tool burst: the model's
+      // narration is its own message, and the next tool call opens a fresh
+      // bubble (see ToolBurstAggregator).
+      void burst.collapse();
       burst.close();
-      this.resetSummarize(e.sessionId);
       log().info('event delivering', { eventId: e.eventId, sessionId: e.sessionId, kind: 'text', role: e.role });
       // sia le headless che i transcript delle terminali arrivano come markdown.
       void this.forwardText(e.sessionId, mdToHtml(e.text), e.role, e.eventId);
@@ -2546,8 +2419,8 @@ export class TelegramBot {
       // bloccata per sempre senza modo di rispondere da Telegram. onSessionPrompt
       // decide se mostrarla subito (sessione attiva) o lasciarla in pending
       // (mostrata quando l'utente ci seleziona sopra, vedi sess:select).
+      void this.toolBurst(sessionId).collapse();
       this.toolBurst(sessionId).close();
-      this.resetSummarize(sessionId);
       // C2: 'event delivering' NON viene più loggato qui — a questo punto non è
       // ancora vero: onSessionPrompt può accodare il set invece di mostrarlo
       // (sessione non selezionata, o un'altra domanda già a schermo). Il log
@@ -2560,20 +2433,71 @@ export class TelegramBot {
     });
     bus.on('session.tool', e => {
       if (!this.passes('tool', e.sessionId, e.eventId).deliver) return;
-      if (e.kind === 'tool_use' && e.input) {
-        this.typing.start(); // il modello sta lavorando di nuovo
-        // riassunto leggibile via LLM nella lingua della conversazione (niente
-        // JSON grezzo); fallback a summarizeTool se Ollama non risponde.
-        const session = this.deps.manager.get(e.sessionId);
-        const model = session?.model ?? this.deps.config.defaultModel;
-        const hint = this.lastUserText.get(e.sessionId);
-        this.summarizeToolLine(e.sessionId, model, e.toolName, e.input, hint);
+      if (e.parentToolUseId) {
+        // Activity of a subagent: it does not enter the main stream nor the
+        // tool bubble, it goes to its own card.
+        if (e.kind === 'tool_use' && e.input) {
+          const session = this.deps.manager.get(e.sessionId);
+          const line = renderToolLine(describeTool(e.toolName, e.input, session?.projectDir));
+          const entry = this.agentCards.get(e.parentToolUseId);
+          if (entry) { entry.card.lines.push(line); void this.refreshAgentCard(e.parentToolUseId); }
+          else {
+            const buf = this.orphanAgentLines.get(e.parentToolUseId) ?? [];
+            buf.push(line);
+            this.orphanAgentLines.set(e.parentToolUseId, buf);
+          }
+        }
+        return;
       }
+      if (e.kind === 'tool_result') {
+        if (e.isError && e.toolUseId) {
+          const text = typeof e.result === 'string' ? e.result : JSON.stringify(e.result ?? '');
+          void this.toolBurst(e.sessionId).markFailed(e.toolUseId, text);
+        }
+        return;
+      }
+      if (e.kind !== 'tool_use' || !e.input) return;
+      this.typing.start(); // il modello sta lavorando di nuovo
+      const session = this.deps.manager.get(e.sessionId);
+      const line = renderToolLine(describeTool(e.toolName, e.input, session?.projectDir));
+      void this.toolBurst(e.sessionId).push(line, e.toolUseId);
+    });
+    bus.on('session.agent', e => {
+      if (!this.passes('tool', e.sessionId, e.eventId).deliver) return;
+      const key = e.toolUseId ?? e.taskId;
+      if (e.phase === 'started') {
+        const card: AgentCard = {
+          subagentType: e.subagentType, description: e.description,
+          lines: this.orphanAgentLines.get(key) ?? [], expanded: false, status: 'running',
+        };
+        this.orphanAgentLines.delete(key);
+        this.agentCards.set(key, { taskId: e.taskId, card });
+        void this.refreshAgentCard(key);
+        return;
+      }
+      // task_updated carries no tool_use_id: fall back to the task id stored on
+      // the card, or the card would never learn about its completion.
+      let cardKey: string | undefined = this.agentCards.has(key) ? key : undefined;
+      if (!cardKey) {
+        for (const [k, v] of this.agentCards) if (v.taskId === e.taskId) { cardKey = k; break; }
+      }
+      if (!cardKey) return;
+      const entry = this.agentCards.get(cardKey);
+      if (!entry) return;
+      if (e.phase === 'progress') {
+        entry.card.toolUses = e.toolUses ?? entry.card.toolUses;
+        entry.card.durationMs = e.durationMs ?? entry.card.durationMs;
+        entry.card.lastToolName = e.lastToolName ?? entry.card.lastToolName;
+      } else {
+        entry.card.status = e.status ?? 'completed';
+        entry.card.error = e.error;
+      }
+      void this.refreshAgentCard(cardKey);
     });
     bus.on('session.permission', ({ permission }) => {
       if (!this.passes('permission', permission.sessionId, undefined).deliver) return;
+      void this.toolBurst(permission.sessionId).collapse();
       this.toolBurst(permission.sessionId).close();
-      this.resetSummarize(permission.sessionId);
       // Stessa logica delle domande (onSessionPrompt): mostrata subito solo se
       // la sessione è quella selezionata, altrimenti in coda — ma qui il
       // countdown NON parte finché non viene davvero mostrata (arm(), dentro
@@ -2592,8 +2516,8 @@ export class TelegramBot {
     });
     bus.on('session.dialog', ({ sessionId, dialog }) => {
       if (!this.passes('dialog', sessionId, undefined).deliver) return;
+      void this.toolBurst(sessionId).collapse();
       this.toolBurst(sessionId).close();
-      this.resetSummarize(sessionId);
       const known = this.deps.manager.get(sessionId);
       if (!known || sessionId === this.deps.manager.getActive()) {
         this.track(this.showDialog(sessionId, dialog), 'dialog send');
@@ -2606,8 +2530,9 @@ export class TelegramBot {
     bus.on('session.result', e => {
       if (!this.passes('result', e.sessionId, undefined).deliver) return;
       this.typing.stop(); // fine turno: niente più "sta scrivendo"
+      void this.toolBurst(e.sessionId).collapse();
       this.toolBurst(e.sessionId).close(); // fine turno headless: chiude la raffica di tool
-      this.resetSummarize(e.sessionId); // scarta le summary pendenti
+      this.closeAgentCards();
       // solo segnale di completamento: il testo della risposta è già arrivato
       // streammato (session.text → mdToHtml). Re-inviarlo qui (come faceva la
       // vecchia notifica `✅ <result>`) duplicava l'ultimo messaggio, e senza
@@ -2617,8 +2542,9 @@ export class TelegramBot {
     bus.on('session.error', e => {
       if (!this.passes('error', e.sessionId, e.eventId).deliver) return;
       this.typing.stop(); // errore: niente più "sta scrivendo"
+      void this.toolBurst(e.sessionId).collapse();
       this.toolBurst(e.sessionId).close();
-      this.resetSummarize(e.sessionId);
+      this.closeAgentCards();
       const flow = this.questionFlows.get(e.sessionId);
       if (flow) this.deleteFlow(flow); // errore: niente domande pendenti
       this.pendingPlanEdits.delete(e.sessionId);

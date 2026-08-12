@@ -1,6 +1,46 @@
 # Changelog
 
-## [Unreleased]
+## [0.5.0] - 2026-08-12
+
+- **Readable tool calls.** Tool calls are described in words instead of raw
+  JSON: an icon and name per tool (`📖 Read`, `⚡ Bash`, `🧩 Skill`,
+  `🔌 MCP <server>`), the target (file, pattern, query, subagent type) in a
+  `code` chip, the human `description` the CLI writes, and the Bash command on
+  its own line. Absolute paths are shortened relative to the project (or to
+  `~`); failed calls are marked `❌` with the first line of the error.
+- **Extended markdown.** Replies render fenced code with the language hint,
+  blockquotes, strikethrough, nested lists, horizontal rules and aligned
+  tables; headings get a blank line before them so sections separate.
+- **Tool-bubble hygiene.** Tool bubbles are silent (`disable_notification`) and
+  preview-free, and at the end of a turn they collapse into a `▸ N steps`
+  expandable blockquote. Split messages carry a `(i/n)` continuation marker;
+  link previews are disabled on every streamed message.
+- **Subagent cards.** In headless sessions each subagent's activity lives in
+  its own `🤖 Agent` card — collapsed it shows the type, the task and its
+  progress, `👁 Details` expands the tool calls, and it flips to `✅`/`❌`
+  when done — instead of mixing into the main chat. Terminal sessions keep
+  only the `🤖 Agent` line.
+- **Ollama tool-call summarizer removed.** The CLI already writes a human
+  `description` on Bash calls, so summarizing cost a local model call (with a
+  5s timeout per call) for a worse result.
+- **`/context` command.** Shows the active session's context window used vs
+  max: the used figure comes from the last assistant turn's token usage in the
+  session transcript, the max from the Ollama model context (or a known
+  Anthropic window). Works for headless and terminal sessions alike.
+- **`/compact` command.** Compacts the active session's history from the
+  phone: headless sessions get the CLI's `/compact` as a prompt, terminal ones
+  pasted into the tmux pane. The session must be idle to compact.
+- **Unknown slash commands are no longer forwarded.** A `/something` the bot
+  doesn't own used to be pasted verbatim into the active session; now it gets
+  an "Unknown command" reply. Forwarding could leave a session stuck — Claude
+  Code's own `/context`, for instance, is an interactive UI that blocks a turn
+  while waiting for input.
+- **Tool grouping follows text boundaries.** Consecutive tool calls stay in
+  one bubble until a normal message — yours or the model's — arrives; the next
+  tool calls then open a fresh bubble. The old time window and the merging of
+  short model narrations into the tool bubble are gone: the model's text is
+  always its own message, so a slow run (a model pausing between edits) no
+  longer splits one burst into one bubble per call.
 
 ## [0.4.0] - 2026-08-11
 

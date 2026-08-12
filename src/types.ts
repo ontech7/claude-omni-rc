@@ -62,7 +62,18 @@ export interface UserDialog {
 
 export type BusEvent =
   | { type: 'session.updated'; sessionId: string }
-  | { type: 'session.text'; sessionId: string; role: 'user' | 'assistant'; text: string; eventId?: string }
+  | {
+      type: 'session.text';
+      sessionId: string;
+      role: 'user' | 'assistant';
+      text: string;
+      eventId?: string;
+      // Non-null means the event comes from a subagent, and the value is the
+      // id of the Task tool_use that spawned it. Without this field the bot
+      // cannot tell a subagent's activity apart from the main session's, and
+      // the two mix into a single linear chat.
+      parentToolUseId?: string;
+    }
   | {
       type: 'session.prompt';
       sessionId: string;
@@ -88,8 +99,24 @@ export type BusEvent =
       result?: unknown;
       isError?: boolean;
       eventId?: string;
+      parentToolUseId?: string;
     }
   | { type: 'session.permission'; permission: PermissionRequest }
   | { type: 'session.dialog'; sessionId: string; dialog: UserDialog }
   | { type: 'session.result'; sessionId: string; result: string; isError: boolean }
+  | {
+      type: 'session.agent';
+      sessionId: string;
+      taskId: string;
+      toolUseId?: string;   // the Task tool_use: correlation key with parentToolUseId
+      phase: 'started' | 'progress' | 'done';
+      subagentType?: string;
+      description?: string;
+      toolUses?: number;
+      durationMs?: number;
+      lastToolName?: string;
+      status?: 'completed' | 'failed' | 'killed';
+      error?: string;
+      eventId?: string;
+    }
   | { type: 'session.error'; sessionId: string; message: string; eventId?: string };

@@ -16,7 +16,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ query: (...args: unknown[]) =
 function makeDriver() {
   const bus = new Bus();
   const events: unknown[] = [];
-  for (const t of ['session.text', 'session.tool', 'session.result', 'session.error', 'session.updated'] as const) {
+  for (const t of ['session.text', 'session.tool', 'session.result', 'session.error', 'session.updated', 'session.agent'] as const) {
     bus.on(t, e => events.push(e));
   }
   const config = loadConfig({ OLLAMA_BASE_URL: 'http://127.0.0.1:11434' });
@@ -340,5 +340,76 @@ describe('SdkDriver', () => {
     queryMock.mockImplementationOnce(async function* () { yield resultMsg(withEffort.id, 'ok'); });
     await sdk2.runTurn(withEffort.id, 'hello');
     expect(queryMock.mock.calls[0][0].options.effort).toBe('high');
+  });
+  it('propagates parent_tool_use_id on the events of a subagent', async () => {
+    const { sdk, session, events } = makeDriver();
+    queryMock.mockImplementationOnce(async function* () {
+      yield {
+        type: 'assistant', uuid: 'u', session_id: session.id,
+        message: { id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'tool_use', id: 'tu-9', name: 'Read', input: { file_path: '/a.ts' } }] },
+        parent_tool_use_id: 'task-tool-1',
+      };
+      yield resultMsg(session.id, 'done');
+    });
+    await sdk.runTurn(session.id, 'vai');
+    const tools = events.filter(e => (e as any).type === 'session.tool');
+    expect((tools[0] as any).parentToolUseId).toBe('task-tool-1');
+  });
+  it('leaves parentToolUseId unset for the main session', async () => {
+    const { sdk, session, events } = makeDriver();
+    queryMock.mockImplementationOnce(async function* () {
+      yield assistantText(session.id, 'ciao');
+      yield resultMsg(session.id, 'done');
+    });
+    await sdk.runTurn(session.id, 'vai');
+    const texts = events.filter(e => (e as any).type === 'session.text');
+    expect((texts[0] as any).parentToolUseId).toBeUndefined();
+  });
+  it('translates task_started into session.agent', async () => {
+    const { sdk, session, events } = makeDriver();
+    queryMock.mockImplementationOnce(async function* () {
+      yield {
+        type: 'system', subtype: 'task_started', uuid: 'u', session_id: session.id,
+        task_id: 't1', tool_use_id: 'task-tool-1',
+        description: 'find the rendering points', subagent_type: 'Explore',
+      };
+      yield resultMsg(session.id, 'done');
+    });
+    await sdk.runTurn(session.id, 'vai');
+    const agents = events.filter(e => (e as any).type === 'session.agent');
+    expect(agents[0]).toMatchObject({ phase: 'started', taskId: 't1', toolUseId: 'task-tool-1', subagentType: 'Explore' });
+  });
+  it('carries the task_progress counters', async () => {
+    const { sdk, session, events } = makeDriver();
+    queryMock.mockImplementationOnce(async function* () {
+      yield {
+        type: 'system', subtype: 'task_progress', uuid: 'u', session_id: session.id,
+        task_id: 't1', tool_use_id: 'task-tool-1', description: 'd',
+        usage: { total_tokens: 10, tool_uses: 7, duration_ms: 42_000 }, last_tool_name: 'Grep',
+      };
+      yield resultMsg(session.id, 'done');
+    });
+    await sdk.runTurn(session.id, 'vai');
+    const agents = events.filter(e => (e as any).type === 'session.agent');
+    expect(agents[0]).toMatchObject({ phase: 'progress', toolUses: 7, durationMs: 42_000, lastToolName: 'Grep' });
+  });
+  it('translates a completed task_updated into phase done', async () => {
+    const { sdk, session, events } = makeDriver();
+    queryMock.mockImplementationOnce(async function* () {
+      yield { type: 'system', subtype: 'task_updated', uuid: 'u', session_id: session.id, task_id: 't1', patch: { status: 'completed' } };
+      yield resultMsg(session.id, 'done');
+    });
+    await sdk.runTurn(session.id, 'vai');
+    const agents = events.filter(e => (e as any).type === 'session.agent');
+    expect(agents[0]).toMatchObject({ phase: 'done', status: 'completed' });
+  });
+  it('does not emit session.agent for an intermediate status', async () => {
+    const { sdk, session, events } = makeDriver();
+    queryMock.mockImplementationOnce(async function* () {
+      yield { type: 'system', subtype: 'task_updated', uuid: 'u', session_id: session.id, task_id: 't1', patch: { status: 'running' } };
+      yield resultMsg(session.id, 'done');
+    });
+    await sdk.runTurn(session.id, 'vai');
+    expect(events.some(e => (e as any).type === 'session.agent')).toBe(false);
   });
 });

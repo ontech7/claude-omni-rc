@@ -109,6 +109,11 @@ export class SdkDriver {
       });
       let finished = false;
       for await (const msg of stream) {
+        // The SDK marks every message produced by a subagent with
+        // parent_tool_use_id, and by default already emits its tool_use /
+        // tool_result blocks. Propagating it is what lets the bot keep those
+        // out of the main stream; ignoring it was the cause of the mixing.
+        const parentToolUseId = ('parent_tool_use_id' in msg && msg.parent_tool_use_id) ? msg.parent_tool_use_id : undefined;
         if (msg.session_id) manager.setClaudeSessionId(sessionId, msg.session_id);
         if (msg.type === 'assistant') {
           manager.touch(sessionId);
@@ -120,8 +125,8 @@ export class SdkDriver {
             const eventId = newEventId();
             // stesso schema del watcher per 'text': role e chars, non solo l'id —
             // altrimenti un filtro su questi campi salterebbe in silenzio gli eventi sdk.
-            log().info('event emitted', { eventId, sessionId, source: 'sdk', kind: 'text', role: 'assistant', chars: text.length });
-            bus.emit({ type: 'session.text', sessionId, role: 'assistant', text, eventId });
+            log().info('event emitted', { eventId, sessionId, source: 'sdk', kind: 'text', role: 'assistant', chars: text.length, parentToolUseId });
+            bus.emit({ type: 'session.text', sessionId, role: 'assistant', text, eventId, parentToolUseId });
           }
           for (const block of msg.message.content) {
             if (block.type === 'tool_use') {
@@ -141,10 +146,10 @@ export class SdkDriver {
                 // kind: 'tool' allinea il campo log al vocabolario del bot (GateKind),
                 // lo stesso usato dal transcript-watcher: toolUseId distingue comunque
                 // una tool_use da un tool_result senza bisogno di due valori diversi.
-                log().info('event emitted', { eventId, sessionId, source: 'sdk', kind: 'tool', toolName: block.name, toolUseId: block.id });
+                log().info('event emitted', { eventId, sessionId, source: 'sdk', kind: 'tool', toolName: block.name, toolUseId: block.id, parentToolUseId });
                 bus.emit({
                   type: 'session.tool', sessionId, toolName: block.name, kind: 'tool_use',
-                  toolUseId: block.id, input: block.input as Record<string, unknown>, eventId,
+                  toolUseId: block.id, input: block.input as Record<string, unknown>, eventId, parentToolUseId,
                 });
               }
             }
@@ -156,13 +161,38 @@ export class SdkDriver {
               // stesso schema del watcher per 'tool_result': la chiave toolName c'è
               // sempre, qui vuota perché l'SDK non lo riporta sul blocco tool_result
               // (lo stesso motivo per cui l'evento emesso sotto ha toolName: '').
-              log().debug('event emitted', { eventId, sessionId, source: 'sdk', kind: 'tool', toolName: '', toolUseId: block.tool_use_id, isError: block.is_error });
+              log().debug('event emitted', { eventId, sessionId, source: 'sdk', kind: 'tool', toolName: '', toolUseId: block.tool_use_id, isError: block.is_error, parentToolUseId });
               bus.emit({
                 type: 'session.tool', sessionId, toolName: '', kind: 'tool_result',
-                toolUseId: block.tool_use_id, result: block.content, isError: block.is_error, eventId,
+                toolUseId: block.tool_use_id, result: block.content, isError: block.is_error, eventId, parentToolUseId,
               });
             }
           }
+        } else if (msg.type === 'system' && (msg.subtype === 'task_started' || msg.subtype === 'task_progress' || msg.subtype === 'task_updated')) {
+          const eventId = newEventId();
+          if (msg.subtype === 'task_updated') {
+            const status = msg.patch?.status;
+            // Only terminal states close the card: 'running'/'pending'/'paused'
+            // add nothing to what task_progress already says.
+            if (status !== 'completed' && status !== 'failed' && status !== 'killed') continue;
+            bus.emit({
+              type: 'session.agent', sessionId, taskId: msg.task_id, phase: 'done',
+              status, error: msg.patch?.error, eventId,
+            });
+          } else if (msg.subtype === 'task_started') {
+            bus.emit({
+              type: 'session.agent', sessionId, taskId: msg.task_id, toolUseId: msg.tool_use_id,
+              phase: 'started', subagentType: msg.subagent_type, description: msg.description, eventId,
+            });
+          } else {
+            bus.emit({
+              type: 'session.agent', sessionId, taskId: msg.task_id, toolUseId: msg.tool_use_id,
+              phase: 'progress', subagentType: msg.subagent_type, description: msg.description,
+              toolUses: msg.usage?.tool_uses, durationMs: msg.usage?.duration_ms,
+              lastToolName: msg.last_tool_name, eventId,
+            });
+          }
+          log().debug('event emitted', { eventId, sessionId, source: 'sdk', kind: 'agent', taskId: msg.task_id, phase: msg.subtype });
         } else if (msg.type === 'result') {
           finished = true;
           if (msg.subtype === 'success') {

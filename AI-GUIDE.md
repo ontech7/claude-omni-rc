@@ -53,6 +53,7 @@ npm install
 | pick the provider for an `omni-rc` session | no `-m` → Ollama (`DEFAULT_MODEL` from `.env`); `-m claude-*`/`opus`/`sonnet`/`haiku`/`fable` → Anthropic; `ANTHROPIC_BASE_URL` in `.env` overrides both |
 | started claude without tmux and want remote control | you can't move a running process into tmux — restart it with `omni-rc <name>`; the `SessionStart` hook warns you when a session starts outside tmux |
 | see what the model is writing | select the session with `/sessions`: its messages stream as a chat automatically |
+| see a subagent's work in a headless session | a `🤖 Agent` card appears per subagent with its progress; `👁 Details` / `🙈 Hide` expand/collapse its tool calls (headless only — a subagent in a terminal session shows just the `🤖 Agent` line) |
 | answer a multiple-choice question | the question arrives as a `❓` message with one button per option; tap it (or reply with the option number/text) |
 | auto-attach every session on start | `./install.sh` already adds the `SessionStart` + `PermissionRequest` hooks (see `~/.claude/settings.json`) |
 | attach a terminal (tmux) session | from Telegram: `/attach <project>` (session must be named `claude:<project>`) |
@@ -63,6 +64,8 @@ npm install
 | check what sessions exist | from Telegram: `/sessions` or `/status` |
 | check / change your settings from the phone | from Telegram: `/settings` (list), `/settings <key> <value>` (set), `/settings reset <key>` — saved to `settings.json`, applies at the next restart |
 | check provider usage (5h / weekly) | from Telegram: `/usage` — Anthropic reads it via the Agent SDK directly; any other provider (Ollama, a custom proxy) shells out to `ollama-usage`, which must be installed and authenticated on the daemon's machine |
+| see how much context the active session has used | from Telegram: `/context` — tokens used vs max (from the transcript's last usage and the model's context window) |
+| compact a session's history from the phone | from Telegram: `/compact` on the active session (headless: sent as a prompt; terminal: pasted into the tmux pane) |
 | run it without launchd | `npm run dev` in the repo (foreground) |
 | uninstall claude-omni-rc | `./install.sh --uninstall` (asks about the Ollama model, then removes launchd, the hooks, and on confirmation the state dir; `.env` is kept) |
 
@@ -90,6 +93,12 @@ npm install
 - `/usage` — 5h/weekly usage window for the provider of the active session (or
   `DEFAULT_MODEL`): Anthropic natively; any other provider via `ollama-usage`,
   which must be installed and authenticated on the daemon's machine.
+- `/context` — the active session's context window used vs max (tokens): the
+  used figure comes from the last assistant turn's usage in the session
+  transcript, the max from the Ollama model context or a known Anthropic window.
+- `/compact` — compact the active session's history (runs the CLI's `/compact`:
+  headless sessions get it as a prompt, terminal ones pasted into the tmux
+  pane). The session must be idle to compact.
 - `/diag` — daemon state, sessions, pending interactions and recent errors;
   per session it shows the model, the reasoning effort and the git branch when
   available (from the structured log at `~/.claude-omni-rc/logs/daemon.jsonl`).
@@ -101,8 +110,9 @@ npm install
 
 Plain messages go to the active session: headless sessions receive them as a
 new turn, terminal sessions as pasted input + Enter (so the human can answer
-interactive prompts). Slash commands the bot doesn't own (`/clear`, `/compact`,
-`/exit`, custom commands, …) are forwarded verbatim to the active session.
+interactive prompts). Slash commands the bot doesn't own are **not** forwarded:
+they get an "Unknown command" reply (some CLI commands like `/context` are
+interactive UIs that would leave the session stuck waiting for input).
 Selecting a session in `/sessions` also shows its last messages.
 Terminal sessions must run inside tmux (`claude:<project>`) to receive text.
 

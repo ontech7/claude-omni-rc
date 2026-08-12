@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
-import { resolveHeadlessProjectDir, isPrivateChat, splitHtmlMessage, parseCommand, parseNewFlags, parseSettingsCommand, formatSettingsReport, formatSettingsKey, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, mdToHtml, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, balanceHtml, truncateAtWord, stopReply, TypingIndicator, summarizeTool, narrationPlan, SummarizeQueue, answerSummary, answerToKeys, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, formatPaneContext, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
+import { resolveHeadlessProjectDir, isPrivateChat, parseCommand, parseNewFlags, parseSettingsCommand, formatSettingsReport, formatSettingsKey, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, stopReply, TypingIndicator, answerSummary, answerToKeys, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, formatPaneContext, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
 import type { ToolBurstSink, PromptKeyEntry } from '../bot/telegram.js';
+import { truncateAtWord, mdToHtml, splitHtmlMessage } from '../bot/render.js';
 import { loadConfig } from '../src/config.js';
 
 describe('formatPct / formatResetAt', () => {
@@ -129,6 +130,18 @@ describe('parseCallbackData extensions', () => {
     expect(parseCallbackData('dlg:retry:d1')).toEqual({ action: 'dlg-retry', id: 'd1' });
     expect(parseCallbackData('dlg:skip:d1')).toEqual({ action: 'dlg-skip', id: 'd1' });
     expect(parseCallbackData('perm:edit:p1')).toEqual({ action: 'perm-edit', id: 'p1' });
+  });
+});
+
+describe('parseCallbackData for agent cards', () => {
+  it('recognizes the toggle', () => {
+    expect(parseCallbackData('agent:toggle:t-1')).toEqual({ action: 'agent-toggle', id: 't-1' });
+  });
+
+  it('callback_data stays under 64 bytes with a uuid', () => {
+    const d = `agent:toggle:${'0e572638-6992-4a0b-b552-8293c5cd7195'}`;
+    expect(Buffer.byteLength(d, 'utf8')).toBeLessThanOrEqual(64);
+    expect(parseCallbackData(d).action).toBe('agent-toggle');
   });
 });
 
@@ -485,15 +498,15 @@ describe('ToolBurstAggregator', () => {
     await agg.push('t2'); // send ok → bubble nuova
     expect(sends).toEqual(['ok']);
   });
-  it('a stale burst (past the time window) opens a new bubble', async () => {
+  it('groups tool calls regardless of the gap between them (slow burst)', async () => {
     vi.useFakeTimers();
     try {
-      const { agg, sink, sends } = makeAgg();
+      const { agg, sink, edits } = makeAgg();
       await agg.push('t1'); // send
-      await vi.advanceTimersByTimeAsync(6000); // oltre la finestra di 5s
-      await agg.push('t2'); // deve aprire una bubble nuova, non editare t1
-      expect(sends).toEqual(['t1', 't2']);
-      expect(sink.edit).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(30_000); // il modello ragiona tra una tool e l'altra
+      await agg.push('t2'); // stessa raffica: edit, non una bubble nuova
+      expect(sink.send).toHaveBeenCalledTimes(1);
+      expect(edits).toEqual([{ id: 1, text: 't1\n\nt2' }]);
     } finally { vi.useRealTimers(); }
   });
   it('close() during a pending send does not reopen the burst', async () => {
@@ -512,70 +525,75 @@ describe('ToolBurstAggregator', () => {
     expect(sends).toEqual(['t1', 't2']);
     expect(sink.edit).not.toHaveBeenCalled();
   });
+  it('marks as failed the line of the corresponding tool', async () => {
+    const edits: string[] = [];
+    const agg = new ToolBurstAggregator({
+      edit: async (_id, text) => { edits.push(text); return true; },
+      send: async () => 1,
+    });
+    await agg.push('📖 <b>Read</b>', 'tu-1');
+    await agg.push('⚡ <b>Bash</b>', 'tu-2');
+    await agg.markFailed('tu-2', 'command not found');
+    const last = edits[edits.length - 1];
+    expect(last).toContain('❌ ⚡ <b>Bash</b>');
+    expect(last).toContain('command not found');
+    expect(last).toContain('📖 <b>Read</b>');   // the healthy line stays intact
+    expect(last).not.toContain('❌ 📖');
+  });
+  it('ignores a failure for a tool that is not in the bubble', async () => {
+    const agg = new ToolBurstAggregator({ edit: async () => true, send: async () => 1 });
+    await agg.push('📖 <b>Read</b>', 'tu-1');
+    await expect(agg.markFailed('unknown', 'boom')).resolves.toBeUndefined();
+  });
+  it('ignores a failure after the bubble is closed', async () => {
+    let edited = false;
+    const agg = new ToolBurstAggregator({
+      edit: async () => { edited = true; return true; },
+      send: async () => 1,
+    });
+    await agg.push('⚡ <b>Bash</b>', 'tu-1');
+    agg.close();
+    await agg.markFailed('tu-1', 'boom');
+    expect(edited).toBe(false); // reopening would break chronological order
+  });
+  it('collapses the bubble into an expandable blockquote with the count', async () => {
+    const edits: string[] = [];
+    const agg = new ToolBurstAggregator({
+      edit: async (_id, t) => { edits.push(t); return true; },
+      send: async () => 1,
+    });
+    await agg.push('📖 <b>Read</b>', 'a');
+    await agg.push('⚡ <b>Bash</b>', 'b');
+    await agg.collapse();
+    const last = edits[edits.length - 1];
+    expect(last).toContain('<blockquote expandable>');
+    expect(last).toContain('2 steps');
+    expect(last).toContain('📖 <b>Read</b>');
+  });
+  it('does not collapse a bubble with a single line', async () => {
+    const edits: string[] = [];
+    const agg = new ToolBurstAggregator({
+      edit: async (_id, t) => { edits.push(t); return true; },
+      send: async () => 1,
+    });
+    await agg.push('📖 <b>Read</b>', 'a');
+    await agg.collapse();
+    expect(edits.some(e => e.includes('<blockquote'))).toBe(false);
+  });
 });
 
-describe('SummarizeQueue', () => {
-  function makeQueue() {
-    const lines: string[] = [];
-    const q = new SummarizeQueue(line => lines.push(line));
-    return { q, lines };
-  }
-  it('flushes summaries in order even when they resolve out of order', () => {
-    const { q, lines } = makeQueue();
-    const a = q.add(); // indice 0
-    const b = q.add(); // indice 1
-    b('line2'); // risolve prima: deve aspettare l'indice 0
-    expect(lines).toEqual([]);
-    a('line1');
-    expect(lines).toEqual(['line1', 'line2']);
+describe('continuation marker', () => {
+  it('does not appear with a single part', () => {
+    const parts = splitHtmlMessage('short');
+    expect(parts.length).toBe(1);
   });
-  it('reset() discards summaries that resolve after a turn boundary', () => {
-    const { q, lines } = makeQueue();
-    const a = q.add();
-    q.reset();
-    a('line1');
-    expect(lines).toEqual([]);
-  });
-  it('reset() clears the buffer so stale entries do not block new ones', () => {
-    const { q, lines } = makeQueue();
-    const a = q.add(); // indice 0
-    const b = q.add(); // indice 1
-    b('line2'); // bufferizzata, in attesa dell'indice 0
-    q.reset(); // scarta l'indice 1 stantio
-    const c = q.add(); // indice 2
-    c('line3');
-    expect(lines).toEqual(['line3']);
-  });
-});
 
-describe('mdToHtml v2 / balanceHtml', () => {
-  it('renders bold, italic and nested ***both***', () => {
-    expect(mdToHtml('**bold** and *it*')).toBe('<b>bold</b> and <i>it</i>');
-    expect(mdToHtml('***both***')).toBe('<b><i>both</i></b>');
-  });
-  it('protects code blocks and inline code from formatting', () => {
-    expect(mdToHtml('`**code**`')).toBe('<code>**code**</code>');
-    expect(mdToHtml('```js\n# h\n**x**\n```')).toBe('<pre>js\n# h\n**x**\n</pre>');
-  });
-  it('converts headings outside code to bold', () => {
-    expect(mdToHtml('# not a heading')).toBe('<b>not a heading</b>');
-  });
-  it('does not double-wrap a heading that contains bold', () => {
-    expect(mdToHtml('# **title**')).toBe('# <b>title</b>');
-    expect(mdToHtml('# plain')).toBe('<b>plain</b>');
-  });
-  it('leaves unclosed markers literal (no unbalanced HTML)', () => {
-    expect(mdToHtml('**unclosed')).toBe('**unclosed');
-  });
-  it('escapes raw HTML and renders links', () => {
-    expect(mdToHtml('<b>')).toBe('&lt;b&gt;');
-    expect(mdToHtml('[t](https://x.com)')).toBe('<a href="https://x.com">t</a>');
-  });
-  it('balanceHtml closes unclosed tags, drops orphan closes, keeps valid HTML', () => {
-    expect(balanceHtml('<b>a')).toBe('<b>a</b>');
-    expect(balanceHtml('<b><i>x</b>')).toBe('<b><i>x</i></b>');
-    expect(balanceHtml('x</i>y')).toBe('xy');
-    expect(balanceHtml('<b>ok</b>')).toBe('<b>ok</b>');
+  it('the marker space does not push past the Telegram limit', () => {
+    const parts = splitHtmlMessage('x'.repeat(12_000));
+    for (let i = 0; i < parts.length; i++) {
+      const withLabel = `${parts[i]}\n<i>(${i + 1}/${parts.length})</i>`;
+      expect(withLabel.length).toBeLessThan(4096);
+    }
   });
 });
 
@@ -699,48 +717,6 @@ describe('TypingIndicator', () => {
   });
 });
 
-describe('summarizeTool', () => {
-  it('identifies every tool call with the gear, then the key field', () => {
-    expect(summarizeTool('Bash', { command: 'npm test' })).toBe('⚙️ npm test');
-    expect(summarizeTool('WebFetch', { url: 'https://x.com' })).toBe('⚙️ https://x.com');
-    expect(summarizeTool('Grep', { pattern: 'TODO' })).toBe('⚙️ TODO');
-  });
-  it('prefixes Read/Write/Edit with a verb — same path, different action', () => {
-    expect(summarizeTool('Read', { file_path: 'src/foo.ts' })).toBe('⚙️ Read src/foo.ts');
-    expect(summarizeTool('Write', { file_path: 'src/foo.ts' })).toBe('⚙️ Write src/foo.ts');
-    expect(summarizeTool('Edit', { file_path: 'src/foo.ts' })).toBe('⚙️ Edit src/foo.ts');
-    expect(summarizeTool('MultiEdit', { file_path: 'src/foo.ts' })).toBe('⚙️ Edit src/foo.ts');
-    expect(summarizeTool('NotebookEdit', { notebook_path: 'nb.ipynb' })).toBe('⚙️ Edit nb.ipynb');
-  });
-  it('summarizes Task (sub-agent) with its description', () => {
-    expect(summarizeTool('Task', { description: 'Fix flaky tests', prompt: 'x'.repeat(500) })).toBe('⚙️ Agent: Fix flaky tests');
-    expect(summarizeTool('Task', { prompt: 'x'.repeat(500) })).toBe('⚙️ Agent');
-  });
-  it('summarizes TodoWrite/TodoRead without dumping the todo list', () => {
-    expect(summarizeTool('TodoWrite', { todos: [{ content: 'a' }] })).toBe('⚙️ Updates the task list');
-    expect(summarizeTool('TodoRead', {})).toBe('⚙️ Updates the task list');
-  });
-  it('falls back to the tool name and the first string value', () => {
-    expect(summarizeTool('SomeTool', { a: 1, b: 'hello' })).toBe('⚙️ SomeTool — hello');
-    expect(summarizeTool('SomeTool', { a: 1 })).toBe('⚙️ SomeTool');
-  });
-  it('truncates long values with an explicit marker', () => {
-    const long = 'x'.repeat(200);
-    expect(summarizeTool('Bash', { command: long })).toBe(`⚙️ ${'x'.repeat(80)}…`);
-  });
-});
-
-describe('narrationPlan', () => {
-  it('merges short assistant narration into an open burst', () => {
-    expect(narrationPlan('assistant', 'Ora leggo X', true)).toBe('merge');
-    expect(narrationPlan('assistant', 'x'.repeat(149), true)).toBe('merge');
-  });
-  it('keeps long text, user text, and closed bursts separate', () => {
-    expect(narrationPlan('assistant', 'x'.repeat(150), true)).toBe('separate');
-    expect(narrationPlan('assistant', 'Ora leggo X', false)).toBe('separate');
-    expect(narrationPlan('user', 'Ora leggo X', true)).toBe('separate');
-  });
-});
 
 describe('gateSessionEvent', () => {
   const base = { kind: 'text' as const, armed: true, sessionId: 's1', activeSessionId: 's1' };
@@ -917,47 +893,6 @@ describe('ToolBurstAggregator with throttled sink', () => {
       expect(sends).toHaveLength(1);
       expect(edits).toHaveLength(4);
     } finally { vi.useRealTimers(); }
-  });
-});
-
-describe('splitHtmlMessage', () => {
-  it('returns a single chunk when the text fits', () => {
-    expect(splitHtmlMessage('hello', 100)).toEqual(['hello']);
-  });
-  it('never emits a chunk longer than max', () => {
-    const long = Array.from({ length: 50 }, (_, i) => `line ${i} ${'x'.repeat(40)}`).join('\n');
-    for (const c of splitHtmlMessage(long, 200)) expect(c.length).toBeLessThanOrEqual(200);
-  });
-  it('loses no visible text across the split', () => {
-    const long = Array.from({ length: 50 }, (_, i) => `line ${i}`).join('\n');
-    const joined = splitHtmlMessage(long, 100).join('\n');
-    expect(joined.replace(/\s+/g, ' ')).toBe(long.replace(/\s+/g, ' '));
-  });
-  it('prefers breaking at a newline', () => {
-    const text = `${'a'.repeat(40)}\n${'b'.repeat(40)}`;
-    const parts = splitHtmlMessage(text, 50);
-    expect(parts[0]).toBe('a'.repeat(40));
-    expect(parts[1]).toBe('b'.repeat(40));
-  });
-  it('closes and reopens an open tag across the boundary', () => {
-    const text = `<pre>${'a'.repeat(60)}\n${'b'.repeat(60)}</pre>`;
-    const parts = splitHtmlMessage(text, 80);
-    expect(parts).toHaveLength(2);
-    expect(parts[0].startsWith('<pre>')).toBe(true);
-    expect(parts[0].endsWith('</pre>')).toBe(true);
-    expect(parts[1].startsWith('<pre>')).toBe(true);
-    expect(parts[1].endsWith('</pre>')).toBe(true);
-  });
-  it('never splits inside a tag', () => {
-    const text = `<a href="https://example.com/very/long/path">${'x'.repeat(80)}</a>`;
-    for (const c of splitHtmlMessage(text, 60)) {
-      expect((c.match(/</g) ?? []).length).toBe((c.match(/>/g) ?? []).length);
-    }
-  });
-  it('hard-splits a single word with no break opportunity', () => {
-    const parts = splitHtmlMessage('x'.repeat(250), 100);
-    expect(parts.length).toBeGreaterThan(1);
-    expect(parts.join('')).toBe('x'.repeat(250));
   });
 });
 

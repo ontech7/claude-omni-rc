@@ -32,7 +32,8 @@ coverage threshold, no e2e. Everything else is caught by a human or not at all.
 | `src/sessions/` | `manager` (registry + armed switch), `tmux-watcher` (discovery), `transcript-watcher` (tailing), `sdk-driver` (headless turns), `tmux-inject` (pane I/O), `transcript` (JSONL parsing) |
 | `src/permissions.ts`, `src/dialogs.ts` | approval and blocking-dialog flows, with their timeouts |
 | `src/state.ts` | `state.json`, written atomically; a corrupt file is preserved, never overwritten |
-| `bot/telegram.ts` | every Telegram command, button and stream (~2000 lines) |
+| `bot/render.ts` | pure presentation: markdown→HTML, tag splitting, tool-call descriptions, agent card |
+| `bot/telegram.ts` | every Telegram command, button and stream; the presentation lives in `bot/render.ts` |
 | `test/` | one Vitest file per module, `sessions/` flattened |
 | `index.html`, `assets/` | the GitHub Pages landing page — a merged commit is a live deploy |
 | `install.sh`, `scripts/` | interactive installer, launchd unit, hooks, the `omni-rc` launcher |
