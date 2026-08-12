@@ -178,6 +178,34 @@ describe('SdkDriver', () => {
     await expect(pending).resolves.toEqual({ behavior: 'allow' });
   });
 
+  it('standard mode: read-only tools are auto-allowed without a permission request', async () => {
+    const { sdk, bus, manager } = makeDriver();
+    const std = manager.createHeadless({ title: 'std', projectDir: '/tmp/s', permissionMode: 'standard' });
+    const perms: unknown[] = [];
+    bus.on('session.permission', e => perms.push(e));
+    queryMock.mockImplementationOnce(async function* () { yield resultMsg(std.id, 'ok'); });
+    await sdk.runTurn(std.id, 'x');
+    const opts = queryMock.mock.calls[0][0].options;
+    for (const tool of ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch']) {
+      await expect(opts.canUseTool(tool, { path: '/tmp/x' }, {})).resolves.toEqual({ behavior: 'allow' });
+    }
+    expect(perms).toHaveLength(0);
+  });
+
+  it('standard mode: state-changing tools still go to the permission flow', async () => {
+    const { sdk, bus, manager, permissionFlow } = makeDriver();
+    const std = manager.createHeadless({ title: 'std', projectDir: '/tmp/s', permissionMode: 'standard' });
+    const perms: unknown[] = [];
+    bus.on('session.permission', e => perms.push(e));
+    queryMock.mockImplementationOnce(async function* () { yield resultMsg(std.id, 'ok'); });
+    await sdk.runTurn(std.id, 'x');
+    const opts = queryMock.mock.calls[0][0].options;
+    const pending = opts.canUseTool('Edit', { file_path: '/tmp/x' }, {});
+    expect(perms).toHaveLength(1);
+    permissionFlow.approve((perms[0] as any).permission.id);
+    await expect(pending).resolves.toEqual({ behavior: 'allow' });
+  });
+
   it('routes ExitPlanMode to the permission flow and approves with updatedInput', async () => {
     const { sdk, bus, manager, permissionFlow } = makeDriver();
     const std = manager.createHeadless({ title: 'std', projectDir: '/tmp/s', permissionMode: 'standard' });
