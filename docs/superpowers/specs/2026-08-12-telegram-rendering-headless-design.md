@@ -22,6 +22,10 @@ Quattro disturbi segnalati dall'utente:
 4. **La sessione headless è più bloccante della tmux.** Il modello riferiva
    "non riesco a usare bash / accesso negato" in headless, cosa che in tmux non
    succedeva.
+5. **Ordine invertito testo → domanda.** Quando il modello usa AskUserQuestion,
+   in chat arriva prima la domanda con le scelte e poi, nel messaggio successivo,
+   il testo che la precedeva. Sul CLI nativo il testo arriva sempre prima della
+   domanda.
 
 ## 2. Situazione attuale (verificata su codice e transcript reali)
 
@@ -57,7 +61,23 @@ limiti noti:
 - **Tabelle dentro blocchi di codice**: restano letterali (protette come
   `<pre>`). A volte è il modello stesso a metterle in un fence nella narrazione.
 
-### 2.3 Permessi headless vs tmux
+### 2.3 Ordine testo → domanda (AskUserQuestion)
+
+Il CLI nativo mostra sempre il testo streammato e poi la domanda. Il bot no, per
+due cause che si sommano:
+
+- **Sorgente della domanda**: per una sessione terminale il set di domande
+  arriva dall'hook `AskUserQuestion` (`src/api.ts:61-72`), che scatta appena il
+  CLI raggiunge la tool_use — il testo che la precede è già nel transcript ma
+  può non essere ancora stato letto dal poll del TranscriptWatcher. La copia dal
+  transcript arriva in ritardo (il turno si sblocca) ed è comunque deduplicata.
+  Se la copia hook vince la dedupe, la domanda parte prima del testo.
+- **Gara async degli invii**: anche quando testo e domanda arrivano sullo stesso
+  tick del bus (es. headless: `sdk-driver` emette testo poi prompt in sequenza),
+  `forwardText` e `showQuestion` sono entrambi fire-and-forget async: i due
+  `sendMessage` corrono in gara e la domanda può vincere.
+
+### 2.4 Permessi headless vs tmux
 
 - **tmux**: il CLI nativo autorizza da solo i tool di sola lettura (Read, Grep,
   Glob, WebFetch, WebSearch) e fa scattare il prompt (hook
@@ -166,6 +186,30 @@ Nuova sottosezione **"Headless sessions"** in `AI-GUIDE.md` (in inglese):
 - Subagent: card `🤖 Agent` espandibili (headless only — la terminale mostra
   solo la riga).
 
+### 3.5 Ordine testo → domanda (approvato dopo la prima revisione)
+
+Due meccanismi nel bot, `bot/telegram.ts`:
+
+**a. Serializzazione degli invii di testo per sessione.** Ogni evento
+`session.text` incatena il suo `forwardText` su una promise per-sessione
+(`textFlush` map); viene esposta `flushText(sessionId)`. I messaggi di testo
+arrivano così in ordine e si può attendere che siano consegnati.
+
+**b. La domanda aspetta il testo che la precede.** Nel handler
+`session.prompt`, prima di mostrare il set:
+- per una domanda arrivata dal **transcript** o **headless** (testo già emesso
+  sullo stesso drain del bus): `await flushText(sessionId)`;
+- per una domanda arrivata dall'**hook** (testo già nel transcript ma forse non
+  ancora pollato): attende che il testo diventi *quieto* — nessun nuovo evento
+  `session.text` per quella sessione da `QUESTION_TEXT_QUIET_MS` (~300ms), con
+  cap `QUESTION_TEXT_WAIT_MS` (~2s) — poi `flushText` e mostra. Se il modello
+  chiede senza testo, l'ultimo evento di testo è vecchio e la quiete scatta
+  subito (nessun ritardo aggiunto).
+
+Il collapse/close della tool bubble resta prima dell'attesa (chiude subito
+l'attività tool, poi si aspetta il testo). Nessun cambiamento al flusso
+domande multiple (`QuestionFlow`) né ai bottoni.
+
 ## 4. Testing
 
 - **render**: casi nuovi per matcher (indentato, senza pipe esterne, in fence),
@@ -175,9 +219,11 @@ Nuova sottosezione **"Headless sessions"** in `AI-GUIDE.md` (in inglese):
   delta; rewrite non-estensione non emette nulla; dedupe esistente invariato.
 - **telegram**: `sessionListText`/`diagReport` con il nuovo layout (indicatore
   `●/○`); `forwardText` buffer raw: una tabella spezzata su due eventi arriva
-  convertita su Telegram (verifica sul testo passato a `editMessageText`).
-- **sdk-driver**: `canUseTool` — read-only passano senza `permissionFlow`,
-  Bash/Edit/Write passano dal flow; automode invariato.
+  convertita su Telegram (verifica sul testo passato a `editMessageText`);
+  ordine testo→domanda: con api Telegram fake che registra l'ordine degli
+  invii, un evento testo seguito da un prompt produce testo prima della
+  domanda; con fake timers, un prompt hook in attesa di testo (evento testo
+  che arriva dopo ~300ms) mostra comunque la domanda dopo il testo.
 - Gate: `npm run typecheck` + `npm test`.
 
 ## 5. Criteri di successo
@@ -190,6 +236,8 @@ Nuova sottosezione **"Headless sessions"** in `AI-GUIDE.md` (in inglese):
 - In headless il modello non riferisce più "accesso negato" per operazioni di
   sola lettura; le operazioni che cambiano stato restano protette dai bottoni.
 - Le limitazioni headless sono documentate in `AI-GUIDE.md`.
+- Quando il modello usa AskUserQuestion, il testo che precede la domanda arriva
+  in chat prima della domanda (come sul CLI), anche per le sessioni terminali.
 
 ## 6. Non-goals
 
