@@ -3,6 +3,37 @@ import { resolveHeadlessProjectDir, isPrivateChat, parseCommand, parseNewFlags, 
 import type { ToolBurstSink, PromptKeyEntry } from '../bot/telegram.js';
 import { truncateAtWord, mdToHtml, splitHtmlMessage } from '../bot/render.js';
 import { loadConfig } from '../src/config.js';
+import { TextOrderGate, TelegramBot } from '../bot/telegram.js';
+import { Bus } from '../src/bus.js';
+import { StateStore } from '../src/state.js';
+import { SessionManager } from '../src/sessions/manager.js';
+import { PermissionFlow } from '../src/permissions.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+function makeBot() {
+  const config = loadConfig({ TELEGRAM_BOT_TOKEN: 'test-token', WORKSPACE_DIRS: '/tmp', CLAUDE_OMNI_RC_NO_UPDATE_CHECK: '1' });
+  const bus = new Bus();
+  const state = new StateStore(join(mkdtempSync(join(tmpdir(), 'orc-bot-')), 'state.json'));
+  const manager = new SessionManager({ bus, state, idleGraceMs: 3000, armedOnStart: true });
+  manager.setChatId(12345);
+  const permissionFlow = new PermissionFlow({ bus, config });
+  const api = {
+    setMyCommands: vi.fn(async () => ({ ok: true })),
+    sendMessage: vi.fn(async (_chatId: number, _text: string, _opts?: unknown) => ({ message_id: 1 })),
+    editMessageText: vi.fn(async (_chatId: number, _messageId: number, _text: string, _opts?: unknown) => ({ ok: true })),
+    sendChatAction: vi.fn(async () => ({ ok: true })),
+  };
+  const fakeBot = { catch: vi.fn(), command: vi.fn(), on: vi.fn(), api } as any;
+  const bot = new TelegramBot({
+    config, bus, manager, permissionFlow,
+    dialogFlow: {} as any, sdk: {} as any, tmux: {} as any, inbox: {} as any,
+    ollama: {} as any, settingsStore: {} as any,
+    bot: fakeBot,
+  });
+  return { bot, bus, manager, api };
+}
 
 describe('formatPct / formatResetAt', () => {
   it('formats a rounded percentage, or an em-dash when absent', () => {
@@ -1008,5 +1039,80 @@ describe('diagReport', () => {
     expect(out).toContain('high');
     expect(out).toContain('main');
     expect(out).toMatch(/— · —/); // la headless senza dati mostra i segnaposto
+  });
+});
+
+describe('TextOrderGate', () => {
+  it('serializes text sends per session; flush awaits them in order', async () => {
+    const order: string[] = [];
+    let release: () => void = () => {};
+    const gate = new TextOrderGate(() => 0, ms => new Promise<void>(r => setTimeout(r, ms)));
+    const first = gate.record('s1', async () => {
+      order.push('a-start');
+      await new Promise<void>(r => { release = () => { order.push('a-end'); r(); }; });
+    });
+    void gate.record('s1', async () => { order.push('b'); });
+    // la catena parte su una microtask: un tick per lasciar avviare il primo send
+    await Promise.resolve();
+    expect(order).toEqual(['a-start']); // b non parte prima che a finisca
+    release();
+    await first;
+    await gate.flush('s1');
+    expect(order).toEqual(['a-start', 'a-end', 'b']);
+  });
+
+  it('waitForPrecedingText returns immediately when no text is pending', async () => {
+    let now = 0;
+    const gate = new TextOrderGate(() => now, ms => new Promise<void>(r => setTimeout(r, ms)));
+    now = 1000; // mai registrato testo per la sessione: la quiete scatta subito
+    await gate.waitForPrecedingText('s1'); // nessun testo registrato → nessuna attesa
+  });
+
+  it('waits for a hook prompt until text goes quiet, then flushes it', async () => {
+    let now = 0;
+    const gate = new TextOrderGate(() => now, ms => new Promise<void>(r => setTimeout(r, ms)));
+    const order: string[] = [];
+    void gate.record('s1', async () => { order.push('text'); });
+    const p = gate.waitForPrecedingText('s1', 300, 2000);
+    now = 400; // la quiete è scattata (400 > 300ms dall'ultimo testo)
+    await p;
+    expect(order).toEqual(['text']);
+  });
+
+  it('caps the wait even if text never goes quiet', async () => {
+    let now = 0;
+    const gate = new TextOrderGate(() => now, ms => new Promise<void>(r => setTimeout(r, ms)));
+    void gate.record('s1', async () => {});
+    const p = gate.waitForPrecedingText('s1', 300, 500);
+    now = 600; // oltre il cap
+    await p;   // termina, non resta appeso
+  });
+});
+
+describe('text → question ordering', () => {
+  it('delivers a table split across two text events as one converted message', async () => {
+    const { bus, manager, api } = makeBot();
+    const s = manager.createHeadless({ title: 't', projectDir: '/tmp/x' });
+    manager.setActive(s.id);
+    bus.emit({ type: 'session.text', sessionId: s.id, role: 'assistant', text: '| A | B |\n|---|---|', eventId: 'e1' });
+    bus.emit({ type: 'session.text', sessionId: s.id, role: 'assistant', text: '| 1 | 2 |', eventId: 'e2' });
+    // e1 apre la bolla (sendMessage); e2 viene FUSO nella stessa bolla (editMessageText)
+    await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(api.editMessageText).toHaveBeenCalledTimes(1));
+    const edited = api.editMessageText.mock.calls[0][2] as string; // il testo HTML
+    expect(edited).toContain('<pre>');                              // convertito sul markdown accumulato
+    expect(edited).toMatch(/1\s+\|\s+2/);
+  });
+
+  it('shows an AskUserQuestion only after the preceding text is delivered', async () => {
+    const { bus, manager, api } = makeBot();
+    const s = manager.createHeadless({ title: 't', projectDir: '/tmp/x' });
+    manager.setActive(s.id);
+    bus.emit({ type: 'session.text', sessionId: s.id, role: 'assistant', text: 'Before the question.', eventId: 'e1' });
+    bus.emit({ type: 'session.prompt', sessionId: s.id, questions: [{ question: 'Pick one', multiSelect: false, options: [{ label: 'A' }, { label: 'B' }] }], eventId: 'e2' });
+    await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(2));
+    const [textMsg, questionMsg] = api.sendMessage.mock.calls.map(c => c[1] as string);
+    expect(textMsg).toContain('Before the question.');
+    expect(questionMsg).toContain('Pick one');
   });
 });

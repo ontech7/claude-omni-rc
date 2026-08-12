@@ -910,13 +910,50 @@ export interface BotDeps {
   inbox: Inbox;
   ollama: OllamaClient;
   settingsStore: SettingsStore;
+  bot?: Bot; // iniettabile nei test; default: il Bot grammy reale
+}
+
+// Garanzia d'ordine testo→domanda: gli invii di testo per sessione sono
+// serializzati su una catena, e un prompt attende la catena — più un'attesa di
+// quiete per i prompt dall'hook, dove il testo è già nel transcript ma può non
+// essere ancora arrivato al bus (poll). Ora e sleep iniettabili per i test,
+// stesso pattern di EditThrottler/ToolBurstAggregator.
+export class TextOrderGate {
+  private chain = new Map<string, Promise<void>>();
+  private lastTextAt = new Map<string, number>();
+  constructor(
+    private now: () => number = Date.now,
+    private sleep: (ms: number) => Promise<void> = ms => new Promise<void>(r => setTimeout(r, ms)),
+  ) {}
+
+  record(sessionId: string, send: () => Promise<void>): Promise<void> {
+    this.lastTextAt.set(sessionId, this.now());
+    const prev = this.chain.get(sessionId) ?? Promise.resolve();
+    const next = prev.then(send).catch(() => {});
+    this.chain.set(sessionId, next);
+    return next;
+  }
+
+  flush(sessionId: string): Promise<void> {
+    return this.chain.get(sessionId) ?? Promise.resolve();
+  }
+
+  async waitForPrecedingText(sessionId: string, quietMs = 300, capMs = 2000): Promise<void> {
+    const deadline = this.now() + capMs;
+    while (this.now() < deadline) {
+      if (this.now() - (this.lastTextAt.get(sessionId) ?? 0) > quietMs) break;
+      await this.sleep(50);
+    }
+    await this.flush(sessionId);
+  }
 }
 
 export class TelegramBot {
   private bot: Bot;
   private throttler = new EditThrottler(1000);
   private chatId?: number;
-  private lastMsg = new Map<string, { messageId: number; text: string; at: number; role: 'user' | 'assistant' }>();
+  private lastMsg = new Map<string, { messageId: number; raw: string; at: number; role: 'user' | 'assistant' }>();
+  private textOrder = new TextOrderGate();
   private toolBursts = new Map<string, ToolBurstAggregator>();
   // One card per subagent, keyed by the toolUseId of the Task tool_use — the
   // same key the subagent's events carry in parentToolUseId.
@@ -956,7 +993,7 @@ export class TelegramBot {
     this.chatId = deps.manager.getChatId();
     // timeout di sicurezza su ogni chiamata API Telegram (le getUpdates long-poll
     // usano 30s server-side: 35s non le taglia, ma ogni altra chiamata è limitata).
-    this.bot = new Bot(deps.config.telegramBotToken, { client: { timeoutSeconds: 35 } });
+    this.bot = deps.bot ?? new Bot(deps.config.telegramBotToken, { client: { timeoutSeconds: 35 } });
     // senza bot.catch, grammy STOPPA il bot al primo errore di middleware non
     // gestito → il daemon moriva (spec §3.1). Ora logghiamo e si va avanti.
     // I4: console.error non raggiunge daemon.jsonl né /diag — solo daemon.err.log.
@@ -1083,37 +1120,32 @@ export class TelegramBot {
     return duplicate;
   }
 
-  private async forwardText(sessionId: string, text: string, role: 'user' | 'assistant', eventId?: string): Promise<void> {
+  // Converte sul testo ACCUMULATO, non pezzo per pezzo: una tabella (o qualunque
+  // blocco markdown) spezzata tra più eventi viene riconosciuta quando è completa.
+  // Il buffer tiene il markdown grezzo della bolla corrente; quando l'HTML
+  // convertito supera SEND_MAX_CHARS si apre un messaggio nuovo con solo il testo
+  // nuovo, e il buffer riparte da lì.
+  private async forwardText(sessionId: string, raw: string, role: 'user' | 'assistant', eventId?: string): Promise<void> {
     const chatId = this.chatId;
     if (!chatId) { log().warn('send skipped', { sessionId, kind: 'text', reason: 'no-chat-bound' }); return; }
     const last = this.lastMsg.get(sessionId);
     const now = Date.now();
-    // concatena solo messaggi dello stesso ruolo (un turno con più blocchi text
-    // diventa una bubble unica; non mischia mai un echo utente con una risposta).
-    // Il merge si ferma prima del limite Telegram: oltre, ogni edit fallirebbe e
-    // il testo nuovo andrebbe perso — meglio un messaggio nuovo.
-    const merged = last ? `${last.text}\n${text}` : '';
-    if (last && last.role === role && now - last.at < 10_000 && merged.length <= SEND_MAX_CHARS) {
+    const merged = last && last.role === role ? `${last.raw}\n${raw}` : raw;
+    const html = mdToHtml(merged);
+    if (last && last.role === role && now - last.at < 10_000 && html.length <= SEND_MAX_CHARS) {
       const ok = await this.throttler.throttled(() =>
-        this.bot.api.editMessageText(chatId, last.messageId, merged, { parse_mode: 'HTML' }).then(() => true).catch(() => false));
+        this.bot.api.editMessageText(chatId, last.messageId, html, { parse_mode: 'HTML' }).then(() => true).catch(() => false));
       if (ok) {
-        last.text = merged; last.at = now;
-        // I3: chiude la catena — l'edit è andato a buon fine, quindi l'evento è
-        // stato DAVVERO consegnato (non solo tentato). messageId è quello esteso,
-        // lo stesso di prima dell'edit.
+        last.raw = merged; last.at = now;
         log().info('event delivered', { eventId, sessionId, kind: 'text', messageId: last.messageId });
         return;
       }
     }
-    // testo lungo → più messaggi; il tracking punta all'ultimo, che è quello
-    // che eventuali blocchi successivi dello stesso turno estenderanno.
-    const parts = splitHtmlMessage(text);
-    const messageId = await this.sendChunked(chatId, text, {}, { eventId, sessionId });
+    const freshHtml = mdToHtml(raw);
+    const parts = splitHtmlMessage(freshHtml);
+    const messageId = await this.sendChunked(chatId, freshHtml, {}, { eventId, sessionId });
     if (messageId !== undefined) {
-      this.lastMsg.set(sessionId, { messageId, text: parts[parts.length - 1], at: now, role });
-      // I3: idem, per il path "nuovo messaggio" — un fallimento qui è già
-      // loggato dentro sendChunked (I2), quindi il silenzio in questo punto
-      // significa davvero successo, non un'assenza di segnale.
+      this.lastMsg.set(sessionId, { messageId, raw, at: now, role });
       log().info('event delivered', { eventId, sessionId, kind: 'text', messageId });
     }
   }
@@ -2400,10 +2432,12 @@ export class TelegramBot {
       void burst.collapse();
       burst.close();
       log().info('event delivering', { eventId: e.eventId, sessionId: e.sessionId, kind: 'text', role: e.role });
-      // sia le headless che i transcript delle terminali arrivano come markdown.
-      void this.forwardText(e.sessionId, mdToHtml(e.text), e.role, e.eventId);
+      // sia le headless che i transcript delle terminali arrivano come markdown grezzo:
+      // forwardText accumula e converte (vedi forwardText). La catena del gate
+      // serializza gli invii e permette ai prompt di attendere il testo che li precede.
+      this.textOrder.record(e.sessionId, () => this.forwardText(e.sessionId, e.text, e.role, e.eventId));
     });
-    bus.on('session.prompt', ({ sessionId, questions, eventId, toolUseId, source }) => {
+    bus.on('session.prompt', async ({ sessionId, questions, eventId, toolUseId, source }) => {
       if (!this.passes('prompt', sessionId, eventId).deliver) return;
       // Task 8, punto 4: la stessa domanda arriva due volte — dall'hook e poi
       // dal transcript (stessa tool_use, due sorgenti). La chiave è SOLO la
@@ -2439,6 +2473,14 @@ export class TelegramBot {
       // oppure 'event queued' con il motivo.
       // Fix 2: flusso domande multiple — accoda il set e mostra una domanda alla
       // volta (single-select, multi-select con toggle+Done, "Other" a testo libero).
+      // Il testo che precede la domanda deve arrivare PRIMA in chat. Una domanda
+      // dall'hook può precedere sul bus il testo (già nel transcript ma non ancora
+      // pollato): si attende la quiete. Una domanda dal transcript/headless ha già
+      // il testo emesso nello stesso drain: basta attendere che sia stato inviato.
+      if (sessionId === this.deps.manager.getActive()) {
+        if (source === 'hook') await this.textOrder.waitForPrecedingText(sessionId);
+        else await this.textOrder.flush(sessionId);
+      }
       this.track(this.onSessionPrompt(sessionId, questions, eventId, source), 'prompt flow');
     });
     bus.on('session.tool', e => {
