@@ -1,8 +1,39 @@
 import { describe, it, expect, vi } from 'vitest';
-import { resolveHeadlessProjectDir, isPrivateChat, parseCommand, parseNewFlags, parseSettingsCommand, formatSettingsReport, formatSettingsKey, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, stopReply, TypingIndicator, answerSummary, answerToKeys, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, formatPaneContext, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
+import { resolveHeadlessProjectDir, isPrivateChat, parseCommand, parseNewFlags, parseSettingsCommand, formatSettingsReport, formatSettingsKey, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, stopReply, TypingIndicator, answerSummary, answerToKeys, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
 import type { ToolBurstSink, PromptKeyEntry } from '../bot/telegram.js';
 import { truncateAtWord, mdToHtml, splitHtmlMessage } from '../bot/render.js';
 import { loadConfig } from '../src/config.js';
+import { TextOrderGate, TelegramBot } from '../bot/telegram.js';
+import { Bus } from '../src/bus.js';
+import { StateStore } from '../src/state.js';
+import { SessionManager } from '../src/sessions/manager.js';
+import { PermissionFlow } from '../src/permissions.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+function makeBot() {
+  const config = loadConfig({ TELEGRAM_BOT_TOKEN: 'test-token', WORKSPACE_DIRS: '/tmp', CLAUDE_OMNI_RC_NO_UPDATE_CHECK: '1' });
+  const bus = new Bus();
+  const state = new StateStore(join(mkdtempSync(join(tmpdir(), 'orc-bot-')), 'state.json'));
+  const manager = new SessionManager({ bus, state, idleGraceMs: 3000, armedOnStart: true });
+  manager.setChatId(12345);
+  const permissionFlow = new PermissionFlow({ bus, config });
+  const api = {
+    setMyCommands: vi.fn(async () => ({ ok: true })),
+    sendMessage: vi.fn(async (_chatId: number, _text: string, _opts?: unknown) => ({ message_id: 1 })),
+    editMessageText: vi.fn(async (_chatId: number, _messageId: number, _text: string, _opts?: unknown) => ({ ok: true })),
+    sendChatAction: vi.fn(async () => ({ ok: true })),
+  };
+  const fakeBot = { catch: vi.fn(), command: vi.fn(), on: vi.fn(), api } as any;
+  const bot = new TelegramBot({
+    config, bus, manager, permissionFlow,
+    dialogFlow: {} as any, sdk: {} as any, tmux: {} as any, inbox: {} as any,
+    ollama: {} as any, settingsStore: {} as any,
+    bot: fakeBot,
+  });
+  return { bot, bus, manager, api };
+}
 
 describe('formatPct / formatResetAt', () => {
   it('formats a rounded percentage, or an em-dash when absent', () => {
@@ -374,10 +405,15 @@ describe('permissionMessage / sessionListText', () => {
       { id: 'bbb', kind: 'terminal', title: 't2', projectDir: '/y', tmuxTarget: 'claude:my-branch', status: 'running', lastActivity: new Date().toISOString(), createdAt: '' },
     ] as any;
     const txt = sessionListText(sessions, 'bbb');
-    expect(txt).toContain('▸');
+    expect(txt).toContain('●');                // active session: filled dot
+    expect(txt).toContain('<b>t2</b>');        // active session title in bold
+    expect(txt).toContain('○');                // inactive: hollow dot
+    expect(txt).not.toContain('▸');
     expect(txt).toContain('running');
-    expect(txt).toContain('claude:my-branch'); // per le terminali il target tmux
-    expect(txt).toContain('deepseek-v4-flash:cloud'); // per le headless il modello
+    expect(txt).toContain('claude:my-branch'); // terminal → tmux target on its own line
+    expect(txt).toContain('🖥');               // terminal icon
+    expect(txt).toContain('deepseek-v4-flash:cloud'); // headless → model
+    expect(txt).toContain('🧠');               // headless icon
     expect(txt).toContain('just now');
   });
   it('formats relative time', () => {
@@ -426,6 +462,12 @@ describe('EditThrottler', () => {
 });
 
 describe('ToolBurstAggregator', () => {
+  // La bolla è SEMPRE nella forma raggruppata (header col conteggio + blocco
+  // espandibile), anche per una singola tool call — vedi bubbleText.
+  const grouped = (lines: string[]): string => {
+    const n = lines.length;
+    return `▸ <b>${n} ${n === 1 ? 'step' : 'steps'}</b>\n<blockquote expandable>${lines.join('\n\n')}</blockquote>`;
+  };
   function makeAgg(maxLen = 3800) {
     const edits: { id: number; text: string }[] = [];
     const sends: string[] = [];
@@ -442,11 +484,11 @@ describe('ToolBurstAggregator', () => {
     await agg.push('t1');
     await agg.push('t2');
     await agg.push('t3');
-    expect(sends).toEqual(['t1']);
+    expect(sends).toEqual([grouped(['t1'])]); // la prima parte già raggruppata
     expect(sink.send).toHaveBeenCalledTimes(1);
     expect(edits).toEqual([
-      { id: 1, text: 't1\n\nt2' }, // riga vuota tra una tool call e l'altra
-      { id: 1, text: 't1\n\nt2\n\nt3' },
+      { id: 1, text: grouped(['t1', 't2']) }, // riga vuota tra una tool call e l'altra
+      { id: 1, text: grouped(['t1', 't2', 't3']) },
     ]);
   });
   it('close() closes the burst: the next push starts a new bubble', async () => {
@@ -458,27 +500,27 @@ describe('ToolBurstAggregator', () => {
     expect(sink.edit).not.toHaveBeenCalled();
   });
   it('starts a new bubble when appending would exceed maxLen', async () => {
-    const { agg, sink, edits, sends } = makeAgg(6);
+    const { agg, sink, edits, sends } = makeAgg(60); // grouped(['t1','t2']) = 60 ≤ 60
     await agg.push('t1'); // send
-    await agg.push('t2'); // 't1\n\nt2' = 6 ≤ 6 → edit
-    await agg.push('t3'); // 't1\n\nt2\n\nt3' = 10 > 6 → send
-    expect(sends).toEqual(['t1', 't3']);
-    expect(edits).toEqual([{ id: 1, text: 't1\n\nt2' }]);
+    await agg.push('t2'); // grouped(['t1','t2']) = 60 ≤ 60 → edit
+    await agg.push('t3'); // grouped(['t1','t2','t3']) = 64 > 60 → send
+    expect(sends).toEqual([grouped(['t1']), grouped(['t3'])]);
+    expect(edits).toEqual([{ id: 1, text: grouped(['t1', 't2']) }]);
   });
   it('falls back to a new bubble when the edit fails', async () => {
     const { agg, sink, sends } = makeAgg();
     (sink.edit as any).mockImplementation(async () => false);
     await agg.push('t1');
     await agg.push('t2');
-    expect(sends).toEqual(['t1', 't2']);
+    expect(sends).toEqual([grouped(['t1']), grouped(['t2'])]);
   });
   it('serializes concurrent pushes: back-to-back calls produce one bubble', async () => {
     const { agg, sink, edits, sends } = makeAgg();
     await Promise.all([agg.push('t1'), agg.push('t2'), agg.push('t3')]);
-    expect(sends).toEqual(['t1']);
+    expect(sends).toEqual([grouped(['t1'])]);
     expect(edits).toEqual([
-      { id: 1, text: 't1\n\nt2' },
-      { id: 1, text: 't1\n\nt2\n\nt3' },
+      { id: 1, text: grouped(['t1', 't2']) },
+      { id: 1, text: grouped(['t1', 't2', 't3']) },
     ]);
   });
   it('after an edit-failure fallback, the next push edits the new bubble', async () => {
@@ -488,8 +530,8 @@ describe('ToolBurstAggregator', () => {
     await agg.push('t2'); // edit fallisce → send id=2
     (sink.edit as any).mockImplementation(async (id: number, text: string) => { edits.push({ id, text }); return true; });
     await agg.push('t3'); // deve editare la bubble 2, non ri-sendare
-    expect(sends).toEqual(['t1', 't2']);
-    expect(edits).toEqual([{ id: 2, text: 't2\n\nt3' }]);
+    expect(sends).toEqual([grouped(['t1']), grouped(['t2'])]);
+    expect(edits).toEqual([{ id: 2, text: grouped(['t2', 't3']) }]);
   });
   it('when send fails (undefined), the next push starts a fresh bubble', async () => {
     const { agg, sink, sends } = makeAgg();
@@ -506,7 +548,7 @@ describe('ToolBurstAggregator', () => {
       await vi.advanceTimersByTimeAsync(30_000); // il modello ragiona tra una tool e l'altra
       await agg.push('t2'); // stessa raffica: edit, non una bubble nuova
       expect(sink.send).toHaveBeenCalledTimes(1);
-      expect(edits).toEqual([{ id: 1, text: 't1\n\nt2' }]);
+      expect(edits).toEqual([{ id: 1, text: grouped(['t1', 't2']) }]);
     } finally { vi.useRealTimers(); }
   });
   it('close() during a pending send does not reopen the burst', async () => {
@@ -522,7 +564,7 @@ describe('ToolBurstAggregator', () => {
     const p2 = agg.push('t2');
     await Promise.all([p1, p2]);
     // t1 è stato inviato ma la bubble non si riapre; t2 apre una bubble nuova.
-    expect(sends).toEqual(['t1', 't2']);
+    expect(sends).toEqual([grouped(['t1']), grouped(['t2'])]);
     expect(sink.edit).not.toHaveBeenCalled();
   });
   it('marks as failed the line of the corresponding tool', async () => {
@@ -556,7 +598,18 @@ describe('ToolBurstAggregator', () => {
     await agg.markFailed('tu-1', 'boom');
     expect(edited).toBe(false); // reopening would break chronological order
   });
-  it('collapses the bubble into an expandable blockquote with the count', async () => {
+  it('starts every bubble in the grouped form, even a single tool call', async () => {
+    const sends: string[] = [];
+    const agg = new ToolBurstAggregator({
+      edit: async () => true,
+      send: async (t) => { sends.push(t); return 1; },
+    });
+    await agg.push('📖 <b>Read</b>', 'a');
+    expect(sends[0]).toContain('<blockquote expandable>');
+    expect(sends[0]).toContain('1 step'); // singolare
+    expect(sends[0]).toContain('📖 <b>Read</b>');
+  });
+  it('collapse() is a no-op: the bubble is already grouped at every push', async () => {
     const edits: string[] = [];
     const agg = new ToolBurstAggregator({
       edit: async (_id, t) => { edits.push(t); return true; },
@@ -564,21 +617,9 @@ describe('ToolBurstAggregator', () => {
     });
     await agg.push('📖 <b>Read</b>', 'a');
     await agg.push('⚡ <b>Bash</b>', 'b');
+    const before = edits.length;
     await agg.collapse();
-    const last = edits[edits.length - 1];
-    expect(last).toContain('<blockquote expandable>');
-    expect(last).toContain('2 steps');
-    expect(last).toContain('📖 <b>Read</b>');
-  });
-  it('does not collapse a bubble with a single line', async () => {
-    const edits: string[] = [];
-    const agg = new ToolBurstAggregator({
-      edit: async (_id, t) => { edits.push(t); return true; },
-      send: async () => 1,
-    });
-    await agg.push('📖 <b>Read</b>', 'a');
-    await agg.collapse();
-    expect(edits.some(e => e.includes('<blockquote'))).toBe(false);
+    expect(edits.length).toBe(before); // nessun edit aggiuntivo alla chiusura
   });
 });
 
@@ -837,29 +878,6 @@ describe('registerPromptKey', () => {
   });
 });
 
-describe('formatPaneContext', () => {
-  it('strips ANSI, drops empty lines, and wraps the last N non-empty lines in a fixed-width block', () => {
-    const pane = '\x1b[32m$ npm test\x1b[0m\n\n  passing (12)\n\n';
-    const out = formatPaneContext(pane, 20);
-    expect(out).toContain('<pre>');
-    expect(out).toContain('$ npm test');
-    expect(out).toContain('passing (12)');
-    expect(out).not.toContain('\x1b');
-  });
-
-  it('keeps only the last maxLines non-empty lines', () => {
-    const pane = Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n');
-    const out = formatPaneContext(pane, 5);
-    expect(out).toContain('line 29');
-    expect(out).not.toContain('line 24');
-  });
-
-  it('returns an empty string when there is nothing to show — the caller treats this as "no context", not an empty block', () => {
-    expect(formatPaneContext('\n\n   \n')).toBe('');
-    expect(formatPaneContext('')).toBe('');
-  });
-});
-
 describe('ToolBurstAggregator with throttled sink', () => {
   it('5 consecutive pushes → 1 send + 4 edits (real throttler pacing)', async () => {
     vi.useFakeTimers();
@@ -950,6 +968,15 @@ describe('diagReport', () => {
     expect(out).toContain('running');
   });
 
+  it('marks the active session and puts the detail on its own line', () => {
+    const out = diagReport(snapshot);
+    expect(out).toMatch(/● <b>my-proj<\/b>/);      // active session: filled dot + bold title
+    expect(out).toMatch(/○/);                      // inactive: hollow dot
+    expect(out).toContain('🖥');
+    expect(out).toContain('🧠');
+    expect(out).toMatch(/\n {2}🖥 terminal · tmux/); // second line indented
+  });
+
   it('reports the pending interactions, which are what wedges a session', () => {
     const out = diagReport(snapshot);
     expect(out).toMatch(/permissions.*1/);
@@ -994,5 +1021,96 @@ describe('diagReport', () => {
     expect(out).toContain('high');
     expect(out).toContain('main');
     expect(out).toMatch(/— · —/); // la headless senza dati mostra i segnaposto
+  });
+});
+
+describe('TextOrderGate', () => {
+  it('serializes text sends per session; flush awaits them in order', async () => {
+    const order: string[] = [];
+    let release: () => void = () => {};
+    const gate = new TextOrderGate(() => 0, ms => new Promise<void>(r => setTimeout(r, ms)));
+    const first = gate.record('s1', async () => {
+      order.push('a-start');
+      await new Promise<void>(r => { release = () => { order.push('a-end'); r(); }; });
+    });
+    void gate.record('s1', async () => { order.push('b'); });
+    // la catena parte su una microtask: un tick per lasciar avviare il primo send
+    await Promise.resolve();
+    expect(order).toEqual(['a-start']); // b non parte prima che a finisca
+    release();
+    await first;
+    await gate.flush('s1');
+    expect(order).toEqual(['a-start', 'a-end', 'b']);
+  });
+
+  it('waitForPrecedingText returns immediately when no text is pending', async () => {
+    let now = 0;
+    const gate = new TextOrderGate(() => now, ms => new Promise<void>(r => setTimeout(r, ms)));
+    now = 1000; // mai registrato testo per la sessione: la quiete scatta subito
+    await gate.waitForPrecedingText('s1'); // nessun testo registrato → nessuna attesa
+  });
+
+  it('waits for a hook prompt until text goes quiet, then flushes it', async () => {
+    let now = 0;
+    const gate = new TextOrderGate(() => now, ms => new Promise<void>(r => setTimeout(r, ms)));
+    const order: string[] = [];
+    void gate.record('s1', async () => { order.push('text'); });
+    const p = gate.waitForPrecedingText('s1', 300, 2000);
+    now = 400; // la quiete è scattata (400 > 300ms dall'ultimo testo)
+    await p;
+    expect(order).toEqual(['text']);
+  });
+
+  it('caps the wait even if text never goes quiet', async () => {
+    let now = 0;
+    const gate = new TextOrderGate(() => now, ms => new Promise<void>(r => setTimeout(r, ms)));
+    void gate.record('s1', async () => {});
+    const p = gate.waitForPrecedingText('s1', 300, 500);
+    now = 600; // oltre il cap
+    await p;   // termina, non resta appeso
+  });
+});
+
+describe('text → question ordering', () => {
+  it('delivers a table split across two text events as one converted message', async () => {
+    const { bus, manager, api } = makeBot();
+    const s = manager.createHeadless({ title: 't', projectDir: '/tmp/x' });
+    manager.setActive(s.id);
+    bus.emit({ type: 'session.text', sessionId: s.id, role: 'assistant', text: '| A | B |\n|---|---|', eventId: 'e1' });
+    bus.emit({ type: 'session.text', sessionId: s.id, role: 'assistant', text: '| 1 | 2 |', eventId: 'e2' });
+    // e1 apre la bolla (sendMessage); e2 viene FUSO nella stessa bolla (editMessageText)
+    await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(api.editMessageText).toHaveBeenCalledTimes(1));
+    const edited = api.editMessageText.mock.calls[0][2] as string; // il testo HTML
+    expect(edited).toContain('<pre>');                              // convertito sul markdown accumulato
+    expect(edited).toMatch(/1\s+\|\s+2/);
+  });
+
+  it('merges a delta event without a double newline, keeping the streamed table converted', async () => {
+    const { bus, manager, api } = makeBot();
+    const s = manager.createHeadless({ title: 't', projectDir: '/tmp/x' });
+    manager.setActive(s.id);
+    // parser-style deltas: the extension event carries its own boundary newline
+    // and the delta flag, so the merge must NOT add another one — a blank line
+    // between rows would break the table run and leave literal pipes.
+    bus.emit({ type: 'session.text', sessionId: s.id, role: 'assistant', text: '| A | B |\n|---|---|', eventId: 'e1' });
+    bus.emit({ type: 'session.text', sessionId: s.id, role: 'assistant', text: '\n| 1 | 2 |', eventId: 'e2', delta: true });
+    await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(api.editMessageText).toHaveBeenCalledTimes(1));
+    const edited = api.editMessageText.mock.calls[0][2] as string;
+    expect(edited).toContain('<pre>'); // converted on the accumulated markdown
+    expect(edited).toMatch(/1\s+\|\s+2/);
+  });
+
+  it('shows an AskUserQuestion only after the preceding text is delivered', async () => {
+    const { bus, manager, api } = makeBot();
+    const s = manager.createHeadless({ title: 't', projectDir: '/tmp/x' });
+    manager.setActive(s.id);
+    bus.emit({ type: 'session.text', sessionId: s.id, role: 'assistant', text: 'Before the question.', eventId: 'e1' });
+    bus.emit({ type: 'session.prompt', sessionId: s.id, questions: [{ question: 'Pick one', multiSelect: false, options: [{ label: 'A' }, { label: 'B' }] }], eventId: 'e2' });
+    await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(2));
+    const [textMsg, questionMsg] = api.sendMessage.mock.calls.map(c => c[1] as string);
+    expect(textMsg).toContain('Before the question.');
+    expect(questionMsg).toContain('Pick one');
   });
 });

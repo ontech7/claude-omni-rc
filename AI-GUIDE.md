@@ -116,6 +116,33 @@ interactive UIs that would leave the session stuck waiting for input).
 Selecting a session in `/sessions` also shows its last messages.
 Terminal sessions must run inside tmux (`claude:<project>`) to receive text.
 
+### Headless sessions
+
+Started from Telegram with `/new`, these run the Claude Agent SDK inside the
+daemon: there is no terminal screen, and replies stream straight into the chat.
+
+**What works:** send a message and get a reply; `/stop` aborts the turn in
+progress; `/compact` and `/context`; approve or reject permissions and plans
+from the buttons; answer multiple-choice questions from the buttons; attach
+images and documents; per-subagent `🤖 Agent` cards with `👁 Details`.
+
+**What differs from a tmux session:**
+
+- **No terminal screen.** `/view` can't capture anything; the replies come to
+  the chat instead.
+- **Permissions.** Read-only tools (`Read`, `Grep`, `Glob`, `WebFetch`,
+  `WebSearch`) are allowed without asking, like the native CLI. Tools that
+  change state (`Bash`, `Edit`, `Write`, `NotebookEdit`, MCP tools) need
+  Telegram approval: if nobody answers within `PERMISSION_TIMEOUT_SECONDS`
+  (default 120) they are denied. For unattended work start with
+  `/new --auto` or set `DEFAULT_PERMISSION_MODE=auto`.
+- **A daemon restart loses the turn in progress.** The session's history
+  survives (it resumes from its `claudeSessionId`), but an in-flight reply is
+  aborted — re-send your message.
+- **No arbitrary CLI slash commands.** Telegram intercepts `/…` as bot
+  commands; only the bot's own commands (`/compact`, `/stop`, `/context`, …)
+  reach the session.
+
 ## Configuration & data
 
 - `.env` at the repo root (never commit it). See the README's

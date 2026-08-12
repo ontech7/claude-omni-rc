@@ -9,6 +9,85 @@ export function htmlEscape(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// Riga tabellare (input già trimmato): lo stile a pipe '| A |' con o senza
+// indentazione, oppure lo stile nudo 'A | B' (almeno una pipe). Lo stile nudo
+// viene accettato solo se il run ha una riga separatrice — vedi renderTableBlocks.
+function isTableRow(line: string): boolean {
+  return /^\|.*\|\s*$/.test(line) || /^[^|]*\|.*$/.test(line);
+}
+
+// Riga separatrice: '---', ':--:', '| --- | :--: |' — la firma che distingue una
+// tabella da testo qualunque con pipe sparse. Le pipe esterne sono opzionali:
+// sia lo stile nudo '--- | ---' sia quello avvolto '|---|---|' (o ':--:') devono
+// essere riconosciuti, altrimenti una tabella standard non viene mai convertita.
+function isSeparator(line: string): boolean {
+  return /^\|?\s*:?-{2,}:?(\s*\|\s*:?-{2,}:?)*\s*\|?$/.test(line);
+}
+
+// Tronca una cella oltre la larghezza della colonna preferendo un confine di
+// parola e chiudendo con '…': mai un taglio a metà parola (dati persi).
+function truncateCell(raw: string, width: number): string {
+  if (raw.length <= width) return raw;
+  const cut = raw.slice(0, width);
+  const sp = cut.lastIndexOf(' ');
+  const end = sp > width * 0.5 ? sp : width;
+  return raw.slice(0, end).trimEnd() + '…';
+}
+
+// Markdown inline dentro le celle: grassetto e codice diventano tag. Il contenuto
+// è già htmlEscaped (mdToHtml escapa all'inizio), quindi i tag sono sicuri, e i
+// padding vengono applicati al testo NUDO prima di questo pass — i tag non
+// spostano l'allineamento a larghezza fissa.
+function formatCell(raw: string): string {
+  return raw
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .replace(/`([^`\n]+)`/g, '<code>$1</code>');
+}
+
+// Allinea le righe di una tabella in un <pre> a larghezza fissa: colonne larghe
+// al più CELL_MAX, celle troppo lunghe troncate con '…' (mai a metà parola).
+const CELL_MAX = 48;
+function renderTable(rows: string[]): string {
+  const cells = rows.map(r => r.replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim()));
+  const cols = Math.max(...cells.map(r => r.length));
+  const width: number[] = [];
+  for (let c = 0; c < cols; c++) {
+    width[c] = Math.min(CELL_MAX, Math.max(...cells.map(r => (r[c] ?? '').length)));
+  }
+  return cells
+    .map(r => Array.from({ length: cols }, (_, c) => {
+      const raw = r[c] ?? '';
+      const padded = (raw.length <= width[c] ? raw : truncateCell(raw, width[c])).padEnd(width[c]);
+      return formatCell(padded);
+    }).join(' | ').trimEnd())
+    .join('\n');
+}
+
+// Converte i run di righe tabellari nel testo (fuori dai fence, già protetti) in
+// un <pre> protetto. Un run è una tabella solo se contiene una riga separatrice e
+// almeno due righe di corpo: il testo con pipe isolate non viene mai toccato.
+function renderTableBlocks(text: string, protect: (c: string, kind: 'pre' | 'code', lang?: string) => string): string {
+  const lines = text.split('\n');
+  const out: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (isTableRow(lines[i].trim())) {
+      let j = i;
+      const run: string[] = [];
+      while (j < lines.length && isTableRow(lines[j].trim())) { run.push(lines[j].trim()); j++; }
+      const body = run.filter(r => !isSeparator(r));
+      if (run.length >= 2 && run.some(isSeparator) && body.length >= 2) {
+        out.push(protect(renderTable(body), 'pre'));
+        i = j;
+        continue;
+      }
+    }
+    out.push(lines[i]);
+    i++;
+  }
+  return out.join('\n');
+}
+
 // Rende il markdown del modello in HTML per Telegram, correggendo il markup:
 // blocchi di codice protetti (niente formattazione dentro <pre>/<code>), nesting
 // grassetto/corsivo gestito, e passata finale di bilanciamento → l'output è
@@ -27,35 +106,24 @@ export function mdToHtml(text: string): string {
     return `${P}${idx}${P}`;
   };
   let out = htmlEscape(text);
-  // The fence's first line is its info string: only a plausible single-token
-  // language earns a class. Anything with spaces ('non un linguaggio') keeps
-  // the classless <pre>, because a bogus class buys nothing and costs width.
-  out = out.replace(/```([^\n]*)\n?([\s\S]*?)```/g, (_m, first: string, c: string) =>
-    protect(c, 'pre', /^[a-z0-9+#-]{1,20}$/.test(first) ? first : undefined));
-  out = out.replace(/`([^`\n]+)`/g, (_m, c) => protect(c, 'code'));
-  // A table is readable on Telegram only at fixed width: <pre> is the one
-  // container that preserves it. Columns are capped because on a narrow screen
-  // one long cell would wrap the whole grid. This runs right after code
-  // protection so a pipe inside a fence is already a placeholder and never
-  // looks like a table — and the <pre> it builds goes through the same
-  // protection, so it cannot end up inside a blockquote either.
-  const CELL_MAX = 24;
-  out = out.replace(/(?:^\|.*\|[ \t]*\n?){2,}/gm, table => {
-    const rows = table.trimEnd().split('\n')
-      .map(r => r.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim()));
-    // the separator row ('---', ':--') is not data: it disappears
-    const body = rows.filter(r => !r.every(c => /^:?-{2,}:?$/.test(c)));
-    if (body.length < 2) return table;
-    const cols = Math.max(...body.map(r => r.length));
-    const width: number[] = [];
-    for (let c = 0; c < cols; c++) {
-      width[c] = Math.min(CELL_MAX, Math.max(...body.map(r => (r[c] ?? '').length)));
+  // I fence passano PRIMA delle tabelle: un fence con forma tabellare ('| … |' +
+  // riga separatrice) diventa una tabella e i suoi marcatori ``` vengono consumati
+  // (decisione di design: anche le tabelle-fence nella narrazione del modello si
+  // leggono). Un fence con contenuto non-tabellare resta il <pre> letterale di
+  // oggi — l'output di tool (log, CSV) non ha la riga separatrice e non viene
+  // toccato.
+  out = out.replace(/```([^\n]*)\n?([\s\S]*?)```/g, (_m, first: string, c: string) => {
+    const rows = c.trimEnd().split('\n').map(l => l.trim()).filter(Boolean);
+    if (rows.length >= 2 && rows.some(isSeparator) && rows.every(isTableRow)) {
+      const body = rows.filter(r => !isSeparator(r));
+      if (body.length >= 2) return `${protect(renderTable(body), 'pre')}\n`;
     }
-    const rendered = body
-      .map(r => Array.from({ length: cols }, (_, c) => (r[c] ?? '').slice(0, CELL_MAX).padEnd(width[c])).join(' | ').trimEnd())
-      .join('\n');
-    return `${protect(rendered, 'pre')}\n`;
+    return protect(c, 'pre', /^[a-z0-9+#-]{1,20}$/.test(first) ? first : undefined);
   });
+  out = out.replace(/`([^`\n]+)`/g, (_m, c) => protect(c, 'code'));
+  // Tabelle fuori dai fence: a questo punto i fence sono placeholder, quindi un
+  // contenuto '| … |' dentro un fence non può più sembrare una tabella qui.
+  out = renderTableBlocks(out, protect);
   out = out
     .replace(/\*\*\*([^*]+)\*\*\*/g, '<b><i>$1</i></b>')
     .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
@@ -77,7 +145,18 @@ export function mdToHtml(text: string): string {
   // replacement adds it because the line itself carries no preceding space.
   out = out.replace(/^#{1,6}\s+([^<\n]+)$/gm, '\n<b>$1</b>');
   out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>');
-  out = out.replace(new RegExp(`${P}([0-9]+)${P}`, 'g'), (_m, i) => blocks[Number(i)]);
+  // Il contenuto di un blocco può annidare un altro placeholder (es. `code`
+  // inline dentro una cella di tabella: l'inline-code pass gira prima delle
+  // tabelle), quindi un singolo pass di restore lascerebbe il placeholder
+  // interno come testo letterale '\x00n\x00'. Si ripristina finché non resta
+  // più alcun placeholder; i blocchi inline-code sono foglie, quindi il ciclo
+  // termina (mai un placeholder che punta a un blocco contenente se stesso).
+  const restoreRe = new RegExp(`${P}([0-9]+)${P}`, 'g');
+  let prev: string;
+  do {
+    prev = out;
+    out = out.replace(restoreRe, (_m, i) => blocks[Number(i)]);
+  } while (out !== prev);
   return balanceHtml(out);
 }
 

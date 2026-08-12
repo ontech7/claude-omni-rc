@@ -325,11 +325,6 @@ export interface QuestionFlow {
   // `sets` — permette a showQuestion() di loggare la consegna con lo stesso
   // eventId della riga 'event queued'/'event emitted' che l'ha preceduta.
   eventIds: (string | undefined)[];
-  // Task 8, punto 5: blocco di contesto del pane per ciascun set, parallelo a
-  // `sets` — undefined finché la cattura (fire-and-forget, vedi
-  // attachPaneContext) non è tornata, o per sempre se il set non è di
-  // provenienza hook/terminale o la cattura è fallita.
-  paneContexts: (string | undefined)[];
   setIndex: number;           // set corrente
   qIndex: number;             // domanda corrente nel set
   answers: (PromptAnswer | undefined)[][];  // risposte per set, per domanda (undefined = non risposta)
@@ -522,23 +517,6 @@ export function registerPromptKey(
   return { duplicate: false, seen: next.length > cap ? next.slice(next.length - cap) : next };
 }
 
-// Quante righe di contesto del pane mostrare sopra una domanda dall'hook:
-// abbastanza per orientarsi, non l'intero pane.
-export const PANE_CONTEXT_LINES = 20;
-
-// Task 8, punto 5: righe di contesto del pane da mostrare sopra una domanda
-// di provenienza hook (il testo che il modello ha scritto prima vive solo nel
-// transcript e arriva in ritardo). Ultime `maxLines` righe NON vuote, ANSI
-// già rimosso da stripAnsi, in un blocco <pre> (larghezza fissa, coerente con
-// /view). Stringa vuota se non resta nulla da mostrare — il chiamante la usa
-// come segnale "niente contesto", non come blocco vuoto.
-export function formatPaneContext(pane: string, maxLines = 20): string {
-  const lines = stripAnsi(pane).split('\n').map(l => l.trimEnd()).filter(l => l.trim().length > 0);
-  const tail = lines.slice(-maxLines);
-  if (!tail.length) return '';
-  return `<pre>${htmlEscape(tail.join('\n'))}</pre>\n\n`;
-}
-
 // Reply numerico dell'utente come fallback ai bottoni: "2" → [2], "1, 3" → [1,3].
 // undefined se il testo non è una lista di numeri positivi.
 export function parseNumericReply(text: string): number[] | undefined {
@@ -681,21 +659,26 @@ export function relativeTime(iso: string): string {
   return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
-// Una riga per sessione, con le info che servono a riconoscerla: per le
-// terminali il target tmux, per le headless il modello, più l'ultima attività
-// relativa (la sessione "in uso" è quella con "just now").
+// One session per two lines: the first says title/status/activity, the second
+// the target (tmux for terminal sessions, the model for headless ones). On a
+// narrow screen a single line per session wrapped and mixed the facts; the
+// active session is marked with a filled ● and a bold title (▸ was ambiguous).
 export function sessionListText(sessions: Session[], activeId?: string): string {
   if (!sessions.length) return 'No sessions.';
   return sessions
     .map(s => {
-      const marker = s.id === activeId ? '▸' : ' ';
+      const active = s.id === activeId;
+      const marker = active ? '●' : '○';
       const title = htmlEscape(s.title) || htmlEscape(s.id.slice(0, 8));
+      const status = htmlEscape(s.status);
+      const kindIcon = s.kind === 'terminal' ? '🖥' : '🧠';
       const detail = s.kind === 'terminal'
-        ? (s.tmuxTarget ? `<code>${htmlEscape(s.tmuxTarget)}</code>` : 'no tmux')
-        : `<code>${htmlEscape(s.model ?? 'model')}</code>`;
-      return `${marker} <b>${title}</b> · ${s.kind} · ${detail} — ${s.status} · ${relativeTime(s.lastActivity)}`;
+        ? (s.tmuxTarget ? htmlEscape(s.tmuxTarget) : 'no tmux')
+        : htmlEscape(s.model ?? 'model');
+      const line1 = `${marker} ${active ? `<b>${title}</b>` : title} · ${status} · ${relativeTime(s.lastActivity)}`;
+      return `${line1}\n  ${kindIcon} ${detail}`;
     })
-    .join('\n');
+    .join('\n\n');
 }
 
 // Fotografia dello stato del daemon, resa per Telegram. Serve nella situazione
@@ -732,10 +715,15 @@ export function diagReport(s: DiagSnapshot): string {
 
   const sessions = s.sessions.length
     ? s.sessions.map(x => {
-        const bits = [x.kind, x.status, x.hasTmux ? 'tmux' : 'no-tmux', x.transcript ? 'transcript' : 'no-transcript'];
+        const active = x.id === s.activeSessionId;
+        const marker = active ? '●' : '○';
+        const title = htmlEscape(x.title) || htmlEscape(x.id.slice(0, 8));
+        const kindIcon = x.kind === 'terminal' ? '🖥' : '🧠';
+        const bits = [x.kind, x.hasTmux ? 'tmux' : 'no-tmux', x.transcript ? 'transcript' : 'no-transcript'];
         const modelEffortBranch = [x.model ?? '—', x.effort ?? '—', x.branch ?? '—'].map(htmlEscape).join(' · ');
-        return `• <code>${htmlEscape(x.id.slice(0, 8))}</code> ${htmlEscape(x.title)} — ${htmlEscape(bits.join(' · '))} — ${modelEffortBranch}`;
-      }).join('\n')
+        const line1 = `${marker} ${active ? `<b>${title}</b>` : title} · ${htmlEscape(x.status)}`;
+        return `${line1}\n  ${kindIcon} ${htmlEscape(bits.join(' · '))} · ${modelEffortBranch}`;
+      }).join('\n\n')
     : 'no sessions tracked';
 
   const pending = `permissions ${s.pending.permissions} · dialogs ${s.pending.dialogs} · questions ${s.pending.questionFlows}`;
@@ -806,6 +794,14 @@ export class ToolBurstAggregator {
   // that happened to be slow.
   constructor(private sink: ToolBurstSink, private maxLen = 3800) {}
 
+  // La bolla è SEMPRE nella forma raggruppata, dalla prima tool call: header col
+  // conteggio + blocco espandibile. Una singola call parte già raggruppata, così
+  // 1 e 2+ hanno lo stesso aspetto (coerenza) e le successive si aggiungono dentro.
+  private bubbleText(lines: string[]): string {
+    const n = lines.length;
+    return `▸ <b>${n} ${n === 1 ? 'step' : 'steps'}</b>\n<blockquote expandable>${lines.join('\n\n')}</blockquote>`;
+  }
+
   // Serializza le push: il bus emette in modo sincrono e due tool_use nello stesso
   // tick leggerebbero open/lastWasTool prima di ogni await — la catena rende le
   // mutazioni atomiche rispetto alle push concorrenti. La generazione viene
@@ -823,19 +819,20 @@ export class ToolBurstAggregator {
     if (this.lastWasTool && open) {
       // riga vuota tra una tool call e l'altra: la bubble non diventa un muro
       // di testo, ogni tool call resta riconoscibile come voce separata.
-      const next = [...this.lines, line].join('\n\n');
+      const nextLines = [...this.lines, line];
+      const next = this.bubbleText(nextLines);
       if (next.length <= this.maxLen && await this.sink.edit(open.messageId, next)) {
         if (gen !== this.generation) return; // chiusa nel frattempo: non toccare
-        this.lines.push(line);
+        this.lines = nextLines;
         this.lineIds.push(toolUseId);
         open.text = next;
         return;
       }
     }
-    const id = await this.sink.send(line);
+    const id = await this.sink.send(this.bubbleText([line]));
     if (gen !== this.generation) return; // chiusa nel frattempo: non riaprire
     if (id !== undefined) {
-      this.open = { messageId: id, text: line };
+      this.open = { messageId: id, text: this.bubbleText([line]) };
       this.lines = [line];
       this.lineIds = [toolUseId];
       this.lastWasTool = true;
@@ -857,20 +854,16 @@ export class ToolBurstAggregator {
     if (this.lines[i].startsWith('❌ ')) return; // already marked
     const short = reason.split('\n').find(l => l.trim())?.slice(0, 100) ?? '';
     this.lines[i] = `❌ ${this.lines[i]}${short ? `\n<i>${htmlEscape(short)}</i>` : ''}`;
-    const next = this.lines.join('\n\n');
+    const next = this.bubbleText(this.lines);
     if (next.length <= this.maxLen && await this.sink.edit(open.messageId, next)) {
       open.text = next;
     }
   }
 
-  // At the end of a turn the burst becomes a collapsible block: it stays
-  // consultable but stops taking up the screen in history. With a single line
-  // the blockquote would cost an edit for no gain.
+  // La bolla è già raggruppata a ogni push (vedi bubbleText): alla chiusura non
+  // c'è più nulla da compattare. Il metodo resta per i call-site di chiusura.
   async collapse(): Promise<void> {
-    const open = this.open;
-    if (!open || this.lines.length < 2) return;
-    const body = `▸ <b>${this.lines.length} steps</b>\n<blockquote expandable>${this.lines.join('\n\n')}</blockquote>`;
-    if (body.length <= this.maxLen) await this.sink.edit(open.messageId, body);
+    return;
   }
 
   close(): void {
@@ -900,13 +893,51 @@ export interface BotDeps {
   inbox: Inbox;
   ollama: OllamaClient;
   settingsStore: SettingsStore;
+  bot?: Bot; // iniettabile nei test; default: il Bot grammy reale
+}
+
+// Text→question ordering guarantee: text sends are serialized on a per-session
+// chain, and a prompt waits for the chain — plus a quiet-wait for hook prompts,
+// where the text is already in the transcript but may not have reached the bus
+// yet (poll). Injectable now/sleep for tests, same pattern as
+// EditThrottler/ToolBurstAggregator.
+export class TextOrderGate {
+  private chain = new Map<string, Promise<void>>();
+  private lastTextAt = new Map<string, number>();
+  constructor(
+    private now: () => number = Date.now,
+    private sleep: (ms: number) => Promise<void> = ms => new Promise<void>(r => setTimeout(r, ms)),
+    private onError?: (err: unknown) => void,
+  ) {}
+
+  record(sessionId: string, send: () => Promise<void>): Promise<void> {
+    this.lastTextAt.set(sessionId, this.now());
+    const prev = this.chain.get(sessionId) ?? Promise.resolve();
+    const next = prev.then(send).catch(err => { this.onError?.(err); });
+    this.chain.set(sessionId, next);
+    return next;
+  }
+
+  flush(sessionId: string): Promise<void> {
+    return this.chain.get(sessionId) ?? Promise.resolve();
+  }
+
+  async waitForPrecedingText(sessionId: string, quietMs = 300, capMs = 2000): Promise<void> {
+    const deadline = this.now() + capMs;
+    while (this.now() < deadline) {
+      if (this.now() - (this.lastTextAt.get(sessionId) ?? 0) > quietMs) break;
+      await this.sleep(50);
+    }
+    await this.flush(sessionId);
+  }
 }
 
 export class TelegramBot {
   private bot: Bot;
   private throttler = new EditThrottler(1000);
   private chatId?: number;
-  private lastMsg = new Map<string, { messageId: number; text: string; at: number; role: 'user' | 'assistant' }>();
+  private lastMsg = new Map<string, { messageId: number; raw: string; at: number; role: 'user' | 'assistant' }>();
+  private textOrder = new TextOrderGate(undefined, undefined, err => log().error('text forward failed', { err }));
   private toolBursts = new Map<string, ToolBurstAggregator>();
   // One card per subagent, keyed by the toolUseId of the Task tool_use — the
   // same key the subagent's events carry in parentToolUseId.
@@ -946,7 +977,7 @@ export class TelegramBot {
     this.chatId = deps.manager.getChatId();
     // timeout di sicurezza su ogni chiamata API Telegram (le getUpdates long-poll
     // usano 30s server-side: 35s non le taglia, ma ogni altra chiamata è limitata).
-    this.bot = new Bot(deps.config.telegramBotToken, { client: { timeoutSeconds: 35 } });
+    this.bot = deps.bot ?? new Bot(deps.config.telegramBotToken, { client: { timeoutSeconds: 35 } });
     // senza bot.catch, grammy STOPPA il bot al primo errore di middleware non
     // gestito → il daemon moriva (spec §3.1). Ora logghiamo e si va avanti.
     // I4: console.error non raggiunge daemon.jsonl né /diag — solo daemon.err.log.
@@ -1073,37 +1104,35 @@ export class TelegramBot {
     return duplicate;
   }
 
-  private async forwardText(sessionId: string, text: string, role: 'user' | 'assistant', eventId?: string): Promise<void> {
+  // Converts on the ACCUMULATED text, not piece by piece: a table (or any
+  // markdown block) split across events is recognized once it is complete. The
+  // buffer holds the current bubble's raw markdown; when the converted HTML
+  // exceeds SEND_MAX_CHARS a new message opens with only the new text and the
+  // buffer restarts from there.
+  private async forwardText(sessionId: string, raw: string, role: 'user' | 'assistant', eventId?: string, delta?: boolean): Promise<void> {
     const chatId = this.chatId;
     if (!chatId) { log().warn('send skipped', { sessionId, kind: 'text', reason: 'no-chat-bound' }); return; }
     const last = this.lastMsg.get(sessionId);
     const now = Date.now();
-    // concatena solo messaggi dello stesso ruolo (un turno con più blocchi text
-    // diventa una bubble unica; non mischia mai un echo utente con una risposta).
-    // Il merge si ferma prima del limite Telegram: oltre, ogni edit fallirebbe e
-    // il testo nuovo andrebbe perso — meglio un messaggio nuovo.
-    const merged = last ? `${last.text}\n${text}` : '';
-    if (last && last.role === role && now - last.at < 10_000 && merged.length <= SEND_MAX_CHARS) {
+    // A delta is the tail of a message the CLI rewrote in place: it already
+    // carries its own boundary newline, so it merges without adding one — a
+    // `\n` join would double the newline and break the row run of a streamed
+    // table. Whole messages keep the `\n` join.
+    const merged = last && last.role === role ? (delta ? `${last.raw}${raw}` : `${last.raw}\n${raw}`) : raw;
+    const html = mdToHtml(merged);
+    if (last && last.role === role && now - last.at < 10_000 && html.length <= SEND_MAX_CHARS) {
       const ok = await this.throttler.throttled(() =>
-        this.bot.api.editMessageText(chatId, last.messageId, merged, { parse_mode: 'HTML' }).then(() => true).catch(() => false));
+        this.bot.api.editMessageText(chatId, last.messageId, html, { parse_mode: 'HTML' }).then(() => true).catch(() => false));
       if (ok) {
-        last.text = merged; last.at = now;
-        // I3: chiude la catena — l'edit è andato a buon fine, quindi l'evento è
-        // stato DAVVERO consegnato (non solo tentato). messageId è quello esteso,
-        // lo stesso di prima dell'edit.
+        last.raw = merged; last.at = now;
         log().info('event delivered', { eventId, sessionId, kind: 'text', messageId: last.messageId });
         return;
       }
     }
-    // testo lungo → più messaggi; il tracking punta all'ultimo, che è quello
-    // che eventuali blocchi successivi dello stesso turno estenderanno.
-    const parts = splitHtmlMessage(text);
-    const messageId = await this.sendChunked(chatId, text, {}, { eventId, sessionId });
+    const freshHtml = mdToHtml(raw);
+    const messageId = await this.sendChunked(chatId, freshHtml, {}, { eventId, sessionId });
     if (messageId !== undefined) {
-      this.lastMsg.set(sessionId, { messageId, text: parts[parts.length - 1], at: now, role });
-      // I3: idem, per il path "nuovo messaggio" — un fallimento qui è già
-      // loggato dentro sendChunked (I2), quindi il silenzio in questo punto
-      // significa davvero successo, non un'assenza di segnale.
+      this.lastMsg.set(sessionId, { messageId, raw, at: now, role });
       log().info('event delivered', { eventId, sessionId, kind: 'text', messageId });
     }
   }
@@ -1665,45 +1694,18 @@ export class TelegramBot {
     this.flowsByToken.delete(flow.token);
   }
 
-  // Task 8, punto 5: righe di contesto per un set arrivato dall'hook, su una
-  // sessione terminale. Fire-and-forget rispetto alla domanda — che è già
-  // partita (o accodata) prima che questo venga chiamato: se tmux non
-  // risponde o fallisce, qui si logga soltanto e la domanda resta senza
-  // contesto, mai bloccata né ritentata. Se la cattura torna e la domanda è
-  // ancora quella a schermo (stesso flow, stesso set, prima domanda), il
-  // messaggio viene editato per aggiungere il blocco.
-  private attachPaneContext(flow: QuestionFlow, setIndex: number, sessionId: string, tmuxTarget: string): void {
-    this.deps.tmux.capturePane(tmuxTarget).then(pane => {
-      const block = formatPaneContext(pane, PANE_CONTEXT_LINES);
-      if (!block) return;
-      if (this.questionFlows.get(sessionId) !== flow) return; // flow sostituito/chiuso nel frattempo
-      flow.paneContexts[setIndex] = block;
-      if (flow.setIndex === setIndex && flow.qIndex === 0 && flow.messageId) void this.updateQuestionMessage(flow);
-    }).catch(err => {
-      log().warn('pane context capture failed', { sessionId, err });
-    });
-  }
-
   // Un nuovo set di domande (una chiamata AskUserQuestion) arriva dal bus:
   // accodato al flow della sessione; se il flow è idle, mostra la prima domanda.
   private async onSessionPrompt(sessionId: string, questions: PromptQuestion[], eventId: string | undefined, source: 'transcript' | 'hook' | undefined): Promise<void> {
     let flow = this.questionFlows.get(sessionId);
     if (!flow) {
-      flow = { sessionId, sets: [], eventIds: [], paneContexts: [], setIndex: 0, qIndex: 0, answers: [], token: randomUUID(), multiSel: [] };
+      flow = { sessionId, sets: [], eventIds: [], setIndex: 0, qIndex: 0, answers: [], token: randomUUID(), multiSel: [] };
       this.setFlow(flow);
     }
     const setIndex = flow.sets.length;
     flow.sets.push(questions);
     flow.eventIds.push(eventId);
-    flow.paneContexts.push(undefined);
     flow.answers.push(questions.map(() => undefined));
-    // Punto 5: solo sessioni terminali e solo domande dall'hook — una sessione
-    // headless non ha un pane da catturare, e una domanda dal transcript
-    // arriva già insieme al testo che la precedeva (non c'è ritardo da colmare).
-    const session = this.deps.manager.get(sessionId);
-    if (source === 'hook' && session?.kind === 'terminal' && session.tmuxTarget) {
-      this.attachPaneContext(flow, setIndex, sessionId, session.tmuxTarget);
-    }
     // La prima domanda di un flow nuovo si mostra subito solo se questa
     // sessione è quella selezionata — altrimenti resta in pending: niente
     // interruzioni per sessioni che non stai guardando (vedi sess:select per
@@ -1740,11 +1742,7 @@ export class TelegramBot {
     const sel = q.multiSelect && flow.multiSel.length
       ? `\n\n<i>Selected: ${flow.multiSel.map(i => htmlEscape(q.options[i].label)).join(', ')}</i>`
       : '';
-    // Punto 5: il contesto compare solo sopra la PRIMA domanda del set — è
-    // uno scatto del pane preso quando l'hook è scattato, non qualcosa che ha
-    // senso ripetere identico sotto ogni domanda successiva dello stesso set.
-    const context = flow.qIndex === 0 ? (flow.paneContexts[flow.setIndex] ?? '') : '';
-    return `${context}❓ <b>${htmlEscape(header)}</b>\n<b>${htmlEscape(title)}</b>${multi}\n${opts}${sel}`;
+    return `❓ <b>${htmlEscape(header)}</b>\n<b>${htmlEscape(title)}</b>${multi}\n${opts}${sel}`;
   }
 
   // Bottoni per la domanda corrente: opzioni (toggle per multi-select), Done e Other.
@@ -2390,10 +2388,12 @@ export class TelegramBot {
       void burst.collapse();
       burst.close();
       log().info('event delivering', { eventId: e.eventId, sessionId: e.sessionId, kind: 'text', role: e.role });
-      // sia le headless che i transcript delle terminali arrivano come markdown.
-      void this.forwardText(e.sessionId, mdToHtml(e.text), e.role, e.eventId);
+      // Both headless and terminal transcripts arrive as raw markdown:
+      // forwardText accumulates and converts (see forwardText). The gate chain
+      // serializes the sends and lets prompts wait for the text that precedes them.
+      this.textOrder.record(e.sessionId, () => this.forwardText(e.sessionId, e.text, e.role, e.eventId, e.delta));
     });
-    bus.on('session.prompt', ({ sessionId, questions, eventId, toolUseId, source }) => {
+    bus.on('session.prompt', async ({ sessionId, questions, eventId, toolUseId, source }) => {
       if (!this.passes('prompt', sessionId, eventId).deliver) return;
       // Task 8, punto 4: la stessa domanda arriva due volte — dall'hook e poi
       // dal transcript (stessa tool_use, due sorgenti). La chiave è SOLO la
@@ -2429,6 +2429,17 @@ export class TelegramBot {
       // oppure 'event queued' con il motivo.
       // Fix 2: flusso domande multiple — accoda il set e mostra una domanda alla
       // volta (single-select, multi-select con toggle+Done, "Other" a testo libero).
+      // The text preceding the question must arrive FIRST in chat. A hook
+      // question can beat its text on the bus (already in the transcript but not
+      // yet polled): wait for quiet. A transcript/headless question has its text
+      // emitted in the same drain: just wait for it to be sent. The quiet
+      // threshold is derived from the poll interval so it cannot be shorter than
+      // one poll tick (a shorter wait would break immediately and let the
+      // question precede the final text chunk).
+      if (sessionId === this.deps.manager.getActive()) {
+        if (source === 'hook') await this.textOrder.waitForPrecedingText(sessionId, Math.max(300, this.deps.config.pollIntervalMs + 100));
+        else await this.textOrder.flush(sessionId);
+      }
       this.track(this.onSessionPrompt(sessionId, questions, eventId, source), 'prompt flow');
     });
     bus.on('session.tool', e => {

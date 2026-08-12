@@ -75,6 +75,28 @@ describe('TranscriptParser', () => {
       { type: 'tool', kind: 'tool_use', name: 'Bash', id: 'call_1', input: { command: 'ls' } },
     ]);
   });
+  it('emits only the delta when the CLI rewrites a message with more text', () => {
+    const p = new TranscriptParser();
+    // first sight: whole message, no delta flag
+    expect(p.consumeLine(textLine('m9', 'hello', null))).toEqual([{ type: 'text', role: 'assistant', text: 'hello' }]);
+    // strict extensions: only the new tail, flagged as a delta
+    expect(p.consumeLine(textLine('m9', 'hello world', null))).toEqual([{ type: 'text', role: 'assistant', text: ' world', delta: true }]);
+    expect(p.consumeLine(textLine('m9', 'hello world!', null))).toEqual([{ type: 'text', role: 'assistant', text: '!', delta: true }]);
+  });
+  it('ignores a rewrite that is not an extension of the emitted text', () => {
+    const p = new TranscriptParser();
+    p.consumeLine(textLine('m9', 'first', null));
+    expect(p.consumeLine(textLine('m9', 'other', null))).toEqual([]);
+    expect(p.consumeLine(textLine('m9', 'other text', null))).toEqual([]);
+    // a true extension restarts from the last seen text
+    expect(p.consumeLine(textLine('m9', 'first second', null))).toEqual([{ type: 'text', role: 'assistant', text: ' second', delta: true }]);
+  });
+  it('does not re-emit an equal repeat after the message finishes', () => {
+    const p = new TranscriptParser();
+    p.consumeLine(textLine('m1', 'done', 'end_turn'));
+    // stessa riga che torna (dedupe): testo uguale → nessun delta
+    expect(p.consumeLine(textLine('m1', 'done', 'end_turn')).some(e => e.type === 'text')).toBe(false);
+  });
   it('emits user text and tool results', () => {
     const p = new TranscriptParser();
     expect(p.consumeLine(userLine('ciao'))).toEqual([{ type: 'text', role: 'user', text: 'ciao' }]);
