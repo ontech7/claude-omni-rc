@@ -296,7 +296,7 @@ export function parseLineState(line: string): TranscriptState {
 // assistant viene scritto una riga per blocco, con lo stesso id) per non
 // duplicare i blocchi testuali/tool nel caso il CLI li riscriva.
 export class TranscriptParser {
-  private seenText = new Set<string>();
+  private lastText = new Map<string, string>(); // mid#blockIdx -> ultimo testo visto
   private seenTool = new Set<string>();
   private seenError = new Set<string>();
   state: TranscriptState = 'unknown';
@@ -311,13 +311,24 @@ export class TranscriptParser {
       const mid = m.id ?? '';
       const blocks = Array.isArray(m.content) ? m.content : [];
       let sawPrompt = false;
-      for (const b of blocks) {
+      for (let bi = 0; bi < blocks.length; bi++) {
+        const b = blocks[bi];
         if (!b || typeof b !== 'object') continue;
         if (b.type === 'text' && typeof b.text === 'string' && b.text) {
-          const key = `m:${mid}`;
-          if (this.seenText.has(key)) continue;
-          this.seenText.add(key);
-          events.push({ type: 'text', role: 'assistant', text: b.text });
+          // Il CLI riscrive lo stesso message id con testo via via più lungo (una
+          // riga per blocco, stesso id): si emette solo il DELTA rispetto a quanto già
+          // visto — lo streaming resta live e il turno arriva completo. Una tabella
+          // spezzata da una riscrittura non viene più persa. Un rewrite non-estensione
+          // non emette nulla per quell'id.
+          const key = `m:${mid}#${bi}`;
+          const prev = this.lastText.get(key) ?? '';
+          if (b.text.length > prev.length && b.text.startsWith(prev)) {
+            this.lastText.set(key, b.text);
+            events.push({ type: 'text', role: 'assistant', text: b.text.slice(prev.length) });
+          } else if (!prev) {
+            this.lastText.set(key, b.text);
+            events.push({ type: 'text', role: 'assistant', text: b.text });
+          }
         } else if (b.type === 'tool_use' && b.name) {
           if (b.name === 'AskUserQuestion') {
             // il CLI ha aperto il menu a scelta multipla → attende l'umano
@@ -336,6 +347,9 @@ export class TranscriptParser {
           events.push({ type: 'tool', kind: 'tool_use', name: b.name, id: b.id, input: b.input });
         }
       }
+      // NB: nessuna pulizia di lastText a fine messaggio — il delta-logic deduplica da
+      // solo le righe uguali, e la mappa cresce come cresceva seenText (una voce per
+      // message id visto: limitata dai messaggi della sessione).
       // stop_reason "max_tokens": il turno si è interrotto per limite di output —
       // errore serio da segnalare, una sola notifica per id messaggio.
       if (stop === 'max_tokens') {
