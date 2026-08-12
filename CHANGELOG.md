@@ -27,6 +27,9 @@
   max: the used figure comes from the last assistant turn's token usage in the
   session transcript, the max from the Ollama model context (or a known
   Anthropic window). Works for headless and terminal sessions alike.
+- **`/compact` command.** Compacts the active session's history from the
+  phone: headless sessions get the CLI's `/compact` as a prompt, terminal ones
+  pasted into the tmux pane. The session must be idle to compact.
 - **Behavior change: unknown slash commands are no longer forwarded.** A
   `/something` the bot doesn't own used to be pasted verbatim into the active
   session; now it gets an "Unknown command" reply. Forwarding could leave a

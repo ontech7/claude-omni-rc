@@ -989,6 +989,7 @@ export class TelegramBot {
       { command: 'delete', description: 'Delete a session' },
       { command: 'usage', description: 'Check provider usage (5h / weekly)' },
       { command: 'context', description: 'Show the active session context used vs max' },
+      { command: 'compact', description: 'Compact the active session history' },
       { command: 'diag', description: 'Daemon diagnostics' },
       { command: 'settings', description: 'View / change user settings' },
       { command: 'help', description: 'Show all commands' },
@@ -1245,7 +1246,7 @@ export class TelegramBot {
     const bot = this.bot;
     bot.command('start', ctx => this.safe(ctx, 'start', () => this.onStart(ctx)));
     bot.command('help', ctx => this.safe(ctx, 'help', async () => {
-      if (this.authorize(ctx)) await this.send(ctx, 'Commands: /rc [on|off|status] (no arg toggles) · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /usage · /context · /diag · /settings · /help');
+      if (this.authorize(ctx)) await this.send(ctx, 'Commands: /rc [on|off|status] (no arg toggles) · /sessions · /view · /new &lt;text&gt; · /stop · /status · /attach &lt;project&gt; · /history [id] · /delete [id] · /usage · /context · /compact · /diag · /settings · /help');
     }));
     bot.command('rc', ctx => this.safe(ctx, 'rc', () => this.onRc(ctx)));
     bot.command('sessions', ctx => this.safe(ctx, 'sessions', () => this.onSessions(ctx)));
@@ -1258,6 +1259,7 @@ export class TelegramBot {
     bot.command('delete', ctx => this.safe(ctx, 'delete', () => this.onDelete(ctx)));
     bot.command('usage', ctx => this.safe(ctx, 'usage', () => this.onUsage(ctx)));
     bot.command('context', ctx => this.safe(ctx, 'context', () => this.onContext(ctx)));
+    bot.command('compact', ctx => this.safe(ctx, 'compact', () => this.onCompact(ctx)));
     bot.command('settings', ctx => this.safe(ctx, 'settings', () => this.onSettings(ctx)));
     bot.command('diag', ctx => this.safe(ctx, 'diag', async () => {
       if (!this.authorize(ctx)) return;
@@ -1508,6 +1510,36 @@ export class TelegramBot {
         : await this.deps.ollama.modelContext(session.model);
     }
     await this.send(ctx, renderContext(used, max, session.model));
+  }
+
+  // /compact runs the CLI's compaction on the active session: the CLI treats a
+  // leading-slash prompt as a command, so headless sessions get it through
+  // runTurn and terminal ones by pasting into the tmux pane (recording it so
+  // the echoed line is not re-sent to Telegram).
+  private async onCompact(ctx: Context): Promise<void> {
+    if (!this.authorize(ctx) || !this.requireArmed(ctx)) return;
+    const active = this.deps.manager.getActive();
+    const s = active ? this.deps.manager.get(active) : undefined;
+    if (!s) { await this.send(ctx, 'No active session.'); return; }
+    const id8 = s.id.slice(0, 8);
+    if (s.kind === 'headless') {
+      if (this.deps.sdk.isBusy(s.id)) {
+        await this.send(ctx, '⏳ Session busy: wait for it to go idle before compacting.');
+        return;
+      }
+      this.track(this.deps.sdk.runTurn(s.id, '/compact'), 'runTurn compact');
+      await this.send(ctx, `🧹 Compacting session <code>${htmlEscape(id8)}</code>…`);
+    } else if (s.tmuxTarget) {
+      try {
+        await this.deps.tmux.injectText(s.tmuxTarget, '/compact');
+        this.recordInjected(s.id, '/compact');
+        await this.send(ctx, `🧹 Compacting session <code>${htmlEscape(id8)}</code>…`);
+      } catch (e) {
+        await this.send(ctx, `❌ ${htmlEscape(e instanceof Error ? e.message : String(e))}`);
+      }
+    } else {
+      await this.send(ctx, 'This session is not running in tmux, so /compact can’t be sent.');
+    }
   }
 
   private async sendOllamaUsage(ctx: Context): Promise<void> {

@@ -65,6 +65,7 @@ npm install
 | check / change your settings from the phone | from Telegram: `/settings` (list), `/settings <key> <value>` (set), `/settings reset <key>` — saved to `settings.json`, applies at the next restart |
 | check provider usage (5h / weekly) | from Telegram: `/usage` — Anthropic reads it via the Agent SDK directly; any other provider (Ollama, a custom proxy) shells out to `ollama-usage`, which must be installed and authenticated on the daemon's machine |
 | see how much context the active session has used | from Telegram: `/context` — tokens used vs max (from the transcript's last usage and the model's context window) |
+| compact a session's history from the phone | from Telegram: `/compact` on the active session (headless: sent as a prompt; terminal: pasted into the tmux pane) |
 | run it without launchd | `npm run dev` in the repo (foreground) |
 | uninstall claude-omni-rc | `./install.sh --uninstall` (asks about the Ollama model, then removes launchd, the hooks, and on confirmation the state dir; `.env` is kept) |
 
@@ -95,6 +96,9 @@ npm install
 - `/context` — the active session's context window used vs max (tokens): the
   used figure comes from the last assistant turn's usage in the session
   transcript, the max from the Ollama model context or a known Anthropic window.
+- `/compact` — compact the active session's history (runs the CLI's `/compact`:
+  headless sessions get it as a prompt, terminal ones pasted into the tmux
+  pane). The session must be idle to compact.
 - `/diag` — daemon state, sessions, pending interactions and recent errors;
   per session it shows the model, the reasoning effort and the git branch when
   available (from the structured log at `~/.claude-omni-rc/logs/daemon.jsonl`).
