@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.5.0] - 2026-08-12
 
 - **Readable tool calls.** Tool calls are described in words instead of raw
   JSON: an icon and name per tool (`📖 Read`, `⚡ Bash`, `🧩 Skill`,
@@ -20,9 +20,9 @@
   progress, `👁 Details` expands the tool calls, and it flips to `✅`/`❌`
   when done — instead of mixing into the main chat. Terminal sessions keep
   only the `🤖 Agent` line.
-- **Behavior change:** the Ollama-based tool-call summarizer is removed. The
-  CLI already writes a human `description` on Bash calls, so summarizing cost a
-  local model call (with a 5s timeout per call) for a worse result.
+- **Ollama tool-call summarizer removed.** The CLI already writes a human
+  `description` on Bash calls, so summarizing cost a local model call (with a
+  5s timeout per call) for a worse result.
 - **`/context` command.** Shows the active session's context window used vs
   max: the used figure comes from the last assistant turn's token usage in the
   session transcript, the max from the Ollama model context (or a known
@@ -30,11 +30,11 @@
 - **`/compact` command.** Compacts the active session's history from the
   phone: headless sessions get the CLI's `/compact` as a prompt, terminal ones
   pasted into the tmux pane. The session must be idle to compact.
-- **Behavior change: unknown slash commands are no longer forwarded.** A
-  `/something` the bot doesn't own used to be pasted verbatim into the active
-  session; now it gets an "Unknown command" reply. Forwarding could leave a
-  session stuck — Claude Code's own `/context`, for instance, is an interactive
-  UI that blocks a turn while waiting for input.
+- **Unknown slash commands are no longer forwarded.** A `/something` the bot
+  doesn't own used to be pasted verbatim into the active session; now it gets
+  an "Unknown command" reply. Forwarding could leave a session stuck — Claude
+  Code's own `/context`, for instance, is an interactive UI that blocks a turn
+  while waiting for input.
 - **Tool grouping follows text boundaries.** Consecutive tool calls stay in
   one bubble until a normal message — yours or the model's — arrives; the next
   tool calls then open a fresh bubble. The old time window and the merging of
