@@ -325,11 +325,6 @@ export interface QuestionFlow {
   // `sets` — permette a showQuestion() di loggare la consegna con lo stesso
   // eventId della riga 'event queued'/'event emitted' che l'ha preceduta.
   eventIds: (string | undefined)[];
-  // Task 8, punto 5: blocco di contesto del pane per ciascun set, parallelo a
-  // `sets` — undefined finché la cattura (fire-and-forget, vedi
-  // attachPaneContext) non è tornata, o per sempre se il set non è di
-  // provenienza hook/terminale o la cattura è fallita.
-  paneContexts: (string | undefined)[];
   setIndex: number;           // set corrente
   qIndex: number;             // domanda corrente nel set
   answers: (PromptAnswer | undefined)[][];  // risposte per set, per domanda (undefined = non risposta)
@@ -520,23 +515,6 @@ export function registerPromptKey(
   }
   const next = [...alive, { key, at: now }];
   return { duplicate: false, seen: next.length > cap ? next.slice(next.length - cap) : next };
-}
-
-// Quante righe di contesto del pane mostrare sopra una domanda dall'hook:
-// abbastanza per orientarsi, non l'intero pane.
-export const PANE_CONTEXT_LINES = 20;
-
-// Task 8, punto 5: righe di contesto del pane da mostrare sopra una domanda
-// di provenienza hook (il testo che il modello ha scritto prima vive solo nel
-// transcript e arriva in ritardo). Ultime `maxLines` righe NON vuote, ANSI
-// già rimosso da stripAnsi, in un blocco <pre> (larghezza fissa, coerente con
-// /view). Stringa vuota se non resta nulla da mostrare — il chiamante la usa
-// come segnale "niente contesto", non come blocco vuoto.
-export function formatPaneContext(pane: string, maxLines = 20): string {
-  const lines = stripAnsi(pane).split('\n').map(l => l.trimEnd()).filter(l => l.trim().length > 0);
-  const tail = lines.slice(-maxLines);
-  if (!tail.length) return '';
-  return `<pre>${htmlEscape(tail.join('\n'))}</pre>\n\n`;
 }
 
 // Reply numerico dell'utente come fallback ai bottoni: "2" → [2], "1, 3" → [1,3].
@@ -1716,45 +1694,18 @@ export class TelegramBot {
     this.flowsByToken.delete(flow.token);
   }
 
-  // Task 8, punto 5: righe di contesto per un set arrivato dall'hook, su una
-  // sessione terminale. Fire-and-forget rispetto alla domanda — che è già
-  // partita (o accodata) prima che questo venga chiamato: se tmux non
-  // risponde o fallisce, qui si logga soltanto e la domanda resta senza
-  // contesto, mai bloccata né ritentata. Se la cattura torna e la domanda è
-  // ancora quella a schermo (stesso flow, stesso set, prima domanda), il
-  // messaggio viene editato per aggiungere il blocco.
-  private attachPaneContext(flow: QuestionFlow, setIndex: number, sessionId: string, tmuxTarget: string): void {
-    this.deps.tmux.capturePane(tmuxTarget).then(pane => {
-      const block = formatPaneContext(pane, PANE_CONTEXT_LINES);
-      if (!block) return;
-      if (this.questionFlows.get(sessionId) !== flow) return; // flow sostituito/chiuso nel frattempo
-      flow.paneContexts[setIndex] = block;
-      if (flow.setIndex === setIndex && flow.qIndex === 0 && flow.messageId) void this.updateQuestionMessage(flow);
-    }).catch(err => {
-      log().warn('pane context capture failed', { sessionId, err });
-    });
-  }
-
   // Un nuovo set di domande (una chiamata AskUserQuestion) arriva dal bus:
   // accodato al flow della sessione; se il flow è idle, mostra la prima domanda.
   private async onSessionPrompt(sessionId: string, questions: PromptQuestion[], eventId: string | undefined, source: 'transcript' | 'hook' | undefined): Promise<void> {
     let flow = this.questionFlows.get(sessionId);
     if (!flow) {
-      flow = { sessionId, sets: [], eventIds: [], paneContexts: [], setIndex: 0, qIndex: 0, answers: [], token: randomUUID(), multiSel: [] };
+      flow = { sessionId, sets: [], eventIds: [], setIndex: 0, qIndex: 0, answers: [], token: randomUUID(), multiSel: [] };
       this.setFlow(flow);
     }
     const setIndex = flow.sets.length;
     flow.sets.push(questions);
     flow.eventIds.push(eventId);
-    flow.paneContexts.push(undefined);
     flow.answers.push(questions.map(() => undefined));
-    // Punto 5: solo sessioni terminali e solo domande dall'hook — una sessione
-    // headless non ha un pane da catturare, e una domanda dal transcript
-    // arriva già insieme al testo che la precedeva (non c'è ritardo da colmare).
-    const session = this.deps.manager.get(sessionId);
-    if (source === 'hook' && session?.kind === 'terminal' && session.tmuxTarget) {
-      this.attachPaneContext(flow, setIndex, sessionId, session.tmuxTarget);
-    }
     // La prima domanda di un flow nuovo si mostra subito solo se questa
     // sessione è quella selezionata — altrimenti resta in pending: niente
     // interruzioni per sessioni che non stai guardando (vedi sess:select per
@@ -1791,11 +1742,7 @@ export class TelegramBot {
     const sel = q.multiSelect && flow.multiSel.length
       ? `\n\n<i>Selected: ${flow.multiSel.map(i => htmlEscape(q.options[i].label)).join(', ')}</i>`
       : '';
-    // Punto 5: il contesto compare solo sopra la PRIMA domanda del set — è
-    // uno scatto del pane preso quando l'hook è scattato, non qualcosa che ha
-    // senso ripetere identico sotto ogni domanda successiva dello stesso set.
-    const context = flow.qIndex === 0 ? (flow.paneContexts[flow.setIndex] ?? '') : '';
-    return `${context}❓ <b>${htmlEscape(header)}</b>\n<b>${htmlEscape(title)}</b>${multi}\n${opts}${sel}`;
+    return `❓ <b>${htmlEscape(header)}</b>\n<b>${htmlEscape(title)}</b>${multi}\n${opts}${sel}`;
   }
 
   // Bottoni per la domanda corrente: opzioni (toggle per multi-select), Done e Other.

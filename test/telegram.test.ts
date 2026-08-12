@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { resolveHeadlessProjectDir, isPrivateChat, parseCommand, parseNewFlags, parseSettingsCommand, formatSettingsReport, formatSettingsKey, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, stopReply, TypingIndicator, answerSummary, answerToKeys, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, formatPaneContext, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
+import { resolveHeadlessProjectDir, isPrivateChat, parseCommand, parseNewFlags, parseSettingsCommand, formatSettingsReport, formatSettingsKey, parseCallbackData, permissionMessage, permissionKeyboard, sessionListText, EditThrottler, attachmentPlan, stripAnsi, relativeTime, ToolBurstAggregator, promptMessage, promptLayout, matchesInjected, renderHistory, stopReply, TypingIndicator, answerSummary, answerToKeys, answersToMessage, parseNumericReply, dialogMessage, dialogKeyboard, formatPct, formatResetAt, gateSessionEvent, diagReport, promptDedupeKey, registerPromptKey, PROMPT_DEDUPE_MAX_AGE_MS } from '../bot/telegram.js';
 import type { ToolBurstSink, PromptKeyEntry } from '../bot/telegram.js';
 import { truncateAtWord, mdToHtml, splitHtmlMessage } from '../bot/render.js';
 import { loadConfig } from '../src/config.js';
@@ -875,29 +875,6 @@ describe('registerPromptKey', () => {
     const seen = [entry('id:toolu_1', 0)];
     const { duplicate } = registerPromptKey(seen, 'id:toolu_1', { now: PROMPT_DEDUPE_MAX_AGE_MS * 10 });
     expect(duplicate).toBe(true);
-  });
-});
-
-describe('formatPaneContext', () => {
-  it('strips ANSI, drops empty lines, and wraps the last N non-empty lines in a fixed-width block', () => {
-    const pane = '\x1b[32m$ npm test\x1b[0m\n\n  passing (12)\n\n';
-    const out = formatPaneContext(pane, 20);
-    expect(out).toContain('<pre>');
-    expect(out).toContain('$ npm test');
-    expect(out).toContain('passing (12)');
-    expect(out).not.toContain('\x1b');
-  });
-
-  it('keeps only the last maxLines non-empty lines', () => {
-    const pane = Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n');
-    const out = formatPaneContext(pane, 5);
-    expect(out).toContain('line 29');
-    expect(out).not.toContain('line 24');
-  });
-
-  it('returns an empty string when there is nothing to show — the caller treats this as "no context", not an empty block', () => {
-    expect(formatPaneContext('\n\n   \n')).toBe('');
-    expect(formatPaneContext('')).toBe('');
   });
 });
 
