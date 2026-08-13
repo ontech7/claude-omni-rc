@@ -325,6 +325,12 @@ export interface QuestionFlow {
   // `sets` — permette a showQuestion() di loggare la consegna con lo stesso
   // eventId della riga 'event queued'/'event emitted' che l'ha preceduta.
   eventIds: (string | undefined)[];
+  // toolUseId della tool_use AskUserQuestion che ha generato ciascun set,
+  // parallelo a `sets`. Serve a correlare il tool_result che il transcript
+  // scrive quando l'utente risponde al terminale: se l'id corrisponde al set
+  // corrente, la domanda è stata risolta fuori da Telegram e va marcata come
+  // tale invece di restare appesa coi bottoni.
+  toolUseIds: (string | undefined)[];
   setIndex: number;           // set corrente
   qIndex: number;             // domanda corrente nel set
   answers: (PromptAnswer | undefined)[][];  // risposte per set, per domanda (undefined = non risposta)
@@ -924,8 +930,21 @@ export class TextOrderGate {
 
   async waitForPrecedingText(sessionId: string, quietMs = 300, capMs = 2000): Promise<void> {
     const deadline = this.now() + capMs;
+    const lastAtStart = this.lastTextAt.get(sessionId) ?? 0;
+    // The text preceding a hook question is already in the transcript but may
+    // not have reached the bus yet (the transcript watcher polls). If a text
+    // event was recorded recently, the text is flowing: wait for quiet after it.
+    // If not, the poll hasn't drained the text yet: wait for the first text
+    // event of this turn, then for quiet. Without this, a hook prompt that beats
+    // its text on the bus (lastTextAt stale or 0) would break out immediately
+    // and the question would precede the text in chat.
+    // `lastAtStart` is 0 only when no text was ever recorded (real timestamps
+    // are never 0): then now - 0 is huge and textWasFlowing is false.
+    const textWasFlowing = this.now() - lastAtStart < quietMs;
     while (this.now() < deadline) {
-      if (this.now() - (this.lastTextAt.get(sessionId) ?? 0) > quietMs) break;
+      const last = this.lastTextAt.get(sessionId) ?? 0;
+      const textIsCurrent = textWasFlowing || last > lastAtStart;
+      if (textIsCurrent && this.now() - last > quietMs) break;
       await this.sleep(50);
     }
     await this.flush(sessionId);
@@ -1696,15 +1715,16 @@ export class TelegramBot {
 
   // Un nuovo set di domande (una chiamata AskUserQuestion) arriva dal bus:
   // accodato al flow della sessione; se il flow è idle, mostra la prima domanda.
-  private async onSessionPrompt(sessionId: string, questions: PromptQuestion[], eventId: string | undefined, source: 'transcript' | 'hook' | undefined): Promise<void> {
+  private async onSessionPrompt(sessionId: string, questions: PromptQuestion[], eventId: string | undefined, source: 'transcript' | 'hook' | undefined, toolUseId?: string): Promise<void> {
     let flow = this.questionFlows.get(sessionId);
     if (!flow) {
-      flow = { sessionId, sets: [], eventIds: [], setIndex: 0, qIndex: 0, answers: [], token: randomUUID(), multiSel: [] };
+      flow = { sessionId, sets: [], eventIds: [], toolUseIds: [], setIndex: 0, qIndex: 0, answers: [], token: randomUUID(), multiSel: [] };
       this.setFlow(flow);
     }
     const setIndex = flow.sets.length;
     flow.sets.push(questions);
     flow.eventIds.push(eventId);
+    flow.toolUseIds.push(toolUseId);
     flow.answers.push(questions.map(() => undefined));
     // La prima domanda di un flow nuovo si mostra subito solo se questa
     // sessione è quella selezionata — altrimenti resta in pending: niente
@@ -1820,6 +1840,22 @@ export class TelegramBot {
     await this.bot.api.editMessageText(this.chatId, flow.messageId, text, {
       parse_mode: 'HTML', reply_markup: new InlineKeyboard(),
     }).catch(this.logCatch('prompt edit'));
+  }
+
+  // L'utente ha risposto a questa domanda al terminale (il tool_result della
+  // tool_use AskUserQuestion è arrivato dal transcript): la domanda in chat non
+  // deve restare appesa coi bottoni. Si marca come risolta e si elimina il flow
+  // — l'utente sta rispondendo al terminale, il flow non serve più; se il
+  // modello farà un'altra domanda, il prossimo session.prompt lo ricrea.
+  private async markQuestionAnsweredAtTerminal(flow: QuestionFlow): Promise<void> {
+    if (flow.messageId && this.chatId) {
+      const q = flow.sets[flow.setIndex][flow.qIndex];
+      const text = `${this.renderQuestion(flow, q)}\n\n✅ <b>Answered at the terminal</b>`;
+      await this.bot.api.editMessageText(this.chatId, flow.messageId, text, {
+        parse_mode: 'HTML', reply_markup: new InlineKeyboard(),
+      }).catch(this.logCatch('prompt edit'));
+    }
+    this.deleteFlow(flow);
   }
 
   // Prompt per il testo libero "Other" (con Cancel per tornare ai bottoni).
@@ -2409,6 +2445,17 @@ export class TelegramBot {
       const dedupeKey = promptDedupeKey(sessionId, questions);
       if (this.isDuplicatePrompt(sessionId, dedupeKey)) {
         log().info('event dropped', { eventId, sessionId, kind: 'prompt', reason: 'duplicate-prompt', toolUseId, source });
+        // La copia transcript porta il tool_use_id che la copia hook di 2.1.227
+        // non ha (l'hook scatta prima che la tool_use esista). Se la copia hook
+        // ha vinto la dedupe, il toolUseId del set è rimasto undefined: lo si
+        // registra qui, così il tool_result (scritto quando l'utente risponde al
+        // terminale) può essere correlato alla domanda e marcarla come risolta.
+        if (source === 'transcript' && toolUseId) {
+          const flow = this.questionFlows.get(sessionId);
+          if (flow && flow.toolUseIds[flow.setIndex] === undefined) {
+            flow.toolUseIds[flow.setIndex] = toolUseId;
+          }
+        }
         return;
       }
       // L'evento va SEMPRE registrato (mai scartato, a differenza di
@@ -2440,9 +2487,22 @@ export class TelegramBot {
         if (source === 'hook') await this.textOrder.waitForPrecedingText(sessionId, Math.max(300, this.deps.config.pollIntervalMs + 100));
         else await this.textOrder.flush(sessionId);
       }
-      this.track(this.onSessionPrompt(sessionId, questions, eventId, source), 'prompt flow');
+      this.track(this.onSessionPrompt(sessionId, questions, eventId, source, toolUseId), 'prompt flow');
     });
     bus.on('session.tool', e => {
+      // L'utente ha risposto a una domanda AskUserQuestion al terminale: il
+      // tool_result della tool_use arriva quando il turno si sblocca. Va
+      // gestito PRIMA del gate — il gate scarta i tool per le sessioni non
+      // attive, ma la domanda è stata mostrata comunque (i prompt passano
+      // sempre) e non deve restare appesa coi bottoni. Il check su
+      // `answers[...]` esclude il caso in cui la domanda corrente è già stata
+      // risposta via Telegram (il flow è avanzato o sta avanzando).
+      if (e.kind === 'tool_result' && e.toolUseId) {
+        const flow = this.questionFlows.get(e.sessionId);
+        if (flow && flow.toolUseIds[flow.setIndex] === e.toolUseId && !flow.answers[flow.setIndex][flow.qIndex]) {
+          this.track(this.markQuestionAnsweredAtTerminal(flow), 'question answered at terminal');
+        }
+      }
       if (!this.passes('tool', e.sessionId, e.eventId).deliver) return;
       if (e.parentToolUseId) {
         // Activity of a subagent: it does not enter the main stream nor the
