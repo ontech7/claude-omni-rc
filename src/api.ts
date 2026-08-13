@@ -75,8 +75,13 @@ export function startApi(port: number, deps: ApiDeps): ApiHandle {
         // long-poll: la richiesta resta aperta finché l'utente non decide
         // (o scade PERMISSION_TIMEOUT_SECONDS → deny).
         const decision = await deps.permissionFlow.request(sid, toolName, (input.input ?? {}) as Record<string, unknown>);
-        res.writeHead(200, { 'content-type': 'text/plain' });
-        res.end(decision.behavior === 'allow' ? 'allow' : 'deny');
+        // Risposta JSON, non più 'allow'/'deny' in chiaro: il CLI (≥2.1.199)
+        // scarta un allow SENZA updatedInput per i tool con
+        // requiresUserInteraction() (ExitPlanMode) e lascia la UI del piano
+        // appesa. L'hook propaga updatedInput nella decisione; per gli altri
+        // tool (Bash, Edit, …) updatedInput è assente e l'allow resta valido.
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(decision));
       });
       return;
     }
