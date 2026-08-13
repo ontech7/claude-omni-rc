@@ -55,6 +55,8 @@ case "$RESP" in
     printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
     ;;
   deny)
+    # Compatibility fallback for a pre-JSON daemon: the current daemon answers
+    # every permission decision as JSON, so plain-text 'deny' is never produced.
     printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Rejected from Telegram"}}}'
     ;;
   *) # JSON decision from the daemon: {behavior, updatedInput?, message?}. The
