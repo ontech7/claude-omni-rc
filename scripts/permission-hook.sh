@@ -47,11 +47,30 @@ RESP="$(printf '%s' "$PAYLOAD" | curl -fsS --max-time "$MAX_WAIT" -X POST "$BASE
   -H 'content-type: application/json' -d @- 2>/dev/null)" || exit 0
 
 case "$RESP" in
+  ask) exit 0 ;; # no decision → native prompt
   allow)
+    # AskUserQuestion auto-allow (the daemon answers plain 'allow'): the CLI
+    # drops it (no updatedInput) and keeps the interactive menu, which the bot
+    # drives with key injection — same as before.
     printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
     ;;
   deny)
+    # Compatibility fallback for a pre-JSON daemon: the current daemon answers
+    # every permission decision as JSON, so plain-text 'deny' is never produced.
     printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Rejected from Telegram"}}}'
     ;;
-  *) exit 0 ;; # no decision → native prompt
+  *) # JSON decision from the daemon: {behavior, updatedInput?, message?}. The
+     # updatedInput is required for ExitPlanMode: the CLI (≥2.1.199) drops an
+     # allow without it and keeps the interactive plan UI up — the session
+     # would stay stuck on the plan. Echoing the tool input back as
+     # updatedInput is the documented way to approve the plan programmatically.
+     OUT="$(printf '%s' "$RESP" | node -e '
+const resp = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const decision = { behavior: resp.behavior };
+if (resp.behavior === "allow" && resp.updatedInput) decision.updatedInput = resp.updatedInput;
+if (resp.behavior === "deny") decision.message = resp.message ?? "Rejected from Telegram";
+console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision } }));
+' 2>/dev/null)" || exit 0
+     printf '%s\n' "$OUT"
+     ;;
 esac

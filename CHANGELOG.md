@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.7.0] - 2026-08-13
+
+- **Plan approval works from the phone on terminal sessions too.** The
+  `PermissionRequest` hook now returns the plan as `updatedInput` with the
+  `allow` decision — the CLI (≥2.1.199) drops an `allow` without it for
+  `ExitPlanMode` and keeps the interactive plan UI up, which left the session
+  stuck on the plan. ✓ Approve / ✗ Reject / ✏️ Edit now resolve the plan from
+  Telegram on tmux sessions, not just headless ones.
+- **Questions answered at the terminal are marked as answered.** When you
+  answer an `AskUserQuestion` in the tmux pane, the question in chat is edited
+  to "✅ Answered at the terminal" (buttons removed) instead of staying
+  pending, and it is no longer re-shown when you select the session with
+  `/sessions`.
+- **Text always precedes the question.** A question arriving from the hook
+  before its text has been polled from the transcript now waits for the text
+  instead of jumping ahead of it in chat.
+
 ## [0.6.0] - 2026-08-12
 
 - **Readable session lists.** `/sessions` and `/diag` show each session on two

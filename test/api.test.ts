@@ -104,7 +104,33 @@ describe('startApi', () => {
     permissionFlow.approve(captured!.id);
     const res = await req;
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe('allow');
+    expect(await res.json()).toEqual({ behavior: 'allow' });
+  });
+
+  it('propagates updatedInput for an ExitPlanMode approval (the CLI needs it to exit plan mode)', async () => {
+    const { manager, permissionFlow, api, bus } = makeApi();
+    open.push(api);
+    await api.ready;
+    manager.setArmed(true);
+    manager.registerTerminal({ title: 'proj', projectDir: '/tmp/proj', tmuxTarget: 'claude:proj' });
+    let captured: { id: string } | undefined;
+    let resolveCapture: (() => void) | undefined;
+    const capturedPromise = new Promise<void>(r => { resolveCapture = r; });
+    bus.on('session.permission', ({ permission }) => {
+      captured = permission;
+      resolveCapture?.();
+    });
+    const plan = { plan: 'step 1\nstep 2', planFilePath: '/tmp/proj/plan.md', allowedPrompts: [] };
+    const req = fetch(`http://127.0.0.1:${api.port()}/api/permission`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ toolName: 'ExitPlanMode', input: plan, sessionId: 'claude:proj' }),
+    });
+    await capturedPromise;
+    // Approve conferma il piano originale come updatedInput (vedi onCallback).
+    permissionFlow.approve(captured!.id, plan);
+    const res = await req;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ behavior: 'allow', updatedInput: plan });
   });
 
   it('denies on timeout once armed (shown to the user) and nobody answers', async () => {
@@ -120,7 +146,7 @@ describe('startApi', () => {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ toolName: 'Bash', input: { command: 'ls' }, sessionId: 'claude:proj' }),
     });
-    expect(await res.text()).toBe('deny');
+    expect(await res.json()).toEqual({ behavior: 'deny', message: 'Timeout 1s' });
     expect(Date.now() - started).toBeGreaterThanOrEqual(900);
   });
 

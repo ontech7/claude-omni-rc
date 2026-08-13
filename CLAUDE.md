@@ -94,6 +94,13 @@ breaks:
 | a new setting, or changing a default | `adding-a-config-option` |
 | anything in `src/sessions/`, the bus, or state | `changing-session-plumbing` |
 | committing, pushing, releasing | `shipping-a-change` |
+| starting any implementation, adding a dependency, deciding how much to build | `keep-it-simple` |
+| opening a pull request | `open-pr` (runs the `pr-reviewer` subagent first) |
+
+The `pr-reviewer` subagent (`.claude/agents/pr-reviewer.md`) does a
+senior-architect self-review of the current branch — edge cases, bugs by
+severity, security, consistency — and is invoked by `open-pr` before the PR is
+created.
 
 ## Reporting work
 

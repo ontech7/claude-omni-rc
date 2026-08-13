@@ -172,12 +172,11 @@ or `/attach`, whatever model backs it.
   new plan text as a message, and the edited plan is sent back to the session.
   A model refusal offers 🔄 Retry / Skip. Any other blocking dialog the CLI asks
   for is shown with a Cancel button rather than ignored, so a session never
-  parks waiting for input you can't give. **Terminal sessions are different**:
-  the plan approval is a full-screen interactive UI inside the tmux pane that
-  the bot cannot drive — you can approve/reject the "Exit plan mode?"
-  permission from Telegram, but the plan itself must be approved at the
-  terminal. Start plan-heavy work with `/new` if you need to review plans from
-  your phone.
+  parks waiting for input you can't give. **Terminal sessions work the same
+  way**: the plan approval is a full-screen interactive UI inside the tmux
+  pane, but the ✓ Approve / ✗ Reject / ✏️ Edit buttons resolve it from
+  Telegram — the decision is sent back to the CLI with the plan as
+  `updatedInput`, which is what the CLI needs to exit plan mode.
 - **Interact 1:1** — your message is pasted into the pane and submitted. Needs
   tmux; a session outside tmux streams as chat but is read-only.
 - **Headless sessions** (`/new`) run in the first `WORKSPACE_DIRS` entry, which
@@ -356,7 +355,7 @@ Disable it with `CLAUDE_OMNI_RC_NO_UPDATE_CHECK=1` in `.env`.
 | A session doesn't show up | Sessions come from `claude:*` tmux discovery, the SessionStart hook or `/attach`. Check the hook is in `~/.claude/settings.json`, the daemon is up, and `API_PORT` is free. |
 | The session streams nothing | Only the **active** session streams — select it with `/sessions`. If it has no transcript, use `/view`. Check `PROJECTS_DIR` matches where the CLI writes. |
 | Permission prompts hang in the terminal | The daemon is armed but has no chat bound. Send any message to the bot; the chat is then remembered across restarts. |
-| A terminal session shows a plan I can't approve from the phone | The plan approval is a full-screen terminal UI the bot can't drive. Approve it at the terminal, or start plan-heavy work with `/new` (headless) to review plans from Telegram. |
+| A terminal session shows a plan I can't approve from the phone | The plan approval is a full-screen terminal UI, but the ✓ Approve / ✗ Reject / ✏️ Edit buttons resolve it from Telegram (the decision is sent back with the plan as `updatedInput`). If the buttons don't appear, check the daemon is armed and a chat is bound. |
 | A message never arrived on Telegram | `/diag` from the phone, then `~/.claude-omni-rc/logs/daemon.jsonl`: every event carries an `eventId` from the transcript to the delivered message, and a dropped one is logged with its reason. |
 
 **Can I move a running session into tmux?** No — a running process can't be

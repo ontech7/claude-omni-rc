@@ -1043,11 +1043,24 @@ describe('TextOrderGate', () => {
     expect(order).toEqual(['a-start', 'a-end', 'b']);
   });
 
-  it('waitForPrecedingText returns immediately when no text is pending', async () => {
-    let now = 0;
+  it('waits for the first text event when none is pending, then flushes it', async () => {
+    let now = 1_000_000; // timestamp reale: 0 = mai registrato testo
     const gate = new TextOrderGate(() => now, ms => new Promise<void>(r => setTimeout(r, ms)));
-    now = 1000; // mai registrato testo per la sessione: la quiete scatta subito
-    await gate.waitForPrecedingText('s1'); // nessun testo registrato → nessuna attesa
+    const order: string[] = [];
+    let resolved = false;
+    // Nessun testo registrato: la quiete NON scatta subito — il poll del watcher
+    // non ha ancora drenato il testo che precede la domanda hook. L'attesa deve
+    // restare in sospeso finché non arriva il primo evento di testo.
+    const p = gate.waitForPrecedingText('s1', 300, 2000).then(() => { resolved = true; });
+    now = 1_001_000; // nessun testo arrivato: l'attesa continua
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(resolved).toBe(false); // non è già finita prima del testo
+    void gate.record('s1', async () => { order.push('text'); }); // il poll drena il testo
+    now = 1_001_400; // quiete scattata (400 > 300ms dall'ultimo testo)
+    await p;
+    expect(resolved).toBe(true);
+    expect(order).toEqual(['text']);
   });
 
   it('waits for a hook prompt until text goes quiet, then flushes it', async () => {
@@ -1112,6 +1125,139 @@ describe('text → question ordering', () => {
     const [textMsg, questionMsg] = api.sendMessage.mock.calls.map(c => c[1] as string);
     expect(textMsg).toContain('Before the question.');
     expect(questionMsg).toContain('Pick one');
+  });
+
+  it('holds a hook question until the transcript poll drains its preceding text', async () => {
+    vi.useFakeTimers();
+    try {
+      const { bus, manager, api } = makeBot();
+      const s = manager.createHeadless({ title: 't', projectDir: '/tmp/x' });
+      manager.setActive(s.id);
+      // Hook prompt: il testo che lo precede è già nel transcript ma il poll del
+      // watcher non l'ha ancora drenato. La domanda NON deve partire subito.
+      bus.emit({ type: 'session.prompt', sessionId: s.id, questions: [{ question: 'Pick one', multiSelect: false, options: [{ label: 'A' }, { label: 'B' }] }], eventId: 'e1', source: 'hook' });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(api.sendMessage).not.toHaveBeenCalled();
+      // Il poll drena il testo che precede la domanda.
+      bus.emit({ type: 'session.text', sessionId: s.id, role: 'assistant', text: 'Before the question.', eventId: 'e2' });
+      // Quiete dopo il testo (pollIntervalMs + 100 = 600ms) → la domanda parte dopo.
+      await vi.advanceTimersByTimeAsync(700);
+      const msgs = api.sendMessage.mock.calls.map(c => c[1] as string);
+      expect(msgs[0]).toContain('Before the question.');
+      expect(msgs[1]).toContain('Pick one');
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+// ---------- domanda risolta al terminale ----------
+
+// Quando l'utente risponde a una AskUserQuestion nel terminale (non da
+// Telegram), il transcript scrive il tool_result della tool_use: il bot deve
+// marcare la domanda come risolta invece di lasciarla appesa coi bottoni, e non
+// deve ri-mostrarla su /sessions select.
+describe('question answered at the terminal', () => {
+  function handlerFor(fakeBot: { on: ReturnType<typeof vi.fn> }, event: string): (ctx: any) => Promise<unknown> {
+    const calls = fakeBot.on.mock.calls as [string, (ctx: any) => Promise<unknown>][];
+    const hit = calls.find(([e]) => e === event);
+    if (!hit) throw new Error(`handler for ${event} not registered`);
+    return hit[1];
+  }
+
+  function makeCtx(overrides: Record<string, unknown> = {}) {
+    return {
+      chat: { type: 'private', id: 12345 },
+      from: { id: 123 },
+      callbackQuery: { data: '', message: { text: 'original', message_id: 1 } },
+      answerCallbackQuery: vi.fn(async () => ({})),
+      editMessageText: vi.fn(async () => ({ ok: true })),
+      ...overrides,
+    };
+  }
+
+  const questions = [{ question: 'Pick one', multiSelect: false, options: [{ label: 'A' }, { label: 'B' }] }];
+
+  it('marks the question as answered when its tool_result arrives from the terminal', async () => {
+    vi.useFakeTimers();
+    try {
+      const { bus, manager, api } = makeBot();
+      const s = manager.registerTerminal({ title: 't', projectDir: '/tmp/x', tmuxTarget: 'claude:t' });
+      manager.setActive(s.id);
+      bus.emit({ type: 'session.text', sessionId: s.id, role: 'assistant', text: 'Before the question.', eventId: 'e0' });
+      bus.emit({ type: 'session.prompt', sessionId: s.id, questions, eventId: 'e1', toolUseId: 'call_1', source: 'hook' });
+      await vi.advanceTimersByTimeAsync(700); // quiete dopo il testo → la domanda parte
+      expect(api.sendMessage).toHaveBeenCalledTimes(2); // testo + domanda
+      // L'utente risponde al terminale: il transcript scrive il tool_result.
+      bus.emit({ type: 'session.tool', sessionId: s.id, toolName: '', kind: 'tool_result', toolUseId: 'call_1', result: 'A', eventId: 'e2' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(api.editMessageText).toHaveBeenCalled();
+      const edited = api.editMessageText.mock.calls[0][2] as string;
+      expect(edited).toContain('Answered at the terminal');
+      // i bottoni vengono svuotati (keyboard senza bottoni)
+      const opts = api.editMessageText.mock.calls[0][3] as { reply_markup?: { inline_keyboard: unknown[][] } };
+      expect(opts.reply_markup?.inline_keyboard.flat()).toEqual([]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('records the toolUseId from the dropped transcript copy so the tool_result can match', async () => {
+    vi.useFakeTimers();
+    try {
+      const { bus, manager, api } = makeBot();
+      const s = manager.registerTerminal({ title: 't', projectDir: '/tmp/x', tmuxTarget: 'claude:t' });
+      manager.setActive(s.id);
+      bus.emit({ type: 'session.text', sessionId: s.id, role: 'assistant', text: 'Before the question.', eventId: 'e0' });
+      // La copia hook di 2.1.227 non porta il tool_use_id: il set parte senza.
+      bus.emit({ type: 'session.prompt', sessionId: s.id, questions, eventId: 'e1', source: 'hook' });
+      await vi.advanceTimersByTimeAsync(700);
+      expect(api.sendMessage).toHaveBeenCalledTimes(2);
+      // La copia transcript (duplicata) porta l'id: va registrato sul set.
+      bus.emit({ type: 'session.prompt', sessionId: s.id, questions, eventId: 'e2', toolUseId: 'call_1', source: 'transcript' });
+      // Il tool_result ora può essere correlato alla domanda.
+      bus.emit({ type: 'session.tool', sessionId: s.id, toolName: '', kind: 'tool_result', toolUseId: 'call_1', result: 'A', eventId: 'e3' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(api.editMessageText).toHaveBeenCalled();
+      expect(api.editMessageText.mock.calls[0][2] as string).toContain('Answered at the terminal');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not re-show a question already answered at the terminal on /sessions select', async () => {
+    vi.useFakeTimers();
+    try {
+      const { bus, manager, api, fakeBot } = makeBot();
+      manager.addAuthorizedUser(123);
+      const s = manager.registerTerminal({ title: 't', projectDir: '/tmp/x', tmuxTarget: 'claude:t' });
+      manager.setActive(s.id);
+      bus.emit({ type: 'session.text', sessionId: s.id, role: 'assistant', text: 'Before the question.', eventId: 'e0' });
+      bus.emit({ type: 'session.prompt', sessionId: s.id, questions, eventId: 'e1', toolUseId: 'call_1', source: 'hook' });
+      await vi.advanceTimersByTimeAsync(700);
+      bus.emit({ type: 'session.tool', sessionId: s.id, toolName: '', kind: 'tool_result', toolUseId: 'call_1', result: 'A', eventId: 'e2' });
+      await vi.advanceTimersByTimeAsync(0);
+      // Seleziona la sessione: la domanda risolta NON deve riapparire.
+      const handler = handlerFor(fakeBot, 'callback_query:data');
+      const ctx = makeCtx({ callbackQuery: { data: `sess:select:${s.id}`, message: { text: 'original', message_id: 1 } } });
+      await handler(ctx);
+      const texts = api.sendMessage.mock.calls.map(c => c[1] as string);
+      expect(texts.filter(t => t.includes('Pick one'))).toHaveLength(1); // solo la prima volta
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('keeps a queued set when a question is answered at the terminal', async () => {
+    vi.useFakeTimers();
+    try {
+      const { bus, manager, api } = makeBot();
+      const s = manager.registerTerminal({ title: 't', projectDir: '/tmp/x', tmuxTarget: 'claude:t' });
+      manager.setActive(s.id);
+      bus.emit({ type: 'session.text', sessionId: s.id, role: 'assistant', text: 'Before the question.', eventId: 'e0' });
+      bus.emit({ type: 'session.prompt', sessionId: s.id, questions, eventId: 'e1', toolUseId: 'call_1', source: 'hook' });
+      await vi.advanceTimersByTimeAsync(700); // la prima domanda parte
+      // Il modello chiede subito un secondo set: viene accodato al flow.
+      bus.emit({ type: 'session.prompt', sessionId: s.id, questions: [{ question: 'Pick two', multiSelect: false, options: [{ label: 'C' }, { label: 'D' }] }], eventId: 'e2', toolUseId: 'call_2', source: 'transcript' });
+      // L'utente risponde al primo set al terminale.
+      bus.emit({ type: 'session.tool', sessionId: s.id, toolName: '', kind: 'tool_result', toolUseId: 'call_1', result: 'A', eventId: 'e3' });
+      await vi.advanceTimersByTimeAsync(0);
+      // Il secondo set NON deve andare perso: viene mostrato.
+      const texts = api.sendMessage.mock.calls.map(c => c[1] as string);
+      expect(texts.some(t => t.includes('Pick two'))).toBe(true);
+    } finally { vi.useRealTimers(); }
   });
 });
 
