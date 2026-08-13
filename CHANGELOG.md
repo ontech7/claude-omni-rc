@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.7.0] - 2026-08-13
 
 - **Plan approval works from the phone on terminal sessions too.** The
   `PermissionRequest` hook now returns the plan as `updatedInput` with the
