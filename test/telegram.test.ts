@@ -1239,6 +1239,26 @@ describe('question answered at the terminal', () => {
       expect(texts.filter(t => t.includes('Pick one'))).toHaveLength(1); // solo la prima volta
     } finally { vi.useRealTimers(); }
   });
+
+  it('keeps a queued set when a question is answered at the terminal', async () => {
+    vi.useFakeTimers();
+    try {
+      const { bus, manager, api } = makeBot();
+      const s = manager.registerTerminal({ title: 't', projectDir: '/tmp/x', tmuxTarget: 'claude:t' });
+      manager.setActive(s.id);
+      bus.emit({ type: 'session.text', sessionId: s.id, role: 'assistant', text: 'Before the question.', eventId: 'e0' });
+      bus.emit({ type: 'session.prompt', sessionId: s.id, questions, eventId: 'e1', toolUseId: 'call_1', source: 'hook' });
+      await vi.advanceTimersByTimeAsync(700); // la prima domanda parte
+      // Il modello chiede subito un secondo set: viene accodato al flow.
+      bus.emit({ type: 'session.prompt', sessionId: s.id, questions: [{ question: 'Pick two', multiSelect: false, options: [{ label: 'C' }, { label: 'D' }] }], eventId: 'e2', toolUseId: 'call_2', source: 'transcript' });
+      // L'utente risponde al primo set al terminale.
+      bus.emit({ type: 'session.tool', sessionId: s.id, toolName: '', kind: 'tool_result', toolUseId: 'call_1', result: 'A', eventId: 'e3' });
+      await vi.advanceTimersByTimeAsync(0);
+      // Il secondo set NON deve andare perso: viene mostrato.
+      const texts = api.sendMessage.mock.calls.map(c => c[1] as string);
+      expect(texts.some(t => t.includes('Pick two'))).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
 });
 
 // ---------- approvazione del piano (ExitPlanMode) end-to-end ----------

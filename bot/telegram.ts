@@ -1844,9 +1844,11 @@ export class TelegramBot {
 
   // L'utente ha risposto a questa domanda al terminale (il tool_result della
   // tool_use AskUserQuestion è arrivato dal transcript): la domanda in chat non
-  // deve restare appesa coi bottoni. Si marca come risolta e si elimina il flow
-  // — l'utente sta rispondendo al terminale, il flow non serve più; se il
-  // modello farà un'altra domanda, il prossimo session.prompt lo ricrea.
+  // deve restare appesa coi bottoni. Si marca come risolta e si avanza OLTRE il
+  // set — il turno si sblocca solo quando l'intero set è stato inviato, quindi
+  // tutte le domande del set sono risolte. Cancellare l'intero flow qui
+  // perderebbe un set che il modello ha già chiesto: la sua copia hook viene
+  // accodata al flow prima che il tool_result del set precedente arrivi.
   private async markQuestionAnsweredAtTerminal(flow: QuestionFlow): Promise<void> {
     if (flow.messageId && this.chatId) {
       const q = flow.sets[flow.setIndex][flow.qIndex];
@@ -1855,7 +1857,15 @@ export class TelegramBot {
         parse_mode: 'HTML', reply_markup: new InlineKeyboard(),
       }).catch(this.logCatch('prompt edit'));
     }
-    this.deleteFlow(flow);
+    flow.setIndex++;
+    flow.qIndex = 0;
+    flow.multiSel = [];
+    flow.awaitingOther = undefined;
+    if (flow.setIndex < flow.sets.length) {
+      await this.showQuestion(flow);
+    } else {
+      this.deleteFlow(flow);
+    }
   }
 
   // Prompt per il testo libero "Other" (con Cancel per tornare ai bottoni).
@@ -2450,10 +2460,13 @@ export class TelegramBot {
         // ha vinto la dedupe, il toolUseId del set è rimasto undefined: lo si
         // registra qui, così il tool_result (scritto quando l'utente risponde al
         // terminale) può essere correlato alla domanda e marcarla come risolta.
+        // Il set va trovato per firma di contenuto, non per setIndex: in un flow
+        // multi-set il duplicato può riferirsi a un set non corrente.
         if (source === 'transcript' && toolUseId) {
           const flow = this.questionFlows.get(sessionId);
-          if (flow && flow.toolUseIds[flow.setIndex] === undefined) {
-            flow.toolUseIds[flow.setIndex] = toolUseId;
+          if (flow) {
+            const idx = flow.sets.findIndex((set, i) => flow.toolUseIds[i] === undefined && promptDedupeKey(sessionId, set) === dedupeKey);
+            if (idx !== -1) flow.toolUseIds[idx] = toolUseId;
           }
         }
         return;
